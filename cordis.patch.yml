@@ -1,0 +1,9 @@
+# 挂载声明：参考 ds-bot 的 cordis.patch.yml 写法。
+# 本插件独立于 dsh-compaction-basic；tieredCompaction.enabled 默认 false，
+# 开启接管前必须在宿主 profile 侧停用 basic（同一 ctx.compaction 服务位不可双注册）。
+- insert:
+    - id: tiered-compaction
+      name: "@local/dsh-tiered-compaction"
+  id: tiered-compaction
+  config:
+    enabled: false

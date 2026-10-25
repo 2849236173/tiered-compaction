@@ -1,0 +1,21 @@
+{
+  "name": "@local/dsh-tiered-compaction",
+  "description": "分层压缩插件：无损折叠→落盘→软压力→有损摘要四层管线（DSH Cordis 插件）",
+  "version": "0.1.0-m2",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
