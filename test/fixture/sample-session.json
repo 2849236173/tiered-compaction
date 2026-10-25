@@ -1,0 +1,32 @@
+{
+  "name": "sample-session-replay",
+  "description": "A8 效果度量用的固定样例会话：含重复日志块（第 1 层）、超 8k 工具输出（第 2 层）、正常短输出（不处理）",
+  "steps": [
+    {
+      "seq": 1,
+      "type": "tool_output",
+      "tool": "pwsh",
+      "description": "含连续重复日志行的构建输出（触发第 1 层无损折叠）",
+      "content": "build start\ncompiling module a\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\n2026-10-25 INFO heartbeat\ncompiling module b\nbuild done\n"
+    },
+    {
+      "seq": 2,
+      "type": "tool_output",
+      "tool": "read",
+      "description": "12,000 字符大输出（触发第 2 层落盘，>8k）",
+      "content_repeat": { "unit": "The quick brown fox jumps over the lazy dog. ", "times": 240 }
+    },
+    {
+      "seq": 3,
+      "type": "tool_output",
+      "tool": "glob",
+      "description": "短输出（两层均不触发，保持原样）",
+      "content": "src/index.js\nsrc/lossless-fold.js\n"
+    }
+  ],
+  "metrics_definition": {
+    "token_mean": "重放一遍会话后各步骤上下文 token 估值的均值（口径：ctx.tokenMeter 或字符数/4 自算，双跑口径必须一致）",
+    "baseline": "enabled=false 跑一遍记录 token_mean 与摘要调用次数，作为基线",
+    "compare": "enabled=true 跑一遍同 fixture，记录两指标差值；验收线 token 降 ≥30%、摘要调用降 ≥50%"
+  }
+}
