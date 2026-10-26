@@ -46,7 +46,8 @@ test("极小窗口按 82% 下限：永不早于第 3 层 80% 驱逐", () => {
     for (const window of [8000, 20000, 64000, EDGE_LOW]) {
         const threshold = lossyThreshold(window);
         assert.equal(threshold, Math.floor(window * FLOOR_RATIO), `窗口 ${window} 应按下限 82%`);
-        // 用乘法比较而非除法：6560/8000 在浮点下是 0.8199999…，除法断言会假失败
+        // 用乘法而非除法比较：两者数值等价，但乘法让断言直接对着「窗口×0.8」，
+        // 失败时能一眼分清是阈值算错还是测试常量写错（此前排查就卡在这一步）。
         assert.ok(threshold >= Math.floor(window * 0.8) + 1, "绝不能抢在第 3 层 80% 驱逐之前");
     }
 });
