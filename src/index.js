@@ -16,8 +16,8 @@ import { TieredCompactionEngine } from "./engine.js";
 const SERVICE_NAME = "tieredCompaction";
 
 /**
- * M2 骨架期服务：只做可加载性自检与配置解析，业务层随后续里程碑接入。
- * 后续 M3/M4 将把四层管线挂在同一服务实例上。
+ * 旁路观测服务（enabled=false 时注册）：不接管压缩，仅暴露配置与运行状态，
+ * 供并存验证与开关切换观测。压缩行为完全由 basic 负责（验收 A6）。
  */
 class TieredCompactionService extends Service {
     constructor(ctx, config) {
@@ -25,7 +25,7 @@ class TieredCompactionService extends Service {
         /** 已解析的插件配置（enabled 由调用方在挂载层判断）。 */
         this.config = config;
         ctx.logger.info(
-            `dsh-tiered-compaction 骨架已加载（enabled=${config.enabled}，当前为 M2 空实现）`
+            `dsh-tiered-compaction 已加载（enabled=${config.enabled}，未接管压缩，basic 照常工作）`
         );
     }
 }
