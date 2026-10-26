@@ -28,6 +28,10 @@ import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler } from 
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
 import { lossyThreshold, RESERVE_TOKENS } from "./lossy-summarize.js";
+// 四层引擎与工具结果观察者：接管路径必须自己持有它们（D17 关键修复），
+// 不能再依赖 index.js 里那个未被实例化的类。
+import { TieredCompactionEngine } from "./engine.js";
+import { ToolResultObserver } from "./tool-result-observer.js";
 
 /**
  * 摘要指令（与 basic 的 COMPACTION_INSTRUCTION 同义，独立成文以免跨模块耦合）：
@@ -161,6 +165,35 @@ export class TieredCompactionEngineService extends CompactionEngine {
         );
         // P4-1：加载期校验（Cordis 若已按 static Config 校验过则本步幂等无害）
         validateConfig(config);
+        /**
+         * 四层引擎 + 工具结果观察者（D17 关键修复）。
+         *
+         * 为什么必须在这里创建：接管 `compaction` 服务位的是**本类**
+         * （apply 里用 HostContractEngineService）。而四层引擎与观察者原先
+         * 只在 index.js 的 `TieredCompactionEngineService` 里创建——那个类
+         * 在接管路径上**从未被实例化**。
+         * 后果：第 1-2 层（折叠 + 落盘）代码存在但永不执行，archiveDir
+         * 永远是空目录，且不报任何错。D16 审计认定「P1 已修」是假绿：
+         * 修的是一个死类。
+         */
+        this.engine = new TieredCompactionEngine({
+            archiveDir: config.archiveDir,
+            // 不传 tokenMeter / summarizeFn：
+            //   - 第 1-2 层（本类唯一用到的引擎能力）不需要压力读数；
+            //   - 第 3-4 层由本类自己的 pressure / overflow 钩子处理，它们用
+            //     contextWindowOf(session) 与 meter.measure(session) 直读，
+            //     绕过引擎那套不存在的 meter.contextWindow()（D16 P1-0 教训）。
+            // 传一个假 meter 只会制造「看起来接上了」的假象。
+            logger: ctx.logger,
+        });
+        // 观察者：把第 1-2 层接到宿主 session/event 流（工具结果一产生就加工）。
+        // 这是 archiveDir 唯一的真实消费方。
+        this.observer = new ToolResultObserver({ engine: this.engine, ctx });
+        this.observer.register();
+        ctx.logger.info(
+            "dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）" +
+            (config.archiveDir ? "" : "；注意：未配置 archiveDir，落盘层将跳过")
+        );
         /** overflow 重试去重（照 basic 的 WeakMap 口径，按 agent 记账） */
         this.overflowRetries = new WeakMap();
         /** session → agent 映射：清理钩子只拿得到 session，据此找回 agent 清账（P3-3） */
