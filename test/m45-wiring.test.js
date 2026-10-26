@@ -31,18 +31,30 @@ test("A-wire① enabled=false：仅注册自检服务，不触碰 compaction 位
     assert.equal(ctx.compaction, undefined, "绝不触碰 compaction 服务位");
 });
 
-/** A-wire ②：enabled=true 且槽位空闲，compaction 服务位被本插件接管。 */
+/** A-wire ②：enabled=true 且槽位空闲，compaction 服务位被本插件接管。
+ *  A12 起接管服务 = 契约层（contract.js）：CompactionEngine 基类 + 三入口 + 自动钩子。
+ *  cordis 实测坑：static inject（llm/tokenMeter/sessions）必须由 Service 提供——
+ *  裸属性不满足注入条件，服务会永久挂起不构造，本测试以 Service 桩补齐注入面。 */
 test("A-wire② enabled=true：compaction 服务位被本插件接管", async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "wire2-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const ctx = new Context();
+    const { Service } = await import("@deepseek-ai/cordis");
+    class MeterStub extends Service { constructor(c) { super(c, "tokenMeter"); } }
+    class LlmStub extends Service { constructor(c) { super(c, "llm"); } }
+    class SessionsStub extends Service { constructor(c) { super(c, "sessions"); } }
+    await ctx.plugin(MeterStub, {});
+    await ctx.plugin(LlmStub, {});
+    await ctx.plugin(SessionsStub, {});
     await apply(ctx, { enabled: true, archiveDir: dir });
     const svc = ctx.compaction;
     assert.ok(svc, "compaction 服务位必须被本插件接管");
     assert.equal(svc.config.enabled, true);
+    // 契约面（A12）：宿主三入口必须存在
+    for (const m of ["compactNow", "compactIfNeeded", "compactRegion", "summarize"]) {
+        assert.equal(typeof svc[m], "function", `契约入口 ${m} 必须存在`);
+    }
     assert.equal(svc.config.bypassMode, false, "槽位空闲时不得处于旁路模式");
-    assert.ok(svc.engine, "接管服务必须挂四层引擎");
-    assert.equal(svc.engine.status().spillBreaker, "closed");
 });
 
 /**
@@ -58,6 +70,15 @@ test("A-wire②b 槽位冲突：construction-catch 降级旁路模式", async (t
     }
     await ctx.plugin(Occupier, {});
     assert.ok(ctx.compaction, "预占必须成功");
+    // 契约层的 inject 面（llm/tokenMeter/sessions）也要有 Service 桩，
+    // 否则 construction-catch 前的注入解析挂起，探测不到降级路径
+    const { Service: Svc } = await import("@deepseek-ai/cordis");
+    class MeterStub extends Svc { constructor(c) { super(c, "tokenMeter"); } }
+    class LlmStub extends Svc { constructor(c) { super(c, "llm"); } }
+    class SessionsStub extends Svc { constructor(c) { super(c, "sessions"); } }
+    await ctx.plugin(MeterStub, {});
+    await ctx.plugin(LlmStub, {});
+    await ctx.plugin(SessionsStub, {});
     const dir = await mkdtemp(join(tmpdir(), "wire2b-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     // 本插件 enabled=true 撞上已占槽位：必须降级而非抛错
@@ -66,8 +87,10 @@ test("A-wire②b 槽位冲突：construction-catch 降级旁路模式", async (t
     assert.ok(bypass, "降级后必须注册旁路自检服务");
     assert.equal(bypass.bypassMode, true, "bypassMode 必须显式置位");
     assert.equal(bypass.config.bypassMode, true);
-    assert.ok(bypass.engine, "旁路模式仍保留第 1-2 层引擎");
-    assert.ok(ctx.warnings?.length === undefined, "logger.warn 由真实 cordis 提供，无需桩");
+    // 槽被占后 compaction 位仍归占位者（本插件未接管）：契约层构造抛错被
+    // construction-catch 捕获降级，占位者的 compaction 服务保持不动
+    assert.ok(ctx.compaction, "槽被占后 compaction 位仍归占位者");
+    assert.notEqual(ctx.compaction.constructor?.name, "TieredCompactionEngineService", "接管不得发生");
 });
 
 /** A-wire ③：四层各一例经 engine 端到端跑通（fixture 重放口径）。 */

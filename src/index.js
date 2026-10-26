@@ -11,6 +11,10 @@
  */
 import { Service } from "@deepseek-ai/cordis";
 import { TieredCompactionEngine } from "./engine.js";
+// A12 契约层：宿主三入口 + 自动钩子的真实实现（enabled=true 的接管路径）。
+// 注意：本模块名与 TieredCompactionEngineService 同名导出会与下方 M4.5 服务类
+// 冲突，故以契约类名义导入并替换接管服务的实现。
+import { TieredCompactionEngineService as HostContractEngineService } from "./contract.js";
 
 /** 本插件在 Cordis 中的服务位名（不与宿主 `compaction` 冲突）。 */
 const SERVICE_NAME = "tieredCompaction";
@@ -77,7 +81,12 @@ class TieredCompactionBypassService extends Service {
 /**
  * Cordis 插件入口。
  * @param {import('@deepseek-ai/cordis').Context} ctx 宿主上下文
- * @param {{enabled?: boolean, bypassMode?: boolean, archiveDir?: string}} config 插件配置；enabled 默认 false（可并存铁律）
+ * @param {{enabled?: boolean, bypassMode?: boolean, archiveDir?: string,
+ *          tokenMeter?: object, summarizeFn?: Function, summaryTarget?: object}} config
+ *   插件配置；enabled 默认 false（可并存铁律）。enabled=true 时接管走
+ *   宿主契约层（src/contract.js，A12）：CompactionEngine 基类 + static inject
+ *   三入口 + agent/pre-step 自动钩子；config 中的 tokenMeter/summarizeFn/
+ *   summaryTarget 仅作为测试桩与兜底（宿主真链路从 ctx 注入解析）。
  */
 export async function apply(ctx, config = {}) {
     const resolved = {
@@ -98,7 +107,9 @@ export async function apply(ctx, config = {}) {
     // （cordis 实测：ctx.plugin() 返回 thenable fiber，构造发生在 await 后，
     //   报错文案 `service "<name>" has been registered at <owner>`。）
     try {
-        await ctx.plugin(TieredCompactionEngineService, {
+        // A12 起接管服务 = 宿主契约层（CompactionEngine 基类 + 三入口 + 自动钩子）。
+        // 契约层内部仍持有四层引擎（engine.js）的依赖；config 桩仅测试用。
+        await ctx.plugin(HostContractEngineService, {
             ...resolved,
             bypassMode: config.bypassMode ?? false,
             archiveDir: config.archiveDir,
