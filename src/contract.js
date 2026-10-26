@@ -27,7 +27,7 @@ import {
 import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
-import { lossyThreshold, RESERVE_TOKENS } from "./lossy-summarize.js";
+import { lossyThreshold, RESERVE_TOKENS, HEADROOM_TOKENS } from "./lossy-summarize.js";
 // 四层引擎与工具结果观察者：接管路径必须自己持有它们（D17 关键修复），
 // 不能再依赖 index.js 里那个未被实例化的类。
 import { TieredCompactionEngine } from "./engine.js";
@@ -44,8 +44,14 @@ const COMPACTION_INSTRUCTION = [
     "Output only the checkpoint text: do not call any tool or take any other action.",
 ].join("\n");
 
-/** 同一 agent 的溢出恢复最多重试次数（照 basic 的 maxOverflowRetries 默认口径）。 */
-const MAX_OVERFLOW_RETRIES = 3;
+/**
+ * 溢出恢复默认重试次数上限。
+ *
+ * D17 对齐原版：basic 的 maxOverflowRetries 默认是 **1**，旧实现写死 3。
+ * 3 次意味着上下文真溢出时要多打 2 次必败的 LLM 请求——用户多付钱、多等，
+ * 而原版认为一次不成就该交回上一层。现改为可配、默认 1。
+ */
+const DEFAULT_MAX_OVERFLOW_RETRIES = 1;
 
 /** 缺窗口读数时的兜底窗口（保守取值，宁可晚压也不误压）。 */
 const FALLBACK_CONTEXT_WINDOW = 128_000;
@@ -138,7 +144,12 @@ export class TieredCompactionEngineService extends CompactionEngine {
     /**
      * 配置结构（P4-1）：与 basic 一样用 Schemastery 声明，配置写错在加载期就报，
      * 而不是运行到一半才暴露（比如 archiveDir 传了对象）。
-     * 注意：只做类型校验不做必填——archiveDir 缺省时落盘层自动跳过。
+     *
+     * D17 对照原版补齐（用户定「择优选用」）：原版 11 个字段里，
+     * 真正影响正确性的是「按模型分别设阈值」——因为不同模型窗口差异巨大
+     * （128k vs 1M 差 8 倍），一套全局公式必然对某一端不合适。
+     * 其余字段（retainRatio 等）暂不做成可配：当前固定值已由
+     * test/d17-threshold.test.js 钉死语义，暴露成配置项反而增加误配面。
      */
     static Config = z.object({
         enabled: z.boolean().default(false),
@@ -149,7 +160,58 @@ export class TieredCompactionEngineService extends CompactionEngine {
             provider: z.string(),
             model: z.string(),
         }),
+        /** 全局阈值占比（第 4 层触发线），默认 0.85；下限由公式内部保底 0.82。 */
+        thresholdRatio: z.number(),
+        /** 全局压缩余量（token），默认 65536（原版 basic 默认值）。 */
+        headroomTokens: z.number(),
+        /** 溢出恢复最大重试次数，默认 1（对齐原版 basic，旧实现写死 3 偏贵）。 */
+        maxOverflowRetries: z.number(),
+        /**
+         * 按模型覆盖阈值：`[{ provider, model, thresholdRatio?, headroomTokens?, maxOverflowRetries? }]`
+         * 匹配不到则不覆盖（沿用全局值）。数组顺序即优先级，先匹配先用。
+         */
+        modelPolicies: z.array(z.object({
+            provider: z.string(),
+            model: z.string(),
+            thresholdRatio: z.number(),
+            headroomTokens: z.number(),
+            maxOverflowRetries: z.number(),
+        })),
     });
+
+    /**
+     * 解析某个模型路由的有效策略（全局值 + 精确匹配覆盖）。
+     *
+     * 为什么需要：不同模型窗口差 8 倍以上，同一套 headroom 对小窗口是
+     * 灾难（原版在新窗口下直接抛「无压力预算」），对 1M 窗口又过于保守。
+     * 允许按 provider/model 精确覆盖，匹配不到就回落全局。
+     *
+     * @param {{provider?: string, model?: string}} [target] 当前路由（可缺省）
+     * @returns {{thresholdRatio: number, headroomTokens: number, maxOverflowRetries: number}}
+     */
+    policyFor(target) {
+        const base = {
+            thresholdRatio: this.config.thresholdRatio ?? 0.85,
+            headroomTokens: this.config.headroomTokens ?? HEADROOM_TOKENS,
+            maxOverflowRetries: this.config.maxOverflowRetries ?? DEFAULT_MAX_OVERFLOW_RETRIES,
+        };
+        const list = this.config.modelPolicies;
+        // 路由信息可能缺失（会话早期还没有 requestHeader），也可能只填了一半。
+        // 这些情况一律回落全局策略，**绝不抛错**——压缩层不能因为查不到路由
+        // 就让整个 pre-step 钩子炸掉（本插件的基本约束：任何异常只降级）。
+        if (!Array.isArray(list)) return base;
+        if (target === undefined || target === null) return base;
+        if (typeof target.provider !== "string" || typeof target.model !== "string") return base;
+        const hit = list.find(
+            (p) => p?.provider === target.provider && p?.model === target.model,
+        );
+        if (hit === undefined) return base;
+        return {
+            thresholdRatio: hit.thresholdRatio ?? base.thresholdRatio,
+            headroomTokens: hit.headroomTokens ?? base.headroomTokens,
+            maxOverflowRetries: hit.maxOverflowRetries ?? base.maxOverflowRetries,
+        };
+    }
 
     /** @param {object} config 插件配置（enabled/archiveDir/summaryTarget 由 apply 解析） */
     constructor(ctx, config = {}) {
@@ -268,8 +330,15 @@ export class TieredCompactionEngineService extends CompactionEngine {
             this.ctx.emit("tiered-compaction/evict", { session, pressure, at: Date.now() });
             this.ctx.logger.warn(`tiered-compaction: 窗口压力 ${(pressure * 100).toFixed(0)}%（80%），已广播易失内容驱逐事件`);
         }
-        // 第 4 层触发判定：overflow 直接触发；pressure 达阈值触发
-        const threshold = lossyThreshold(window);
+        // 第 4 层触发判定：overflow 直接触发；pressure 达阈值触发。
+        // 阈值按**当前路由模型**取策略：不同模型窗口差 8 倍，
+        // 同一套 headroom 对小窗口是灾难、对 1M 窗口又过于保守
+        // （D17 对照原版 basic 的 modelPolicies 后补齐）。
+        const policy = this.policyFor(this._targetFromAgent(agent));
+        const threshold = lossyThreshold(window, {
+            thresholdRatio: policy.thresholdRatio,
+            headroomTokens: policy.headroomTokens,
+        });
         const need = trigger === "context-overflow" || current >= threshold;
         if (!need) return null;
         if (trigger === "context-overflow") {
@@ -336,7 +405,11 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // 无摘要路由时不接管：交回宿主（保留原始错误，不掩盖）
             if (target === undefined) return next();
             const retries = this.overflowRetries.get(agent) ?? 0;
-            if (retries >= MAX_OVERFLOW_RETRIES) return next();
+            // 重试上限按路由模型取策略（可被 modelPolicies 覆盖），默认 1
+            // ——对齐原版 basic，避免为必败的请求多付 2 次 LLM 费用。
+            const overflowPolicy = this.policyFor(this._targetFromAgent(agent));
+            const maxRetries = overflowPolicy.maxOverflowRetries ?? DEFAULT_MAX_OVERFLOW_RETRIES;
+            if (retries >= maxRetries) return next();
             const generation = agent.session.surface.replaceGeneration;
             let result;
             try {
