@@ -15,6 +15,37 @@ export const DEFAULT_SPILL_THRESHOLD = 8000;
 export const DEFAULT_PREVIEW_LIMIT = 1500;
 
 /**
+ * 生成「首尾各留一段」的预览（D17 验收 P2-1 建议）。
+ *
+ * 为什么不能只留开头：工具输出的**结论常在末尾**——错误码、汇总行、
+ * `exit code: N`、测试结果的 `pass/fail` 计数、git 的 `N files changed`。
+ * 只留开头会让模型看到一堆中间过程却看不到结论，反而促使它重跑命令。
+ *
+ * 分配策略：尾部优先（结论更重要），头部占 1/3，尾部占 2/3，
+ * 中间用一行标记说明省略了多少字符并可查存档。
+ *
+ * @param {string} text 原始文本
+ * @param {number} limit 总字符上限
+ * @returns {string} 首尾拼接的预览
+ */
+export function headTailPreview(text, limit = DEFAULT_PREVIEW_LIMIT) {
+    if (text.length <= limit) return text;
+    // 省略标记本身要计入总长——A2 验收要求预览 ≤1.5k **字符**（含标记），
+    // 不能因为多插一行说明就超限。
+    const markerReserve = 60; // "…[中间省略 N 字符，完整内容见下方存档]" 预留
+    const budget = Math.max(0, limit - markerReserve);
+    const headSize = Math.floor(budget / 3);
+    const tailSize = budget - headSize;
+    const head = text.slice(0, headSize);
+    const tail = text.slice(text.length - tailSize);
+    const omitted = text.length - headSize - tailSize;
+    const marker = `\n…[中间省略 ${omitted} 字符，完整内容见下方存档]\n`;
+    // 兜底：极端情况下（omitted 位数特别多）再裁一次，保证绝不超过 limit
+    const composed = `${head}${marker}${tail}`;
+    return composed.length <= limit ? composed : composed.slice(0, limit);
+}
+
+/**
  * 计算文本的 SHA-256 十六进制摘要。
  * @param {string} text
  * @returns {string}
@@ -62,7 +93,9 @@ export async function spillIfNeeded(text, archiveDir, baseName, options = {}) {
     await writeFile(path, text, "utf8");
     const digest = sha256(text);
     const size = byteLength(text);
-    const preview = text.length <= previewLimit ? text : text.slice(0, previewLimit);
+    // 预览首尾各留一段：结论常在末尾（错误码/汇总行/pass 计数），
+    // 只留开头会让模型看不到结论、反而去重跑命令（D17 验收 P2-1）。
+    const preview = headTailPreview(text, previewLimit);
     return { spilled: true, path, sha256: digest, size, preview };
 }
 
