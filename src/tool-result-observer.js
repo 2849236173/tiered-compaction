@@ -80,10 +80,19 @@ export class ToolResultObserver {
     /** 注册宿主钩子：工具结果产生即加工。 */
     register() {
         if (!this.enabled) return;
-        this.ctx.on("session/event", async (payload) => {
-            // 宿主钩子签名在不同版本上可能是 ({session, event}) 或 (session, event)
-            const session = payload?.session ?? payload?.[0];
-            const event = payload?.event ?? payload?.[1];
+        // 宿主钩子签名是**位置参数** `(session, event)`——见 basic 的实现
+        // （dsh-compaction-basic/lib/index.js:856）与自家 contract.js:343。
+        //
+        // 这里曾经写成 `(payload) => payload?.session ?? payload?.[0]`，结果
+        // session 与 event 全是 undefined，函数在第一行就 return——第 1-2 层
+        // 在真实会话里从未执行过，且不报任何错（archiveDir 一直不创建正是这个
+        // 原因）。单测直接调 handleEvent，绕过了钩子签名，所以全绿。
+        // 教训与 D16 三实锤同源：测试桩能过 ≠ 宿主能跑。
+        //
+        // 兼容写法保留：个别版本若按对象传 ({session, event}) 也能接住。
+        this.ctx.on("session/event", async (first, second) => {
+            const session = first?.session ?? (Array.isArray(first) ? first[0] : first);
+            const event = first?.event ?? (Array.isArray(first) ? first[1] : second);
             if (session === undefined || event === undefined) return;
             try {
                 await this.handleEvent(session, event);
