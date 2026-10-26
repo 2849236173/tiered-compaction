@@ -24,6 +24,19 @@ export function sha256(text) {
 }
 
 /**
+ * 计算文本的 UTF-8 字节长度。
+ *
+ * 为什么不用 `text.length`：那是 JS 字符数（UTF-16 code unit），对中文/emoji
+ * 会严重低估体积——8,000 个汉字约 24,000 字节，用字符数判断会让「8k 阈值」
+ * 在大段中文输出上失效（D16 审计 P3-1）。阈值与 size 口径必须都是字节。
+ * @param {string} text
+ * @returns {number}
+ */
+export function byteLength(text) {
+    return Buffer.byteLength(text, "utf8");
+}
+
+/**
  * 把超阈值文本落盘并生成预览。
  *
  * @param {string} text 待处理的工具输出
@@ -36,13 +49,14 @@ export function sha256(text) {
 export async function spillIfNeeded(text, archiveDir, baseName, options = {}) {
     const threshold = options.threshold ?? DEFAULT_SPILL_THRESHOLD;
     const previewLimit = options.previewLimit ?? DEFAULT_PREVIEW_LIMIT;
-    if (text.length <= threshold) return null;
+    // P3-1 修复：按 UTF-8 字节数比较，与落盘时写入的 size 口径一致
+    if (byteLength(text) <= threshold) return null;
 
     await mkdir(archiveDir, { recursive: true });
     const path = join(archiveDir, `${baseName}.txt`);
     await writeFile(path, text, "utf8");
     const digest = sha256(text);
-    const size = Buffer.byteLength(text, "utf8");
+    const size = byteLength(text);
     const preview = text.length <= previewLimit ? text : text.slice(0, previewLimit);
     return { spilled: true, path, sha256: digest, size, preview };
 }

@@ -51,11 +51,32 @@ export class TieredCompactionEngine {
      */
     async processToolOutput(text, at) {
         // 仲裁器（M4）：先折叠、折叠后仍 >8k 才落盘，一份内容只归一层。
-        return arbitrate(text, at, {
+        const result = await arbitrate(text, at, {
             archiveDir: this.deps.archiveDir,
             lineage: this.lineage,
             spillBreaker: this.spillBreaker,
         });
+        // 记下这次落盘的存档信息，供宿主替换事件写进预览（观察者取用）
+        this.spillInfo ??= new Map();
+        const entry = this.lineage.toArray().findLast(
+            (item) => item.originalLocation === `node#${at.seq}` && item.replacedBy === "spill-to-disk",
+        );
+        if (entry !== undefined) {
+            this.spillInfo.set(String(at.seq), {
+                path: entry.newLocation,
+                sha256: entry.digest,
+            });
+        }
+        return result;
+    }
+
+    /**
+     * 取某节点最近一次落盘的存档信息（无落盘返回 undefined）。
+     * @param {number|string} seq 节点 seq
+     * @returns {{path: string, sha256?: string, size?: number} | undefined}
+     */
+    lastSpillInfo(seq) {
+        return this.spillInfo?.get(String(seq));
     }
 
     /**
