@@ -121,7 +121,12 @@ export class ToolResultObserver {
             return;
         }
         // 第 1-2 层：折叠 → （折叠后仍 >8k 字节才）落盘
-        const { text: processed, layers } = await this.engine.processToolOutput(text, { seq: event.seq });
+        // 传 sessionId：存档文件名据此区分会话，避免跨会话 seq 重号互相覆盖
+        // （D17 验收 P0-1：旧文件名只有 arbitrated-<seq>，不同会话必然重号）
+        const { text: processed, layers } = await this.engine.processToolOutput(text, {
+            seq: event.seq,
+            sessionId: session?.id,
+        });
         if (processed === text || layers.length === 0) {
             this.done.add(event.seq);
             return;

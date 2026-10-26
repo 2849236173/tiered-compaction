@@ -39,9 +39,14 @@ export function byteLength(text) {
 /**
  * 把超阈值文本落盘并生成预览。
  *
+ * **绝不覆盖已有存档**（D17 验收 P0-1）：同名文件已存在时追加 `-2`/`-3`…
+ * 直到找到空位。这条护栏放在本函数内而不是只靠调用方传对名字，因为
+ * 存档是「压缩后唯一能还原原文的东西」——一旦被静默覆盖，谱系表仍指向
+ * 该路径，回读会拿到**别人的内容**且无任何告警，属于越用越坏。
+ *
  * @param {string} text 待处理的工具输出
  * @param {string} archiveDir 存档目录（不存在则创建）
- * @param {string} baseName 存档文件名主体（建议带会话与序号，避免覆盖）
+ * @param {string} baseName 存档文件名主体（调用方应带会话与序号，减少冲突）
  * @param {{threshold?: number, previewLimit?: number}} [options]
  * @returns {Promise<null | {spilled: true, path: string, sha256: string, size: number, preview: string}>}
  *   未超阈值返回 null（调用方保持原文）；超阈值返回落盘结果。
@@ -53,12 +58,39 @@ export async function spillIfNeeded(text, archiveDir, baseName, options = {}) {
     if (byteLength(text) <= threshold) return null;
 
     await mkdir(archiveDir, { recursive: true });
-    const path = join(archiveDir, `${baseName}.txt`);
+    const path = await uniquePath(archiveDir, baseName);
     await writeFile(path, text, "utf8");
     const digest = sha256(text);
     const size = byteLength(text);
     const preview = text.length <= previewLimit ? text : text.slice(0, previewLimit);
     return { spilled: true, path, sha256: digest, size, preview };
+}
+
+/**
+ * 找一个尚未被占用的存档路径（不覆盖任何已有文件）。
+ *
+ * 用 `wx` 标志原子地「创建或失败」，避免先检查后写入之间的竞态：
+ * 两个并发落盘抢同一名字时，只有一个能建成，另一个自然落到下一个后缀。
+ *
+ * @param {string} archiveDir 存档目录
+ * @param {string} baseName 文件名主体
+ * @returns {Promise<string>} 可用路径
+ */
+async function uniquePath(archiveDir, baseName) {
+    const { open } = await import("node:fs/promises");
+    for (let n = 1; n <= 1000; n += 1) {
+        const name = n === 1 ? `${baseName}.txt` : `${baseName}-${n}.txt`;
+        const candidate = join(archiveDir, name);
+        try {
+            // wx：文件已存在则抛 EEXIST，绝不截断已有内容
+            const handle = await open(candidate, "wx");
+            await handle.close();
+            return candidate;
+        } catch (error) {
+            if (error?.code !== "EEXIST") throw error;
+        }
+    }
+    throw new Error(`spill-to-disk: ${baseName} 连续 1000 个后缀都被占用，拒绝落盘以免覆盖`);
 }
 
 /**
