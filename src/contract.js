@@ -151,6 +151,14 @@ export class TieredCompactionEngineService extends CompactionEngine {
     constructor(ctx, config = {}) {
         super(ctx); // Service(ctx, 'compaction')：槽冲突在此同步抛错 → apply 降级旁路
         this.config = config;
+        // 观测：接管成功必须留痕。此前只有 index.js 里那个未被使用的类打日志，
+        // 真实接管路径（本类）完全静默——「没看到已接管」无法区分「没生效」
+        // 还是「生效了但没打」。这条日志是 enabled=true 路径的唯一存在性证据。
+        ctx.logger.info(
+            "dsh-tiered-compaction 已接管 compaction 服务位（enabled=true" +
+            (config.archiveDir ? `，archiveDir=${config.archiveDir}` : "，无 archiveDir（落盘层跳过）") +
+            "）"
+        );
         // P4-1：加载期校验（Cordis 若已按 static Config 校验过则本步幂等无害）
         validateConfig(config);
         /** overflow 重试去重（照 basic 的 WeakMap 口径，按 agent 记账） */
