@@ -15,6 +15,8 @@ import { TieredCompactionEngine } from "./engine.js";
 // 注意：本模块名与 TieredCompactionEngineService 同名导出会与下方 M4.5 服务类
 // 冲突，故以契约类名义导入并替换接管服务的实现。
 import { TieredCompactionEngineService as HostContractEngineService } from "./contract.js";
+// P1/P2-1 修补：工具结果观察者——把第 1-3 层真正接到宿主会话事件流。
+import { ToolResultObserver } from "./tool-result-observer.js";
 
 /** 本插件在 Cordis 中的服务位名（不与宿主 `compaction` 冲突）。 */
 const SERVICE_NAME = "tieredCompaction";
@@ -51,9 +53,12 @@ class TieredCompactionEngineService extends Service {
             summaryTarget: config.summaryTarget,
             logger: ctx.logger,
         });
+        // P1 + P2-1：观察者把第 1-3 层接到宿主会话事件（工具结果压缩 + 80% 驱逐）
+        this.observer = new ToolResultObserver({ engine: this.engine, ctx });
+        this.observer.register();
         ctx.logger.info(
             `dsh-tiered-compaction 已接管 compaction 服务位` +
-            (config.bypassMode ? "（旁路模式：仅第 1-2 层）" : "（四层管线）")
+            (config.bypassMode ? "（旁路模式：仅第 1-2 层）" : "（四层管线 + 工具结果观察者）")
         );
     }
 }
@@ -71,6 +76,9 @@ class TieredCompactionBypassService extends Service {
             archiveDir: config.archiveDir,
             logger: ctx.logger,
         });
+        // 旁路模式下第 1-2 层照样服务（与 rollover 形态互补，设计稿 §9-6）
+        this.observer = new ToolResultObserver({ engine: this.engine, ctx });
+        this.observer.register();
         ctx.logger.warn(
             "dsh-tiered-compaction：compaction 服务位已被占用，降级为第 1-2 层旁路模式" +
             "（无损折叠+落盘仍可用；第 3-4 层挂起）"

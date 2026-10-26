@@ -9,7 +9,7 @@
  * 软压力最后」的顺序短路：折叠后已 ≤ 阈值的内容不再落盘。
  */
 import { foldRepeatedLines } from "./lossless-fold.js";
-import { spillIfNeeded, DEFAULT_SPILL_THRESHOLD } from "./spill-to-disk.js";
+import { spillIfNeeded, DEFAULT_SPILL_THRESHOLD, byteLength } from "./spill-to-disk.js";
 
 /**
  * 单层熔断器。
@@ -77,8 +77,9 @@ export async function arbitrate(text, at, deps) {
         layers.push("lossless-fold");
         lineage.record(`node#${at.seq}`, `fold:${at.seq}`, "lossless-fold");
     }
-    // 第 2 层：落盘（带熔断；>8k 才触发，仲裁器保证不与其它层重复处理）
-    if (current.length > DEFAULT_SPILL_THRESHOLD) {
+    // 第 2 层：落盘（带熔断；>8k 字节才触发，仲裁器保证不与其它层重复处理）
+    // P3-1：阈值口径统一为 UTF-8 字节数，与 spillIfNeeded 内部判断一致
+    if (byteLength(current) > DEFAULT_SPILL_THRESHOLD) {
         const spill = deps.spillBreaker
             ? await deps.spillBreaker.exec(() => spillIfNeeded(current, deps.archiveDir, `arbitrated-${at.seq}`))
             : await spillIfNeeded(current, deps.archiveDir, `arbitrated-${at.seq}`);

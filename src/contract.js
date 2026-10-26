@@ -22,10 +22,15 @@ import {
     ManualCompactionError,
     compactCheckpointSource,
     toolPairingBalancedBefore,
+    toolPairingBalancedAfter,
 } from "@deepseek-ai/dsh-compaction";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
+import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
 import { lossyThreshold, RESERVE_TOKENS } from "./lossy-summarize.js";
+
+/** 同一 agent 的溢出恢复最多重试次数（照 basic 的 maxOverflowRetries 默认口径）。 */
+const MAX_OVERFLOW_RETRIES = 3;
 
 /** 与 basic 相同的 checkpoint 框架文案（投影层据此识别摘要节点）。 */
 const SUMMARY_OPEN_TAG = "<compacted-summary>";
@@ -50,17 +55,68 @@ function frameSummaryText(summary) {
 const estimateTokens = (text) => Math.ceil(text.length / 4);
 
 /**
+ * 配置加载期校验（P4-1）。
+ *
+ * 为什么要有：没有 schema 时，`archiveDir: 123`（类型错）或 `enabled: "yes"`
+ * 会一路带进运行期，最坏结果是被当成 truthy/falsy 静默走错分支——
+ * 我们已经在 D15 被「缺 enabled:true 静默不生效」坑过一次，不能再靠运气。
+ * @param {object} config
+ * @throws {TypeError} 字段类型不对时
+ */
+function validateConfig(config) {
+    const shape = {
+        enabled: "boolean",
+        auto: "boolean",
+        bypassMode: "boolean",
+        archiveDir: "string",
+        summaryTarget: "object",
+        summarizeFn: "function",
+        tokenMeter: "object",
+    };
+    for (const [key, expected] of Object.entries(shape)) {
+        const value = config?.[key];
+        if (value === undefined) continue; // 未提供 = 走默认，合法
+        const actual = Array.isArray(value) ? "array" : typeof value;
+        if (actual !== expected) {
+            throw new TypeError(
+                `tiered-compaction: 配置项 ${key} 应为 ${expected}，实得 ${actual}`,
+            );
+        }
+    }
+}
+
+/**
  * 宿主契约引擎服务。
  */
 export class TieredCompactionEngineService extends CompactionEngine {
     static inject = ["llm", "tokenMeter", "sessions"];
 
+    /**
+     * 配置结构（P4-1）：与 basic 一样用 Schemastery 声明，配置写错在加载期就报，
+     * 而不是运行到一半才暴露（比如 archiveDir 传了对象）。
+     * 注意：只做类型校验不做必填——archiveDir 缺省时落盘层自动跳过。
+     */
+    static Config = z.object({
+        enabled: z.boolean().default(false),
+        auto: z.boolean().default(true),
+        archiveDir: z.string(),
+        bypassMode: z.boolean().default(false),
+        summaryTarget: z.object({
+            provider: z.string(),
+            model: z.string(),
+        }),
+    });
+
     /** @param {object} config 插件配置（enabled/archiveDir/summaryTarget 由 apply 解析） */
     constructor(ctx, config = {}) {
         super(ctx); // Service(ctx, 'compaction')：槽冲突在此同步抛错 → apply 降级旁路
         this.config = config;
+        // P4-1：加载期校验（Cordis 若已按 static Config 校验过则本步幂等无害）
+        validateConfig(config);
         /** overflow 重试去重（照 basic 的 WeakMap 口径，按 agent 记账） */
         this.overflowRetries = new WeakMap();
+        /** session → agent 映射：清理钩子只拿得到 session，据此找回 agent 清账（P3-3） */
+        this.overflowAgents = new WeakMap();
         if (config.auto ?? true) this._registerAutomaticCompaction();
     }
 
@@ -72,16 +128,34 @@ export class TieredCompactionEngineService extends CompactionEngine {
      */
     async compactNow(agent, signal, sourceCommandId) {
         signal?.throwIfAborted();
-        if (typeof agent?.runMaintenance !== "function") {
+        const result = typeof agent?.runMaintenance !== "function"
             // 非 agent 桩（测试/探针）：直接走事务，语义等价
-            return this._compactWholeSurface(agent, { sourceCommandId, signal });
+            ? await this._compactWholeSurface(agent, { sourceCommandId, signal })
+            : await agent.runMaintenance(async (agentSignal) => {
+                // 兜底：无外部 signal 时用常开信号（AbortSignal.any 要求非空数组）
+                const signals = [agentSignal, signal].filter(Boolean);
+                const operationSignal = signals.length > 0 ? AbortSignal.any(signals) : agentSignal;
+                return this._compactWholeSurface(agent, { sourceCommandId, signal: operationSignal });
+            });
+        // P4-2：事务提交后把会话落盘（basic 同款 durability checkpoint）。
+        // 缺这一步时压缩结果只在内存里，进程崩溃会丢掉整次压缩。
+        await this._flushAfterCommit();
+        return result;
+    }
+
+    /**
+     * 压缩提交后的持久化检查点（P4-2）。
+     * 失败按 basic 口径抛 persistence 错误：压缩已提交但没落地，属于耐久性缺陷，
+     * 不能静默放过（否则用户以为省了 token，重启后发现没省）。
+     */
+    async _flushAfterCommit() {
+        const sessions = this.ctx.sessions;
+        if (typeof sessions?.flush !== "function") return;
+        try {
+            await sessions.flush();
+        } catch (error) {
+            throw new ManualCompactionError("persistence", "manual compaction durability checkpoint failed", { cause: error });
         }
-        return agent.runMaintenance(async (agentSignal) => {
-            // 兜底：无外部 signal 时用常开信号（AbortSignal.any 要求非空数组）
-            const signals = [agentSignal, signal].filter(Boolean);
-            const operationSignal = signals.length > 0 ? AbortSignal.any(signals) : agentSignal;
-            return this._compactWholeSurface(agent, { sourceCommandId, signal: operationSignal });
-        });
     }
 
     /**
@@ -170,6 +244,59 @@ export class TieredCompactionEngineService extends CompactionEngine {
             }
             return next();
         });
+
+        // ── P2-2：真实溢出后的恢复压缩（照 basic 861-887 的钩子语义）──
+        // 背景：审计发现只注册 pre-step，provider 报 CONTEXT_WINDOW_EXCEEDED 后
+        // 根本没有恢复路径——真溢出时压缩永不触发。
+        ctx.on("agent/request-error", async ({ agent, failure, signal }, next) => {
+            if (failure?.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal?.aborted) return next();
+            this.overflowAgents.set(agent.session, agent);
+            const target = this.config.summaryTarget ?? this._targetFromAgent(agent);
+            // 无摘要路由时不接管：交回宿主（保留原始错误，不掩盖）
+            if (target === undefined) return next();
+            const retries = this.overflowRetries.get(agent) ?? 0;
+            if (retries >= MAX_OVERFLOW_RETRIES) return next();
+            const generation = agent.session.surface.replaceGeneration;
+            let result;
+            try {
+                result = await this.compactIfNeeded(agent, "context-overflow", signal);
+            } catch (recoveryError) {
+                const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+                // 表面已有持久进展 → 从替换后的表面重试（不重复压同一段）
+                if (!signal?.aborted && agent.session.surface.replaceGeneration > generation) {
+                    ctx.logger.warn(
+                        `tiered-compaction: 溢出恢复压缩失败但表面已有进展（${message}），从替换面重试`
+                    );
+                    this.overflowRetries.set(agent, retries + 1);
+                    return { kind: "retry" };
+                }
+                ctx.logger.warn(
+                    `tiered-compaction: 溢出恢复压缩失败（${message}）；` +
+                    `${signal?.aborted ? "已取消，不再重试" : "保留原始请求错误"}`
+                );
+                return next();
+            }
+            if (signal?.aborted || agent.session.surface.replaceGeneration <= generation) return next();
+            if (result !== null) {
+                ctx.logger.info(
+                    `compaction (context overflow recovery): shadowed ${result.shadowedSeqs.length} nodes ` +
+                    `(seqs ${result.shadowedRange.start}-${result.shadowedRange.end})`
+                );
+            }
+            this.overflowRetries.set(agent, retries + 1);
+            return { kind: "retry" };
+        });
+
+        // ── P3-3：overflowRetries 双钩子清理（照 basic 853-860）──
+        // 只增不清的 WeakMap 会让同一 agent 在长时间会话里永久失去溢出恢复能力。
+        ctx.on("agent/status", ({ agent, status }) => {
+            if (status === "idle") this.overflowRetries.delete(agent);
+        });
+        ctx.on("session/event", (session, event) => {
+            if (event?.type !== "assistant/message") return;
+            const agent = this.overflowAgents.get(session);
+            if (agent !== undefined) this.overflowRetries.delete(agent);
+        });
     }
 
     /* ---------------- 内部：选区与事务 ---------------- */
@@ -217,7 +344,15 @@ export class TieredCompactionEngineService extends CompactionEngine {
             keepFromIdx -= 1;
         }
         if (keepFromIdx <= firstIdx) return null;
-        return { start: surfaceNodes[firstIdx], end: surfaceNodes[keepFromIdx - 1] };
+        // P3-2 修复：整段「好」还不够，要保证被替换区间末尾不把 tool-call/result
+        // 配对劈成两半——只往前配平会留下 result 在区间内、call 在区间外（或反之）。
+        // 从区间末尾往前收，直到区间自身也是配平的。
+        let endIdx = keepFromIdx - 1;
+        while (endIdx > firstIdx && !toolPairingBalancedAfter(session, surfaceNodes[endIdx])) {
+            endIdx -= 1;
+        }
+        if (endIdx < firstIdx) return null;
+        return { start: surfaceNodes[firstIdx], end: surfaceNodes[endIdx] };
     }
 
     /**
