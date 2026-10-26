@@ -24,13 +24,53 @@ import {
     toolPairingBalancedBefore,
     toolPairingBalancedAfter,
 } from "@deepseek-ai/dsh-compaction";
-import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
 import { lossyThreshold, RESERVE_TOKENS } from "./lossy-summarize.js";
 
+/**
+ * 摘要指令（与 basic 的 COMPACTION_INSTRUCTION 同义，独立成文以免跨模块耦合）：
+ * 追加在重放前缀之后，让模型把前面对话压成可无损续做的检查点。
+ */
+const COMPACTION_INSTRUCTION = [
+    "You are now acting as a compaction engine for this AI coding assistant.",
+    "Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.",
+    "Preserve exact file paths, commands, error strings, identifiers, numeric values and user corrections.",
+    "Output only the checkpoint text: do not call any tool or take any other action.",
+].join("\n");
+
 /** 同一 agent 的溢出恢复最多重试次数（照 basic 的 maxOverflowRetries 默认口径）。 */
 const MAX_OVERFLOW_RETRIES = 3;
+
+/** 缺窗口读数时的兜底窗口（保守取值，宁可晚压也不误压）。 */
+const FALLBACK_CONTEXT_WINDOW = 128_000;
+
+/**
+ * 从会话事件流里找当前上下文窗口大小。
+ *
+ * 为什么不能问 tokenMeter：D16 实测钉死——真实 `TokenMeter` 只有
+ * `measure(session, requestHeader)` 与 `estimateMessage(message)`，**没有
+ * `contextWindow()`**（dsh-token-meter lib:722/783）。旧代码
+ * `meter.contextWindow?.(session) ?? 0` 永远拿 0 → 压力恒 0（第 3 层死）
+ * → 阈值算成负数（第 4 层反向强触发、每步都白跑一次必败事务）。
+ * 窗口数据实际在 `request/context` 事件的 `data.contextWindow`
+ * （token-meter 自己的投影也是这么读的）。
+ *
+ * @param {object} session 会话
+ * @returns {number} 窗口 token 数；找不到时用保守兜底值
+ */
+function contextWindowOf(session) {
+    const nodes = session?.surface?.nodes ?? [];
+    // 从最近往前找：窗口随路由模型变化，最新一条才是当前有效值
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+        const event = session.eventAt?.(nodes[index]);
+        if (event?.type !== "request/context") continue;
+        const window = event.data?.contextWindow;
+        if (typeof window === "number" && window > 0) return window;
+    }
+    return FALLBACK_CONTEXT_WINDOW;
+}
 
 /** 与 basic 相同的 checkpoint 框架文案（投影层据此识别摘要节点）。 */
 const SUMMARY_OPEN_TAG = "<compacted-summary>";
@@ -170,7 +210,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
         if (!session) return null;
         const meter = this.ctx.tokenMeter;
         if (!meter) throw new Error("tiered-compaction: ctx.tokenMeter 缺失（static inject 未生效或宿主版本不匹配）");
-        const window = meter.contextWindow?.(session) ?? meter.contextWindow?.() ?? 0;
+        const window = contextWindowOf(session);
         // 读数口径与 basic 一致：压力取 meter.measure(session).totalTokens
         // （conversation meter 的会话面读数；currentTokens 是兼容面，仅兜底）
         const measurement = meter.measure?.(session);
@@ -313,7 +353,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
     /** 压力/溢出压缩：保留近端 tail（窗口保护量），其余交事务。 */
     _compactWithRetention(session, agent, signal) {
         const meter = this.ctx.tokenMeter;
-        const window = meter.contextWindow?.(session) ?? meter.contextWindow?.() ?? 0;
+        const window = contextWindowOf(session);
         const retain = Math.max(16000, Math.floor(window * 0.05));
         const range = this._selectRange(session, meter.measure(session), retain);
         if (range === null) return null;
@@ -439,20 +479,41 @@ export class TieredCompactionEngineService extends CompactionEngine {
         return undefined;
     }
 
-    /** 从注入的 ctx.llm 构造摘要实现（宿主真链路路径）。 */
+    /**
+     * 从注入的 ctx.llm 构造摘要实现（宿主真链路路径）。
+     *
+     * **为什么不能用 `llm.summarize`**（D16 运行时实锤）：真实 llm 服务的方法面
+     * 里没有 `summarize`，只有 `stream()`。旧实现调用不存在的 API，导致每一次
+     * 摘要事务都抛「llm.summarize is not a function」——18 次事务 18 次失败。
+     * basic 的摘要路径就是 `for await (const chunk of ctx.llm.stream(options))`，
+     * 这里照抄同一形态：stream + BlockAssembler 聚合，再取 text 块拼成摘要。
+     */
     _summarizeFnFromCtx() {
         const llm = this.ctx.llm;
-        if (!llm) return undefined;
+        if (!llm || typeof llm.stream !== "function") return undefined;
         return async (request, input, signal) => {
-            const blocks = await llm.summarize({
+            const assembler = new BlockAssembler();
+            const messages = [
+                { role: "user", content: [{ type: "text", text: input }] },
+                { role: "user", content: [{ type: "text", text: COMPACTION_INSTRUCTION }] },
+            ];
+            const options = {
                 provider: request.provider,
                 model: request.model,
+                messages,
                 maxTokens: request.maxTokens,
-                purpose: request.purpose,
-                input,
-                signal,
-            });
+                purpose: request.purpose ?? "compaction",
+                ...(signal === undefined ? {} : { signal }),
+            };
+            for await (const chunk of llm.stream(options)) assembler.push(chunk);
+            // finish 错误必须上抛：否则会把半截输出当完整摘要提交
+            const failure = assembler.finish?.error;
+            if (failure !== undefined) throw failure;
+            const blocks = assembler.blocks?.() ?? [];
             return blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
         };
     }
 }
+
+/** 测试用探测面：暴露内部纯函数（生产代码不消费）。 */
+export const __test = { contextWindowOf };
