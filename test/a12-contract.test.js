@@ -83,7 +83,7 @@ async function setup(t, { window, perNode, summary }) {
         summaryTarget: { provider: "test", model: "test" },
     });
     const meter = ctx.tokenMeter;
-    setMeter(meter, window, perNode);
+    setMeter(meter, perNode);
     const svc = ctx.compaction;
     assert.ok(svc, "compaction 服务位必须被契约层接管");
     // 三入口契约面
@@ -93,14 +93,41 @@ async function setup(t, { window, perNode, summary }) {
     return { ctx, svc, meter };
 }
 
-/** 给 meter 桩换读数（window=窗口，total=当前总 token，不重建以满足 inject 面）。 */
-function setMeter(meter, window, total) {
-    meter.contextWindow = () => window;
+/**
+ * 给 meter 桩换读数（total=当前总 token，不重建以满足 inject 面）。
+ *
+ * **注意**（D16 实锤）：真实 `TokenMeter` 只有 `measure`/`estimateMessage`，
+ * **没有 `contextWindow()`**。窗口由 `request/context` 事件携带，因此桩不能
+ * 伪造 `meter.contextWindow`——早先版本正是这么写的，等于给「代码读了不存在
+ * 的 API」这个真 bug 打了掩护（测试全绿、线上全死）。
+ */
+function setMeter(meter, total) {
     meter.currentTokens = () => total;
     meter.measure = (session) => ({
         totalTokens: total,
         nodes: session.surface.nodes.map((seq) => ({ seq, tokens: Math.floor(total / session.surface.nodes.length) })),
     });
+}
+
+/**
+ * 把窗口写进会话事件流（真实宿主形态：token-meter 从 `request/context`
+ * 的 `data.contextWindow` 读窗口，插件也该这么读）。
+ * @param {object} session stubSession 返回的会话
+ * @param {number} window 窗口 token
+ */
+function setWindowOnSession(session, window) {
+    const seq = 900000 + (session.__nextWindowSeq = (session.__nextWindowSeq ?? 0) + 1);
+    session.__windowEvents ??= new Map();
+    session.__windowEvents.set(seq, {
+        seq,
+        type: "request/context",
+        data: { contextWindow: window },
+    });
+    const origEventAt = session.__origEventAt ?? session.eventAt;
+    session.__origEventAt = origEventAt;
+    session.eventAt = (s) => session.__windowEvents.get(s) ?? origEventAt(s);
+    session.surface.nodes.push(seq);
+    return session;
 }
 
 /** 轮询等待条件成立（cordis emit 不等 async listener，事务异步闭合）。 */
@@ -159,7 +186,8 @@ test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80
 
     // 70%：只提醒，零事务事件（200k 窗口：第 4 层阈值 = 200k−16k−20k = 164k，
     // 总量 140k = 70% 未达阈值 → 只提醒；小窗口下阈值线先于提醒线，故用大窗口）
-    setMeter(meter, 200000, 140000);
+    setMeter(meter, 140000);
+    setWindowOnSession(session, 200000);
     let fired = null;
     ctx.state = { fired: () => fired };
     // 真实钩子触发：直接派发 agent/pre-step（宿主 agent-loop 的调用方式）
@@ -168,13 +196,15 @@ test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80
     assert.equal(session.events.length, 0, "70% 只提醒不改历史");
 
     // 80%：驱逐事件必须广播（200k 窗口总量 160k = 80%，仍低于阈值 164k → 只驱逐不摘要）
-    setMeter(meter, 200000, 160000);
+    setMeter(meter, 160000);
+    setWindowOnSession(session, 200000);
     await ctx.emit("agent/pre-step", { agent, signal: new AbortController().signal }, () => {});
     assert.equal(evictions.length, 1, "80% 必须广播驱逐事件");
     assert.equal(session.events.length, 0, "80% 驱逐不动会话表面");
 
     // 达阈值：走摘要事务（总量 170k ≥ 阈值 164k，同时 85% ≥ 80% 驱逐共存）
-    setMeter(meter, 200000, 170000);
+    setMeter(meter, 170000);
+    setWindowOnSession(session, 200000);
     await ctx.emit("agent/pre-step", { agent, signal: new AbortController().signal }, () => {});
     // cordis 的 emit 不等 async listener：轮询等事务闭合（最多 2s）
     await waitFor(() => session.events.some((e) => e.type === "compaction/end"), 2000);
@@ -206,7 +236,7 @@ test("A12③ 失败路径：摘要为空抛 ManualCompactionError 且补配对 e
         summaryTarget: { provider: "test", model: "test" },
     });
     const meter = ctx.tokenMeter;
-    setMeter(meter, 128000, 3000);
+    setMeter(meter, 3000);
     const svc = ctx.compaction;
     const session = stubSession([
         { type: "user/message", data: { content: "一" } },
@@ -228,7 +258,7 @@ test("A12④ context-overflow 触发：直接走摘要事务，重试去重只�
         { type: "tool/output", data: { content: "b " + "溢出前的工具输出。".repeat(300) } },
     ]);
     const agent = stubAgent(session);
-    setMeter(meter, 128000, 60000);
+    setMeter(meter, 60000);
     const r1 = await svc.compactIfNeeded(agent, "context-overflow", undefined);
     assert.ok(r1, "overflow 必须触发摘要事务");
     const r2 = await svc.compactIfNeeded(agent, "context-overflow", undefined);

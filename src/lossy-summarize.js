@@ -12,12 +12,22 @@ export const RESERVE_TOKENS = 20000;
 /**
  * 计算压力阈值：压力阈值 = 窗口 − max(16k, 5%窗口) − 摘要预留。
  * 与设计稿公式一致，是第 4 层触发线的唯一算法。
+ *
+ * **必须有下限保护**（D16 实锤）：小窗口下公式会算成负数（128k 窗口时为
+ * 92,000 正常，但窗口读成 0 或很小则变负数，`current >= 负数` 恒真 →
+ * 每一步都强行触发摘要事务、每步都失败）。这里取窗口的 60% 作为最低触发线，
+ * 保证「阈值永远是一个有意义的正数，且永远高于第 3 层的 80% 不冲突」。
  * @param {number} contextWindow 模型上下文窗口（token）
  * @returns {number} 触发有损摘要的压力阈值（token）
  */
 export function lossyThreshold(contextWindow) {
+    // 窗口无效（0/负数/非数）时不触发：宁可不动，也不能反向强触发
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) return Number.POSITIVE_INFINITY;
     const guard = Math.max(16000, Math.floor(contextWindow * 0.05));
-    return contextWindow - guard - RESERVE_TOKENS;
+    const formula = contextWindow - guard - RESERVE_TOKENS;
+    // 公式算成非正数说明窗口小于「保护量 + 预算」，此时期望值是窗口的六成
+    const floor = Math.floor(contextWindow * 0.6);
+    return Math.max(formula, floor);
 }
 
 /**
