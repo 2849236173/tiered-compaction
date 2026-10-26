@@ -100,6 +100,13 @@ export async function apply(ctx, config = {}) {
     const resolved = {
         enabled: config.enabled ?? false,
     };
+    // 观测：apply 是否被调用、拿到的配置是什么。放在最前面——
+    // 「preset 内插件静默不生效」时，这一行能区分两种完全不同的原因：
+    //   apply 根本没被调用（模块解析/挂载问题）
+    //   apply 被调用了但服务没构造（static inject 依赖缺）
+    ctx.logger.info(
+        `dsh-tiered-compaction apply 被调用（enabled=${resolved.enabled}）`
+    );
     // 开关关闭（默认）：只注册自检服务，绝不触碰 ctx.compaction 服务位，
     // 保证与 dsh-compaction-basic 完全并存、行为与纯 basic 一致（验收 A6）。
     if (!resolved.enabled) {
