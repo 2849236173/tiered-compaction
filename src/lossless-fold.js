@@ -9,6 +9,10 @@
 /** 折叠标记前缀：逆变换据此识别折叠块。 */
 const FOLD_MARKER_PREFIX = "…[folded ";
 
+// 折叠的成本判据要用字节数（与落盘层同口径，中文行才不会被低估）。
+// 从 spill-to-disk 引入，保持「字节口径」全局唯一来源。
+import { byteLength } from "./spill-to-disk.js";
+
 /**
  * 判断一行是否属于「可折叠重复」：与前一判定结果相同且连续。
  * @param {string[]} lines 输入行数组
@@ -43,18 +47,31 @@ export function foldRepeatedLines(text, options = {}) {
     while (i < lines.length) {
         const line = lines[i];
         const runLen = countRun(lines, i, line);
-        if (runLen >= minRun) {
+        const marker = `${FOLD_MARKER_PREFIX}${runLen}x]`;
+        // D17 实测修复：折叠标记本身有成本，短行重复折了反而变大。
+        // 实例：02:00 真实日志 `lossless-fold，521 → 530 字符`——净亏 9 字符，
+        // 白做一次「压缩」，还让内容更难读。
+        // 判据：省下的是 (runLen−1) 行原文，代价是 1 行标记；只有净省才折。
+        // 用字节数比较（与落盘层口径一致，中文行不会被低估）。
+        const saved = (runLen - 1) * byteLength(line);
+        const cost = byteLength(marker);
+        if (runLen >= minRun && saved > cost) {
             runs.push({ line, start: out.length, count: runLen });
             out.push(line);
-            out.push(`${FOLD_MARKER_PREFIX}${runLen}x]`);
+            out.push(marker);
             i += runLen;
         } else {
             out.push(line);
             i += 1;
         }
     }
+    const folded = out.join("\n");
+    // 兜底：整体没有净省就原样返回，不产生「越折越大」的产物
+    if (folded.length >= text.length) {
+        return { folded: text, record: { original: text, runs: [] } };
+    }
     return {
-        folded: out.join("\n"),
+        folded,
         record: { original: text, runs },
     };
 }
