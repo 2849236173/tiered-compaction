@@ -36,32 +36,18 @@ class TieredCompactionService extends Service {
     }
 }
 
-/**
- * 接管引擎服务：占用 `compaction` 服务位（enabled=true 且槽位空闲时）。
- * 四层管线经 TieredCompactionEngine 串联（M4.5 wiring）。
+/*
+ * ⚠ D17 教训（勿删此注释）：
+ * 这里曾经有一个 `TieredCompactionEngineService` 类，创建四层引擎与观察者，
+ * 看起来就是「接管实现」。但它**在接管路径上从未被实例化**——
+ * apply() 用的是 contract.js 的同名类（导入别名 HostContractEngineService）。
+ *
+ * 后果：第 1-2 层代码存在、测试全绿（都在测零件），但真实会话里
+ * 没有任何活对象持有引擎 → archiveDir 永远不写 → 且零报错。
+ * 我因此连续修错了两轮（补日志、改钩子签名），因为一直在读这个死类。
+ *
+ * 现已删除，避免再次误导。接管实现只有一处：contract.js。
  */
-class TieredCompactionEngineService extends Service {
-    constructor(ctx, config) {
-        // 构造即占用 'compaction' 服务位——槽被占时 Cordis 在此处抛错，
-        // 由 apply() 的 construction-catch 探测捕获并降级（设计稿 §8 R38-1）。
-        super(ctx, "compaction");
-        this.config = config;
-        this.engine = new TieredCompactionEngine({
-            archiveDir: config.archiveDir,
-            tokenMeter: config.tokenMeter,
-            summarizeFn: config.summarizeFn,
-            summaryTarget: config.summaryTarget,
-            logger: ctx.logger,
-        });
-        // P1 + P2-1：观察者把第 1-3 层接到宿主会话事件（工具结果压缩 + 80% 驱逐）
-        this.observer = new ToolResultObserver({ engine: this.engine, ctx });
-        this.observer.register();
-        ctx.logger.info(
-            `dsh-tiered-compaction 已接管 compaction 服务位` +
-            (config.bypassMode ? "（旁路模式：仅第 1-2 层）" : "（四层管线 + 工具结果观察者）")
-        );
-    }
-}
 
 /**
  * 旁路自检服务：槽位被占时降级注册「第 1-2 层旁路模式」（§9-6）。
