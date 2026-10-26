@@ -62,9 +62,20 @@ export class TieredCompactionEngine {
             (item) => item.originalLocation === `node#${at.seq}` && item.replacedBy === "spill-to-disk",
         );
         if (entry !== undefined) {
+            // D17 实测修复：原先只存 path + sha256，没存 size，预览因此显示
+            // 「0 字节」而实际文件是 32KB——用户看到的第一条压缩提示就报错数。
+            // 大小直接量落盘后的文件，保证与实物一致（不靠估算）。
+            let size = 0;
+            try {
+                const { stat } = await import("node:fs/promises");
+                size = (await stat(entry.newLocation)).size;
+            } catch {
+                // 文件已不在（外部清理）：保持 0，预览不显示误导性数字
+            }
             this.spillInfo.set(String(at.seq), {
                 path: entry.newLocation,
                 sha256: entry.digest,
+                size,
             });
         }
         return result;
