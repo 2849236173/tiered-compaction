@@ -47,13 +47,21 @@ test("阈值反向回归：窗口 0/负数/非数时阈值不可为正数触发�
     }
 });
 
-test("阈值小窗口保护：窗口小于保护量+预算时取窗口六成，绝不出现负数", () => {
-    // 小窗口：公式本来算出 20000-16000-20000 = -16000（负），必须被抬到 12000
+test("阈值小窗口保护：小窗口按 82% 下限，绝不出现负数", () => {
+    // 极小窗口（小于 reserve+headroom）固定 82%，保证仍能工作且不误触发。
+    // 下限 82% 的理由：第 3 层在 70% 提醒、80% 驱逐，第 4 层（最贵）必须晚于它们，
+    // 留 2 个百分点缓冲。D17 起阈值公式的权威断言见 test/d17-threshold.test.js。
     const small = lossyThreshold(20000);
     assert.ok(small > 0, `小窗口阈值必须为正，实得 ${small}`);
-    assert.equal(small, 12000);
-    // 正常窗口保持原公式：128k → 128000-16000-20000 = 92000
-    assert.equal(lossyThreshold(128000), 92000);
-    // 大窗口：1M → 1000000-50000-20000 = 930000
-    assert.equal(lossyThreshold(1000000), 930000);
+    assert.equal(small, 16400, "极小窗口按窗口 82% 下限");
+
+    // 中大型窗口：阈值必须落在窗口的 70%~85% 区间内（层次底线）
+    for (const window of [128000, 200000, 1000000]) {
+        const threshold = lossyThreshold(window);
+        const pct = threshold / window;
+        assert.ok(
+            pct >= 0.7 && pct <= 0.85,
+            `窗口 ${window} 的阈值占比应在 70%~85%，实得 ${(pct * 100).toFixed(1)}%`,
+        );
+    }
 });

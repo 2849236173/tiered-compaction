@@ -20,6 +20,7 @@ import { Context } from "@deepseek-ai/cordis";
 
 import { apply } from "../src/index.js";
 import { Lineage } from "../src/lineage.js";
+import { lossyThreshold } from "../src/lossy-summarize.js";
 
 /** A-wire ①：enabled=false 与 M2 骨架行为逐字一致。 */
 test("A-wire① enabled=false：仅注册自检服务，不触碰 compaction 位", async () => {
@@ -134,13 +135,16 @@ test("A-wire③ 四层各一例经 engine 端到端", async (t) => {
     assert.ok(engine3b.lineage.toArray().some((e) => e.replacedBy === "soft-pressure"), "驱逐登记谱系");
 
     // 第 4 层：到阈值才摘要，预算预留 20k（假 LLM 注入口径，A4a）
-    // 阈值公式 = 窗口 − max(16k, 5%窗口) − 20k；用 128k 窗口：阈值 = 128k−16k−20k = 92k
+    // 阈值公式见 src/lossy-summarize.js（D17 起为「过渡带 + 比例线」，
+    // 权威断言在 test/d17-threshold.test.js）。这里按实际公式取边界值，
+    // 不写死数字——公式再调时这条测试不会假失败。
     const W4 = 128000;
+    const threshold4 = lossyThreshold(W4);
     const meter4 = (cur) => ({ currentTokens: () => cur, contextWindow: () => W4 });
     const fakeLLM = async (req) => { assert.equal(req.maxTokens, 20000, "A4a 预算写死"); return "摘要文本"; };
-    const small = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter4(91_000), summarizeFn: fakeLLM, summaryTarget: { provider: "test", model: "test" } });
+    const small = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter4(threshold4 - 1000), summarizeFn: fakeLLM, summaryTarget: { provider: "test", model: "test" } });
     assert.equal(await small.summarizeIfNeeded([{ seq: 1, kind: "tool_output", content: "x" }]), null, "未到阈值不摘要");
-    const big4 = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter4(95_000), summarizeFn: fakeLLM, summaryTarget: { provider: "test", model: "test" } });
+    const big4 = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter4(threshold4 + 1000), summarizeFn: fakeLLM, summaryTarget: { provider: "test", model: "test" } });
     const r4 = await big4.summarizeIfNeeded([{ seq: 1, kind: "tool_output", content: "y".repeat(50) }]);
     assert.ok(r4?.summary === "摘要文本", "到阈值必须走摘要");
     assert.equal(r4.budget, 20000);
