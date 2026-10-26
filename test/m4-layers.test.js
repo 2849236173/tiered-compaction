@@ -54,10 +54,17 @@ test("A3 驱逐：易失项被驱逐并登记谱系，永不清理项零丢失",
     }
 });
 
-test("A4a 摘要预算预留：阈值公式与请求参数硬验证", () => {
+test("A4a 摘要预算预留：阈值落在合理区间 + 请求参数硬验证", () => {
     const window = 128000;
-    // 阈值 = 窗口 − max(16k, 5%) − 20k 预留
-    assert.equal(lossyThreshold(window), window - Math.max(16000, window * 0.05) - RESERVE_TOKENS);
+    // D17 起阈值公式改为「比例线 + 过渡带」（见 test/d17-threshold.test.js，
+    // 那份是公式的唯一权威断言）。这里只守住 A4a 真正关心的两件事：
+    //   1. 阈值必须是一个有意义的值，落在窗口的 60%~85% 区间
+    //   2. 摘要请求必须显式预留预算（杜绝 2048 截断的根）
+    const threshold = lossyThreshold(window);
+    const pct = threshold / window;
+    assert.ok(pct >= 0.6 && pct <= 0.85, `128k 窗口阈值占比应在 60%~85%，实得 ${(pct * 100).toFixed(1)}%`);
+    assert.ok(threshold < window, "阈值必须小于窗口，否则永不触发");
+
     const req = summarizationRequest({ provider: "p", model: "m" });
     assert.equal(req.maxTokens, RESERVE_TOKENS, "摘要调用必须显式预留预算（杜绝 2048 截断的根）");
     assert.equal(req.purpose, "compaction");
