@@ -71,8 +71,16 @@ export class ToolResultObserver {
         this.engine = engine;
         this.ctx = ctx;
         this.enabled = enabled;
-        /** 已处理过的源事件 seq，避免重复替换（同一 seq 只加工一次）。 */
+        /** 已处理过的源事件 seq，避免第 1-2 层重复替换（同一 seq 只加工一次）。 */
         this.done = new Set();
+        /**
+         * 已被第 3 层驱逐过的 seq。
+         *
+         * 必须与 `done` 分开（D17 实测 bug）：`done` 是「内容已压缩过」，
+         * 本集合是「已换成重跑提示」。混用会让第 3 层被第 1-2 层永久禁用——
+         * 凡是被折叠/落盘过的结果，都因为已在 done 里而被跳过。
+         */
+        this.evicted = new Set();
         /** 统计面（供探针与安装记录核对，不进业务路径）。 */
         this.stats = { replaced: 0, bytesSaved: 0, skipped: 0, failed: 0 };
     }
@@ -185,7 +193,19 @@ export class ToolResultObserver {
         for (const seq of [...surface]) {
             const event = session.eventAt(seq);
             if (event?.type !== "tool/result") continue;
-            if (this.done.has(seq)) continue;
+            // 只跳过「已被第 3 层驱逐过」的，不能沿用 `done`。
+            //
+            // D17 实测真 bug（2026-10-27，用真实模型跑沙箱时暴露）：
+            // `done` 是**第 1-2 层的处理标记**——handleEvent 处理完就把 seq
+            // 加进去。而驱逐这里也用它做去重，于是：
+            //   凡是第 1-2 层碰过的工具结果，第 3 层永远轮不到。
+            // 实测：压力 83.9%（20148/24000）已越过 80% 驱逐线，
+            // read 结果也确实被第 2 层折叠/落盘过（因此全在 done 里），
+            // 结果驱逐数恒为 0——日志还会打「已驱逐 0 个」，看起来跑了。
+            //
+            // 两者语义不同：`done` = 已做过内容压缩；`evicted` = 已换成重跑提示。
+            // 必须分开记账，否则第 3 层等于被第 1-2 层永久禁用。
+            if (this.evicted.has(seq)) continue;
             const name = this.toolNameOf(session, event);
             // 只驱逐可重放类（read/grep/glob）：重跑即恢复，属设计稿 §3 优先级 2
             if (name !== "read" && name !== "grep" && name !== "glob") continue;
@@ -209,7 +229,7 @@ export class ToolResultObserver {
                 surfaceOp: { op: "replace", startSeq: seq, endSeq: seq },
                 sourceEventSeqs: [seq],
             });
-            this.done.add(seq);
+            this.evicted.add(seq);
             evicted += 1;
         }
         if (evicted > 0) {

@@ -119,20 +119,30 @@ test("真实事件结构下（result 不带工具名），第 3 层必须能认�
         text: "被读取文件的完整内容".repeat(300),
     });
 
-    const before = [...session.surface.nodes];
+    // 关键前提（D17 实测暴露）：
+    // 真实会话里工具结果一产生就会被第 1-2 层处理，seq 随之进入 `done`。
+    // 若驱逐也拿 `done` 去重，第 3 层就永远轮不到——这正是实测里
+    // 压力 83.9% 却驱逐数为 0 的真因。先跑一遍第 1-2 层复现该前提。
+    const source = session.eventAt(session.surface.nodes[0]);
+    await service.observer.handleEvent(session, source);
 
     await service.compactIfNeeded({ session }, "pressure", undefined);
 
-    assert.notDeepEqual(
-        session.surface.nodes,
-        before,
-        "工具名在配对的 tool/call 上，必须能查到——否则第 3 层一个也挑不出来",
-    );
-
-    // 表面上的 result 必须被换成驱逐提示
-    const latest = session.eventAt(session.surface.nodes[0]);
-    const text = (latest.data.message.content ?? []).map((b) => b.text ?? "").join("");
-    assert.match(text, /\[已驱逐：read/, `必须写入精确的驱逐提示，实得：${text.slice(0, 120)}`);
+    // 断言必须落在「驱逐提示真的写出来了」，不能只断言"表面变了"——
+    // 第 4 层摘要同样会改表面，用它当证据会放过第 3 层失效的 bug
+    // （本文件第一版就犯了这个错：共用 done 时测试照样通过）。
+    //
+    // 注意提示不是裸文本：它会套在 prunedContent 的框架里，前面还有
+    // 「[tiered-compaction 原始输出已折叠/落盘，此处为预览]」一行，
+    // 所以用 includes 而不是 startsWith（第二版就栽在这个过严的断言上）。
+    const notices = session.log.filter((e) => {
+        if (e.type !== "tool/result") return false;
+        const text = (e.data?.message?.content ?? []).map((b) => b.text ?? "").join("");
+        return text.includes("[已驱逐：");
+    });
+    assert.equal(notices.length, 1, `必须写出 1 条驱逐提示，实得 ${notices.length} 条`);
+    const text = notices[0].data.message.content.map((b) => b.text ?? "").join("");
+    assert.match(text, /\[已驱逐：read/, `提示必须点名工具，实得：${text.slice(0, 160)}`);
 });
 
 test("非可重放工具（如 pwsh）不得被驱逐——认名单必须准，不能误伤", async (t) => {
