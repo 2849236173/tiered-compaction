@@ -115,6 +115,35 @@ export function textOfEventForSummary(event) {
 }
 
 /**
+ * 取会话当前的 open turn（用于 compaction 生命周期事件的 `turn` 字段）。
+ *
+ * 宿主格式契约要求 `compaction/start` / `compaction/end` 必带 `turn`
+ * （见 `dsh-session-format-v0-to-v1/lib/index.js:53,59`），
+ * 取法照抄原版 basic（lib/index.js:707-722）：倒扫事件流，
+ * 遇到 `turn/start` 记下 `data.turn`，遇到 `turn/end` 说明那个 turn 已关闭。
+ *
+ * @param {object} session 会话
+ * @returns {number|null} 当前 open turn；空闲态返回 null（合法）
+ */
+function openTurnOf(session) {
+    let openTurn = null;
+    let stateKnown = false;
+    const lastSeq = typeof session?.seq === "number" ? session.seq : 0;
+    for (let seq = lastSeq - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt?.(seq);
+        if (event === undefined) continue;
+        if (event.type === "turn/start") {
+            openTurn = typeof event.data?.turn === "number" ? event.data.turn : null;
+            stateKnown = true;
+        } else if (event.type === "turn/end") {
+            stateKnown = true;
+        }
+        if (stateKnown) break;
+    }
+    return openTurn;
+}
+
+/**
  * 摘要指令（与 basic 的 COMPACTION_INSTRUCTION 同义，独立成文以免跨模块耦合）：
  * 追加在重放前缀之后，让模型把前面对话压成可无损续做的检查点。
  */
@@ -572,6 +601,24 @@ export class TieredCompactionEngineService extends CompactionEngine {
         if (trigger === "context-overflow") {
             if (this.overflowRetries.get(agent)) return null; // 一次 overflow 只补一枪
             this.overflowRetries.set(agent, true);
+            // 交叉审计修复（2026-10-27，gpt-6-astra / gpt-5.6-sol 都报、我实跑确认）：
+            // overflow 必须**强制**压缩，不能沿用保留尾部策略。
+            //
+            // 缺陷：overflow 与 pressure 共用 _compactWithRetention，仍按 retain
+            // 保留近端尾部。当表面总量不足以在保留尾部之外形成可压区间时，
+            // `_selectRange` 返回 null → 本次恢复什么都没做 → 原始溢出错误照样抛给用户。
+            //
+            // 实测：三个各约 100 token 的表面节点，retain=16000 时 `_selectRange` 返回 null；
+            // 改成 retain=0 就能选出整段配平区间。
+            //
+            // 原版 basic 对 overflow 明确调用 `selectCompactableRange(..., 0)`
+            // （lib/index.js:927-934）——不保留尾部，强制尝试一次有用且配平的缩减。
+            // 这是有意的取舍：溢出了就没资格挑三拣四，先腾出空间再说。
+            return this._compactWithRetention(session, agent, signal, {
+                threshold,
+                measure: () => this.ctx.tokenMeter?.measure?.(session)?.totalTokens ?? 0,
+                retainOverride: 0,
+            });
         }
         return this._compactWithRetention(session, agent, signal, {
             threshold,
@@ -730,9 +777,13 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 大窗口下（1M：base=50k，cap=425k）行为完全不变；
         // 小窗口下（20k：base=16000，cap=8200）保留量降到 8200，选区恢复正常。
         const retainBase = Math.max(16000, Math.floor(window * 0.05));
-        const retain = threshold === undefined
-            ? retainBase
-            : Math.max(0, Math.min(retainBase, Math.floor(threshold * 0.5)));
+        // retainOverride：overflow 强制恢复时传 0（不保留尾部，整段可压）。
+        // 见 compactIfNeeded 里的说明——溢出了就没资格挑挑拣拣。
+        const retain = options.retainOverride !== undefined
+            ? options.retainOverride
+            : (threshold === undefined
+                ? retainBase
+                : Math.max(0, Math.min(retainBase, Math.floor(threshold * 0.5))));
         // 未提供阈值读数时保持原单次行为（例如手动 compactNow 走全表面）
         const maxAttempts = threshold === undefined || measure === undefined
             ? 1
@@ -811,9 +862,13 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 压一个几百 token 以下的区间永远净亏损。这里取 RESERVE_TOKENS 的 5%
         // （= 1000 token）作为下限：低于它直接放弃本次（返回 null），
         // 语义与「暂无可压内容」一致，不报错、不重试、不花 LLM 调用。
+        //
+        // 但 overflow 强制恢复（retainTokens === 0）必须跳过这道守卫：
+        // 已经溢出了，可压区间再小也得压——否则就是"因为省得不够多而拒绝救命"。
         const compactable = priced.slice(firstIdx, endIdx + 1)
             .reduce((total, node) => total + (node?.tokens ?? 0), 0);
-        if (compactable < Math.floor(RESERVE_TOKENS * 0.05)) return null;
+        const isForced = retainTokens === 0;
+        if (!isForced && compactable < Math.floor(RESERVE_TOKENS * 0.05)) return null;
         return { start: surfaceNodes[firstIdx], end: surfaceNodes[endIdx] };
     }
 
@@ -830,7 +885,21 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 护栏 1：压缩锁。放在 append start 之前，锁被占时不留任何痕迹。
         assertCompactionInactive(session, "tiered-compaction");
         const compactionId = CompactionId(randomUUID());
-        const lifecycle = { compactionId };
+        // 交叉审计修复（2026-10-27，gpt-5.6-sol 报、我查宿主格式校验确认）：
+        // `compaction/start` 与 `compaction/end` 的 data **必须带 turn**。
+        //
+        // 宿主 `dsh-session-format-v0-to-v1/lib/index.js:53,59`：
+        //   "compaction/start": disposition(["compactionId", "turn"], ["sourceCommandId"])
+        //   "compaction/end":   disposition(["compactionId", "turn"], ["sourceCommandId", "error"])
+        // 缺 turn 的记录在格式校验/迁移/恢复时会被拒绝——而我们是靠 append
+        // 写进内存日志的，当时不报错，问题会推迟到下次读取或升级时才炸。
+        //
+        // 原版 basic 的取法（lib/index.js:707-722）：倒扫事件流找未配对的
+        // `turn/start`，其 `data.turn` 即当前 open turn；没有则传 null
+        // （空闲态压缩是合法的，null 表示不属于任何 turn）。
+        //
+        // 我们照抄同一口径，并对此前所有历史事件保持兼容。
+        const lifecycle = { compactionId, turn: openTurnOf(session) };
         const startEvent = session.append("compaction/start", lifecycle);
         try {
             const surfaceNodes = session.surface.nodes;
