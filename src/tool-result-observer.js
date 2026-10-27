@@ -186,7 +186,7 @@ export class ToolResultObserver {
             const event = session.eventAt(seq);
             if (event?.type !== "tool/result") continue;
             if (this.done.has(seq)) continue;
-            const name = event?.data?.message?.source?.toolName ?? event?.data?.toolName;
+            const name = this.toolNameOf(session, event);
             // 只驱逐可重放类（read/grep/glob）：重跑即恢复，属设计稿 §3 优先级 2
             if (name !== "read" && name !== "grep" && name !== "glob") continue;
             const text = textOfToolResult(event);
@@ -221,6 +221,50 @@ export class ToolResultObserver {
             this.ctx.logger.warn(`tiered-compaction: 80% 压力驱逐 ${evicted} 个可重放工具结果`);
         }
         return { evicted };
+    }
+
+    /**
+     * 取某条 `tool/result` 对应的工具名。
+     *
+     * D17 沙箱实测挖出的真 bug（2026-10-27，用真实模型跑出来的）：
+     * 真实宿主的 `tool/result` 事件**没有工具名**。实测结构是：
+     *   data = { turn, step, message: { role, source: { kind, callId },
+     *                                  toolCallId, content, isError, id },
+     *            meta: { path, offset, lines, totalLines, lang } }
+     * 工具名只存在于配对的 **`tool/call` 事件**：
+     *   data = { turn, step, callId, name: "read", arguments: "..." }
+     *
+     * 旧代码读 `source.toolName ?? data.toolName`，两个字段都不存在，
+     * 永远得到 undefined → 第 3 层驱逐**一个也挑不出来**（evicted 恒为 0），
+     * 而日志仍会打「已驱逐」——又一次「看起来做了、实际没做」。
+     *
+     * 匹配口径：`tool/result.data.toolCallId` 与 `tool/call.data.callId` 相等
+     * （实测两者逐字相同，都是 `call_xx|item_yy` 形式）。
+     *
+     * @param {object} session 会话
+     * @param {object} event 一条 tool/result 事件
+     * @returns {string | undefined} 工具名；找不到返回 undefined
+     */
+    toolNameOf(session, event) {
+        // 快路径：有些宿主/桩会把名字直接挂在结果上（保持兼容）
+        const inline = event?.data?.message?.source?.toolName ?? event?.data?.toolName;
+        if (typeof inline === "string" && inline.length > 0) return inline;
+
+        const callId = event?.data?.toolCallId ?? event?.data?.message?.toolCallId;
+        if (typeof callId !== "string" || callId.length === 0) return undefined;
+
+        // 真实路径：到日志里找配对 tool/call 的 name。
+        // 从结果事件往前扫（call 必然早于 result），命中即返回。
+        const total = typeof session?.seq === "number" ? session.seq : 0;
+        const startSeq = typeof event?.seq === "number" ? event.seq : total - 1;
+        for (let seq = startSeq; seq >= 0; seq -= 1) {
+            const candidate = session.eventAt?.(seq);
+            if (candidate?.type !== "tool/call") continue;
+            if (candidate.data?.callId !== callId) continue;
+            const name = candidate.data?.name;
+            if (typeof name === "string" && name.length > 0) return name;
+        }
+        return undefined;
     }
 
     /** 自算 token（与 contract.js 同口径：字符数/4 向上取整）。 */
