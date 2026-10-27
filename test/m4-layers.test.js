@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { pressureAction, evictVolatile, REMIND_RATIO, EVICT_RATIO } from "../src/soft-pressure.js";
-import { lossyThreshold, summarizationRequest, summarizeSpan, RESERVE_TOKENS } from "../src/lossy-summarize.js";
+import { lossyThreshold, RESERVE_TOKENS } from "../src/lossy-summarize.js";
 import { purgeOnGoalSwitch } from "../src/goal-switch.js";
 import { CircuitBreaker, arbitrate } from "../src/circuit-breaker.js";
 import { Lineage } from "../src/lineage.js";
@@ -72,39 +72,14 @@ test("A-P0-4 不可重放但已存档的内容才允许驱逐", () => {
     assert.equal(rec.newLocation, "/archive/x.txt", "谱系必须记录真实存档路径");
 });
 
-test("A4a 摘要预算预留：阈值落在合理区间 + 请求参数硬验证", () => {
+test("A4a 摘要预算预留：阈值落在合理区间", () => {
     const window = 128000;
     // D17 起阈值公式改为「比例线 + 过渡带」（见 test/d17-threshold.test.js，
-    // 那份是公式的唯一权威断言）。这里只守住 A4a 真正关心的两件事：
-    //   1. 阈值必须是一个有意义的值，落在窗口的 60%~85% 区间
-    //   2. 摘要请求必须显式预留预算（杜绝 2048 截断的根）
+    // 那份是公式的唯一权威断言）。这里只守住 A4a 真正关心的阈值范围。
     const threshold = lossyThreshold(window);
     const pct = threshold / window;
     assert.ok(pct >= 0.6 && pct <= 0.85, `128k 窗口阈值占比应在 60%~85%，实得 ${(pct * 100).toFixed(1)}%`);
     assert.ok(threshold < window, "阈值必须小于窗口，否则永不触发");
-
-    const req = summarizationRequest({ provider: "p", model: "m" });
-    assert.equal(req.maxTokens, RESERVE_TOKENS, "摘要调用必须显式预留预算（杜绝 2048 截断的根）");
-    assert.equal(req.purpose, "compaction");
-});
-
-test("A4a+A10 摘要流程：全量存档在先、预算不被篡改、谱系登记", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "lossy-"));
-    t.after(() => rm(dir, { recursive: true, force: true }));
-    const lineage = new Lineage();
-    let captured;
-    const fakeLlm = async (req) => { captured = req; return "摘要正文"; };
-    const span = [
-        { seq: 1, kind: "user-message", content: "问题" },
-        { seq: 2, kind: "pwsh", content: "很长的输出".repeat(100) },
-    ];
-    const result = await summarizeSpan(span, fakeLlm, { archiveDir: dir, lineage, sessionId: "s1" }, { provider: "p", model: "m" });
-    assert.equal(result.summary, "摘要正文");
-    assert.equal(captured.maxTokens, RESERVE_TOKENS, "传给 LLM 的预算必须是预留值");
-    assert.ok(result.archivePath !== "-", "摘要前必须有全量存档");
-    const hits = lineage.findByOriginal("session#s1 span[1-2]");
-    assert.equal(hits.length, 1, "摘要取代必须登记谱系");
-    assert.equal(hits[0].replacedBy, "lossy-summarize");
 });
 
 test("A5 目标切换：缺显式信号拒绝、胶囊完整、零 LLM 调用", async (t) => {

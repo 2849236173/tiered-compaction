@@ -2,7 +2,7 @@
  * M4.5 wiring 验收（A-wire 四条）：
  * ① enabled=false 行为与 M2 骨架逐字一致（仅注册自检服务，不触碰 compaction 位）；
  * ② enabled=true 且槽位空闲时 ctx.compaction 被本插件接管（真实 cordis 语义验证）；
- * ③ 四层各一例经 engine 端到端跑通（fixture 重放口径）；
+ * ③ 前三层各一例经 engine 端到端跑通；第 4 层由 contract.js 真实事务覆盖；
  * ④ 熔断器落盘失败降级不炸（复用 M4「文件当父目录」造失败法）。
  *
  * 用真实 cordis Context（new Context()）做宿主桩——construction-catch 探测
@@ -20,7 +20,6 @@ import { Context } from "@deepseek-ai/cordis";
 
 import { apply } from "../src/index.js";
 import { Lineage } from "../src/lineage.js";
-import { lossyThreshold } from "../src/lossy-summarize.js";
 
 /** A-wire ①：enabled=false 与 M2 骨架行为逐字一致。 */
 test("A-wire① enabled=false：仅注册自检服务，不触碰 compaction 位", async () => {
@@ -95,7 +94,7 @@ test("A-wire②b 槽位冲突：construction-catch 降级旁路模式", async (t
 });
 
 /** A-wire ③：四层各一例经 engine 端到端跑通（fixture 重放口径）。 */
-test("A-wire③ 四层各一例经 engine 端到端", async (t) => {
+test("A-wire③ 前三层经 engine 端到端", async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "wire3-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const { TieredCompactionEngine } = await import("../src/engine.js");
@@ -136,21 +135,9 @@ test("A-wire③ 四层各一例经 engine 端到端", async (t) => {
     assert.deepEqual(r3b.evicted.map((e) => e.seq).sort(), [12], "只有可重放的 read 可驱逐");
     assert.ok(engine3b.lineage.toArray().some((e) => e.replacedBy === "soft-pressure"), "驱逐登记谱系");
 
-    // 第 4 层：到阈值才摘要，预算预留 20k（假 LLM 注入口径，A4a）
-    // 阈值公式见 src/lossy-summarize.js（D17 起为「过渡带 + 比例线」，
-    // 权威断言在 test/d17-threshold.test.js）。这里按实际公式取边界值，
-    // 不写死数字——公式再调时这条测试不会假失败。
-    const W4 = 128000;
-    const threshold4 = lossyThreshold(W4);
-    const meter4 = (cur) => ({ currentTokens: () => cur, contextWindow: () => W4 });
-    const fakeLLM = async (req) => { assert.equal(req.maxTokens, 20000, "A4a 预算写死"); return "摘要文本"; };
-    const small = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter4(threshold4 - 1000), summarizeFn: fakeLLM, summaryTarget: { provider: "test", model: "test" } });
-    assert.equal(await small.summarizeIfNeeded([{ seq: 1, kind: "tool_output", content: "x" }]), null, "未到阈值不摘要");
-    const big4 = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter4(threshold4 + 1000), summarizeFn: fakeLLM, summaryTarget: { provider: "test", model: "test" } });
-    const r4 = await big4.summarizeIfNeeded([{ seq: 1, kind: "tool_output", content: "y".repeat(50) }]);
-    assert.ok(r4?.summary === "摘要文本", "到阈值必须走摘要");
-    assert.equal(r4.budget, 20000);
+    // 第 4 层由 contract.js 的真实事务路径负责；engine 不提供该摘要入口。
     assert.ok(engine.status().lineageEntries > 0, "谱系表贯穿可查");
+
 
     // 旁路：目标切换零 LLM（显式信号才执行）
     const r5 = await engine.purgeOnGoalSwitch({ oldGoalId: "g1", newGoalId: "g2", nodes: [{ seq: 20, kind: "goal", content: "旧目标" }] });
