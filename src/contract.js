@@ -68,6 +68,53 @@ function finishErrorOf(finish) {
 }
 
 /**
+ * 把一个会话事件投影成摘要用的文本。
+ *
+ * P0 审计发现（2026-10-27）：真实宿主里消息内容的存放位置**不统一**：
+ *
+ *   user/message      → data.content            （直接挂在 data 上）
+ *   assistant/message → data.message.content    （包在 message 里）
+ *   tool/result       → data.message.content    （包在 message 里）
+ *   system/message    → data.message.content
+ *
+ * 旧实现只读 `data.content`，于是 assistant 与 tool 的消息**全部读成空**。
+ * 实测：真实会话 277328 字内容里，旧逻辑只抽出 45838 字（丢 83.5%），
+ * tool/result 的 224556 字一个字都没进摘要。
+ *
+ * 内容块的处理也有讲究：
+ *   text      → 保留（这是主要信息）
+ *   tool-call → 保留「工具名 + 参数」，这是"做了什么"的关键，续做必需
+ *   reasoning → **丢弃**。推理过程对续做无用，而且往往比正文还长，
+ *               带上它会让摘要输入膨胀、稀释真正要紧的信息。
+ *
+ * @param {object} event 会话事件
+ * @returns {string} 投影文本；无可提取内容返回空字符串
+ */
+export function textOfEventForSummary(event) {
+    const data = event?.data ?? {};
+    // 两种存放位置都试：先 data.content，再 data.message.content
+    const content = data.content ?? data.message?.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+
+    const pieces = [];
+    for (const block of content) {
+        if (block === null || typeof block !== "object") continue;
+        if (block.type === "text") {
+            const text = typeof block.text === "string" ? block.text : "";
+            if (text.length > 0) pieces.push(text);
+        } else if (block.type === "tool-call") {
+            // 工具调用保留名字与参数：这是「做过什么」的唯一线索
+            const name = typeof block.name === "string" ? block.name : "unknown";
+            const args = typeof block.arguments === "string" ? block.arguments : "";
+            pieces.push(`[调用工具 ${name}] ${args}`);
+        }
+        // reasoning 明确丢弃（见上方说明）
+    }
+    return pieces.join("\n");
+}
+
+/**
  * 摘要指令（与 basic 的 COMPACTION_INSTRUCTION 同义，独立成文以免跨模块耦合）：
  * 追加在重放前缀之后，让模型把前面对话压成可无损续做的检查点。
  */
@@ -795,18 +842,27 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 throw new Error("compaction: the selected span is no longer a valid replacement target");
             }
             const shadowedSeqs = surfaceNodes.slice(startIdx, endIdx + 1);
-            // 摘要输入：区间内节点内容按表面序拼接（basic 的 buildSummarizationInput
-            // 走投影前缀；此处文本等价，第 1-2 层已在写入侧缩小过原文）
+            // 摘要输入：把区间内每个节点投影成文本，按表面序拼接。
+            //
+            // P0 审计发现（2026-10-27 系统审计）：旧实现只读 `data.content`，
+            // 而真实宿主里只有 `user/message` 用这个形状：
+            //   user/message      → data.content            ✅ 能读到
+            //   assistant/message → data.message.content    ❌ 旧实现读到空
+            //   tool/result       → data.message.content    ❌ 旧实现读到空
+            //
+            // 实测量化（真实会话 14 条事件）：旧逻辑只抽出 45838 字，
+            // 而实际内容有 277328 字——**丢了 83.5%**，其中
+            // tool/result 的 224556 字**一个字都没进摘要**。
+            //
+            // 后果：摘要只看得到用户说了什么，看不到助手做了什么、
+            // 工具返回了什么。而工具结果恰恰是压缩的主要对象。
+            // 这会产出「知道用户要什么、不知道进展到哪」的半截检查点，
+            // 比不压更糟——续做的模型会重复已经做过的工作。
+            //
+            // 修法：两种形状都试，且对 assistant 消息额外收集 tool-call 摘要
+            // （工具名+参数，不含 reasoning——推理过程对续做无用且极占篇幅）。
             const input = shadowedSeqs
-                .map((seq) => {
-                    const ev = session.eventAt(seq);
-                    const data = ev?.data ?? {};
-                    if (typeof data.content === "string") return data.content;
-                    if (Array.isArray(data.content)) {
-                        return data.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
-                    }
-                    return "";
-                })
+                .map((seq) => textOfEventForSummary(session.eventAt(seq)))
                 .filter((t) => t.length > 0)
                 .join("\n");
             const estimate = estimateTokens(input);
@@ -998,4 +1054,4 @@ export class TieredCompactionEngineService extends CompactionEngine {
 }
 
 /** 测试用探测面：暴露内部纯函数（生产代码不消费）。 */
-export const __test = { contextWindowOf };
+export const __test = { contextWindowOf, textOfEventForSummary };
