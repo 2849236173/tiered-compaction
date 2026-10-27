@@ -10,7 +10,7 @@
  */
 import { CircuitBreaker, arbitrate } from "./circuit-breaker.js";
 import { pressureAction, evictVolatile } from "./soft-pressure.js";
-import { lossyThreshold, summarizeSpan } from "./lossy-summarize.js";
+import { lossyThreshold } from "./lossy-summarize.js";
 import { Lineage } from "./lineage.js";
 
 /**
@@ -133,27 +133,6 @@ export class TieredCompactionEngine {
             `（可重放 ${evicted.filter((e) => e.replayable).length} 个）`
         );
         return { action, evicted, kept };
-    }
-
-    /**
-     * 第 4 层有损摘要：压力阈值 = 窗口 − max(16k, 5%窗口) − 摘要预留(≤20k)，
-     * 仅 enabled 且到阈值才调用（摘要预算提前预留，A4a）。
-     * @param {Array<{seq: number, kind: string, content: string}>} span 待摘要历史区间
-     * @returns {Promise<{summary: string, archivePath: string, budget: number} | null>}
-     *   null = 未启用摘要或未到阈值。
-     */
-    async summarizeIfNeeded(span) {
-        const { tokenMeter, summarizeFn, summaryTarget } = this.deps;
-        if (!tokenMeter || !summarizeFn || !summaryTarget) return null;
-        const threshold = lossyThreshold(tokenMeter.contextWindow());
-        if (tokenMeter.currentTokens() < threshold) return null;
-        // 全量存档 → 带预算摘要 → 谱系登记（都在 summarizeSpan 内，M4 已验证）
-        const result = await summarizeSpan(span, summarizeFn, {
-            archiveDir: this.deps.archiveDir,
-            lineage: this.lineage,
-        }, summaryTarget);
-        this.logger.info(`tiered-compaction: 有损摘要完成（budget=${result.budget}），已登记谱系`);
-        return result;
     }
 
     /**
