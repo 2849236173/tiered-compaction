@@ -449,10 +449,30 @@ export class TieredCompactionEngineService extends CompactionEngine {
         if (action === "remind") {
             this.ctx.logger.info(`tiered-compaction: 窗口压力 ${(pressure * 100).toFixed(0)}%（70%），建议收束当前任务`);
         }
-        // 第 3 层：80% 驱逐（广播事件；易失内容剔除由投影侧消费，A3 口径不变）
+        // 第 3 层：80% 驱逐（把可重放的 read/grep/glob 结果换成「请重跑」提示）。
+        //
+        // D17 补线（2026-10-27）：此前这里只 `emit("tiered-compaction/evict")`，
+        // 而**生产代码里没有任何监听者**——只有测试在听。于是第 3 层的驱逐
+        // 在真实会话里从未执行过：日志会打「已广播易失内容驱逐事件」，
+        // 看起来像做了事，实际会话表面一个字节都没变。
+        // 这正是本插件反复踩的同一类坑：**广播不等于落地，有监听才算生效**。
+        //
+        // 现在直接调用观察者上已有的 evictStaleToolResults（它本来就是为这一层
+        // 写的，只是从没人调用），并保留事件广播供外部观测。
         if (action === "evict") {
             this.ctx.emit("tiered-compaction/evict", { session, pressure, at: Date.now() });
-            this.ctx.logger.warn(`tiered-compaction: 窗口压力 ${(pressure * 100).toFixed(0)}%（80%），已广播易失内容驱逐事件`);
+            try {
+                const { evicted } = await this.observer.evictStaleToolResults(session);
+                this.ctx.logger.warn(
+                    `tiered-compaction: 窗口压力 ${(pressure * 100).toFixed(0)}%（80%），` +
+                    `已驱逐 ${evicted} 个可重放工具结果`,
+                );
+            } catch (error) {
+                // 驱逐失败只降级：绝不能因为瘦身失败让步进炸掉
+                this.ctx.logger.warn(
+                    `tiered-compaction: 80% 驱逐失败（已忽略）：${error?.message ?? error}`,
+                );
+            }
         }
         // 第 4 层触发判定：overflow 直接触发；pressure 达阈值触发。
         // 阈值按**当前路由模型**取策略：不同模型窗口差 8 倍，
