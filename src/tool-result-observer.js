@@ -122,27 +122,45 @@ export class ToolResultObserver {
     async handleEvent(session, event) {
         if (event?.type !== "tool/result") return;
         if (event.seq === undefined || this.done.has(event.seq)) return;
+        // D17 系统审计修复（2026-10-27）：去重标记必须在 **await 之前**占位。
+        //
+        // 缺陷：旧代码在 `await this.engine.processToolOutput(...)` **之后**才
+        // `this.done.add(event.seq)`。这中间有一个真实的竞态窗口：
+        // 同一事件被并发派发两次（宿主重放、钩子重复注册、或宿主不 await 钩子），
+        // 两次调用都会通过 `done.has()` 检查，于是：
+        //   · engine 处理两次（白做一次折叠/落盘，多写一个存档文件）
+        //   · 产生两条 surfaceOp: replace 事件（同一位置被替换两次）
+        // 实测复现：并发两次 → processToolOutput 被调用 2 次、替换事件 2 条。
+        //
+        // 修法：进入前先占位（先 add 再 await），失败时再回滚。
+        // 这样即使并发进入，第二个调用会在第一行就被挡掉。
+        this.done.add(event.seq);
         const text = textOfToolResult(event);
         if (text === null) {
-            this.done.add(event.seq);
             this.stats.skipped += 1;
             return;
         }
         // 第 1-2 层：折叠 → （折叠后仍 >8k 字节才）落盘
         // 传 sessionId：存档文件名据此区分会话，避免跨会话 seq 重号互相覆盖
         // （D17 验收 P0-1：旧文件名只有 arbitrated-<seq>，不同会话必然重号）
-        const { text: processed, layers } = await this.engine.processToolOutput(text, {
-            seq: event.seq,
-            sessionId: session?.id,
-        });
+        let processed;
+        let layers;
+        try {
+            ({ text: processed, layers } = await this.engine.processToolOutput(text, {
+                seq: event.seq,
+                sessionId: session?.id,
+            }));
+        } catch (error) {
+            // 处理失败必须回滚占位，否则该 seq 永久被跳过（下次重放也无法补救）
+            this.done.delete(event.seq);
+            throw error;
+        }
         if (processed === text || layers.length === 0) {
-            this.done.add(event.seq);
-            return;
+            return; // 无收益，占位保留（不必重复尝试同一内容）
         }
         // 落盘信息从谱系表取回（引擎在落盘层已登记）
         const spillInfo = this.engine.lastSpillInfo?.(event.seq) ?? {};
         this.replace(session, event, processed, spillInfo);
-        this.done.add(event.seq);
         this.stats.replaced += 1;
         this.stats.bytesSaved += Math.max(0, text.length - processed.length);
         this.ctx.logger.info(
