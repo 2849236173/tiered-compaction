@@ -156,15 +156,38 @@ export async function spillIfNeeded(text, archiveDir, baseName, options = {}) {
  * 用 `wx` 标志原子地「创建或失败」，避免先检查后写入之间的竞态：
  * 两个并发落盘抢同一名字时，只有一个能建成，另一个自然落到下一个后缀。
  *
+ * **交叉审计修复（2026-10-27，gpt-6-astra 报、我实跑确认）**：
+ * baseName 可能来自外部输入（如 `goal-switch` 用 oldGoalId 拼名字），
+ * 而 `join()` 只会规范化路径、**不会阻止 `../` 逃出目录**。
+ * 实测：baseName = `goal-switch-../../../escaped-node1` 时，
+ * 文件被写到了 archiveDir **外面**（`...\escaped-node1.txt`）。
+ *
+ * 修法：把 baseName 里的路径分隔符与 `..` 消毒掉，
+ * 并最终断言解析后的绝对路径仍在 archiveDir 之内（双保险）。
+ *
  * @param {string} archiveDir 存档目录
  * @param {string} baseName 文件名主体
  * @returns {Promise<string>} 可用路径
  */
 async function uniquePath(archiveDir, baseName) {
     const { open } = await import("node:fs/promises");
+    const { resolve, sep } = await import("node:path");
+    // 消毒：去掉路径分隔符、父目录引用、以及 NUL 等控制字符，
+    // 只保留文件系统上安全的字符（中文/字母/数字/._- 都保留）
+    const safeName = String(baseName)
+        .replace(/[\\/]+/g, "-")        // 分隔符 → 短横
+        .replace(/\.\.+/g, ".")          // .. → .
+        .replace(/[\u0000-\u001f]/g, "") // 控制字符
+        .replace(/^\.+/, "")             // 别以点开头（隐藏文件/相对引用）
+        .slice(0, 120) || "archive";     // 兜底 + 限长（Windows 路径上限）
+    const rootAbs = resolve(archiveDir);
     for (let n = 1; n <= 1000; n += 1) {
-        const name = n === 1 ? `${baseName}.txt` : `${baseName}-${n}.txt`;
+        const name = n === 1 ? `${safeName}.txt` : `${safeName}-${n}.txt`;
         const candidate = join(archiveDir, name);
+        // 双保险：解析后的绝对路径必须仍在 archiveDir 之内
+        if (!resolve(candidate).startsWith(rootAbs + sep)) {
+            throw new Error(`spill-to-disk: 存档名越出目录（已拒绝）：${name}`);
+        }
         try {
             // wx：文件已存在则抛 EEXIST，绝不截断已有内容
             const handle = await open(candidate, "wx");

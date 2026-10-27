@@ -454,7 +454,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
             });
         // P4-2：事务提交后把会话落盘（basic 同款 durability checkpoint）。
         // 缺这一步时压缩结果只在内存里，进程崩溃会丢掉整次压缩。
-        await this._flushAfterCommit();
+        await this._flushAfterCommit(agent?.session);
         return result;
     }
 
@@ -462,12 +462,25 @@ export class TieredCompactionEngineService extends CompactionEngine {
      * 压缩提交后的持久化检查点（P4-2）。
      * 失败按 basic 口径抛 persistence 错误：压缩已提交但没落地，属于耐久性缺陷，
      * 不能静默放过（否则用户以为省了 token，重启后发现没省）。
+     *
+     * **交叉审计修复（2026-10-27，gpt-6-astra 报、我实跑确认）**：
+     * 宿主签名是 `flush(session)`，不是无参。实测宿主实现：
+     *   `async flush(session) { const { carrier } = this.liveEntryFor(session); ... }`
+     * 而 `liveEntryFor` 第一行就读 `session.id`——
+     * 传 undefined 直接抛 TypeError。
+     *
+     * 后果：**手动 `/compact` 每次都失败**（错误被包装成 persistence）。
+     * 自动路径不走这里，所以这个 bug 一直没被真实使用暴露。
+     *
+     * @param {object} [session] 要落盘的会话
      */
-    async _flushAfterCommit() {
+    async _flushAfterCommit(session) {
         const sessions = this.ctx.sessions;
         if (typeof sessions?.flush !== "function") return;
+        // 没有会话就跳过：宁可不落盘，也不能用 undefined 去打宿主接口
+        if (session === undefined || session === null) return;
         try {
-            await sessions.flush();
+            await sessions.flush(session);
         } catch (error) {
             throw new ManualCompactionError("persistence", "manual compaction durability checkpoint failed", { cause: error });
         }
@@ -870,9 +883,24 @@ export class TieredCompactionEngineService extends CompactionEngine {
             const prepared = { start, end, shadowedSeqs: [...shadowedSeqs] };
             const { summary, provider, model, maxTokens } = await this.summarize(input, agent, signal);
 
+            // 取消检查（交叉审计修复，2026-10-27，gpt-6-astra 报、我实跑确认）。
+            //
+            // 缺陷：旧实现只在**入口**检查一次 signal，摘要（一次 LLM 往返，
+            // 几秒到几十秒）期间用户按了取消，返回后照样提交——
+            // 实测 `{aborted:true, checkpointCommitted:true}`，
+            // 取消操作完全没能阻止不可逆的会话写入。
+            //
+            // 原版 basic 在摘要后、提交前都再查一次（lib/index.js:479/513）。
+            // 这里照抄：已花掉的 LLM 调用无法收回，但**内容不能提交**。
+            signal?.throwIfAborted();
+
             // 护栏 2：提交前校验选区仍然可替换（basic 的 assertSelectedSpanStable 等价物）。
             // 摘要已花掉一次 LLM 调用，若此处发现变动，宁可丢弃摘要也不提交错位内容。
             this._assertSpanStable(session, prepared);
+
+            // 提交前最后一道取消检查：稳定性校验可能耗时（扫表面），
+            // 期间仍可能被取消。
+            signal?.throwIfAborted();
 
             const framedEstimate = estimateTokens(summary);
             if (framedEstimate >= estimate) {

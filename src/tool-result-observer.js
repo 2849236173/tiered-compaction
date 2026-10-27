@@ -160,9 +160,34 @@ export class ToolResultObserver {
     async handleEvent(session, event) {
         if (event?.type !== "tool/result") return;
         if (event.seq === undefined) return;
-        // 去重集合按会话隔离（P0-1）：seq 是会话内序号，跨会话共用会串味。
+        // **P0 交叉审计修复（2026-10-27，gpt-6-astra 报、我实跑确认）**：
+        // 必须排除「我们自己写回的替换事件」，否则会自我递归到 OOM。
+        //
+        // 缺陷链条：
+        //   1. 宿主 `Session.commit()` 会**同步**调用所有 `session/event` 监听器
+        //      （dsh-session lib:1592），且**不 await** 返回的 Promise
+        //      （lib:1231 `Promise.resolve(returned).catch(...)`）。
+        //   2. 我们处理源 tool/result 时异步落盘，然后 append 一条带
+        //      `surfaceOp: replace` 的**新 tool/result**。
+        //   3. 那条 append 又同步触发本观察者，新事件 seq 不在 done 里，
+        //      于是再次进入 processToolOutput → 再 append → 无限递归。
+        //
+        // 实测后果：**进程直接 OOM 崩溃**
+        // （`FATAL ERROR: Ineffective mark-compacts near heap limit`）。
+        // 现有 164 条测试全绿也抓不到——因为 fake session 的 append
+        // 不会派发 session/event，桩比现实"更安静"。
+        //
+        // 三道防线（任一命中即跳过）：
+        //   1. 我们自己写回的替换内容带 PRUNE_MARKER
+        //   2. 事件带 surfaceOp（只有替换/驱逐产物才有；源事件是 append）
+        //   3. 该 seq 已在 done / evicted 里
         const state = this.stateOf(session);
         if (state.done.has(event.seq)) return;
+
+        const eventText = textOfToolResult(event);
+        if (eventText !== null && eventText.startsWith(PRUNE_MARKER)) return;
+        if (event.data?.surfaceOp?.op === "replace") return;
+        if (state.evicted.has(event.seq)) return;
         // D17 系统审计修复（2026-10-27）：去重标记必须在 **await 之前**占位。
         //
         // 缺陷：旧代码在 `await this.engine.processToolOutput(...)` **之后**才
