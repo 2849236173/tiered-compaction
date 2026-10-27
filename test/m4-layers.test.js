@@ -22,7 +22,7 @@ test("A3 压力动作：<70% 不动、70-80% 只提醒、≥80% 驱逐", () => {
     assert.equal(pressureAction(EVICT_RATIO), "evict");
 });
 
-test("A3 驱逐：易失项被驱逐并登记谱系，永不清理项零丢失", () => {
+test("A3 驱逐：可重放项被驱逐并登记谱系，永不清理项零丢失", () => {
     const lineage = new Lineage();
     const nodes = [
         { seq: 1, kind: "user-message", content: "用户原话" },
@@ -42,16 +42,34 @@ test("A3 驱逐：易失项被驱逐并登记谱系，永不清理项零丢失",
     for (const must of ["user-message", "todo", "goal", "plan", "summary"]) {
         assert.ok(keptKinds.includes(must), `永不清理项 ${must} 被误驱逐`);
     }
-    // 易失 3 项全部驱逐且可重放性正确
-    assert.equal(evicted.length, 3);
-    const bySeq = new Map(evicted.map((e) => [e.seq, e]));
-    assert.equal(bySeq.get(6).replayable, false, "pwsh 输出不可重放");
-    assert.equal(bySeq.get(7).replayable, true, "read 可重放");
-    assert.equal(bySeq.get(8).replayable, false);
-    // 驱逐必须全部登记谱系（A10）
-    for (const e of evicted) {
-        assert.equal(lineage.findByOriginal(`node#${e.seq}`).length, 1);
-    }
+    // A-P0-4（2026-10-27 系统审计）：不可重放且无存档的内容**不得驱逐**。
+    // 旧实现把 pwsh/system-reminder 也驱逐了，谱系里只写一句占位文本、
+    // 没有任何存档——那是永久丢数据。现在它们必须留在 kept 里。
+    const evictedKinds = evicted.map((e) => nodes.find((n) => n.seq === e.seq).kind);
+    assert.ok(!evictedKinds.includes("pwsh"), "pwsh 输出不可重放且无存档，不得驱逐");
+    assert.ok(!evictedKinds.includes("system-reminder"), "系统提醒无存档，不得驱逐");
+
+    // 只有可重放的 read 可被驱逐
+    assert.equal(evicted.length, 1, "只有 read 可重放，应被驱逐");
+    assert.equal(evicted[0].seq, 7);
+    assert.equal(evicted[0].replayable, true);
+    // 驱逐必须登记谱系（A10）
+    assert.equal(lineage.findByOriginal("node#7").length, 1);
+});
+
+test("A-P0-4 不可重放但已存档的内容才允许驱逐", () => {
+    const lineage = new Lineage();
+    const nodes = [
+        { seq: 1, kind: "pwsh", content: "命令输出", archived: true, archivePath: "/archive/x.txt" },
+        { seq: 2, kind: "pwsh", content: "未存档的命令输出" },
+    ];
+    const { evicted, kept } = evictVolatile(nodes, { lineage });
+    assert.equal(evicted.length, 1, "只有已存档的才可驱逐");
+    assert.equal(evicted[0].seq, 1);
+    assert.ok(kept.some((n) => n.seq === 2), "未存档的必须保留");
+    // 谱系必须指向真实存档路径，不是占位文本
+    const rec = lineage.findByOriginal("node#1")[0];
+    assert.equal(rec.newLocation, "/archive/x.txt", "谱系必须记录真实存档路径");
 });
 
 test("A4a 摘要预算预留：阈值落在合理区间 + 请求参数硬验证", () => {
@@ -147,12 +165,28 @@ test("A7 仲裁器：落盘连续失败降级为跳过该层，主流程拿到�
     assert.equal(r2.text, big, "主流程必须拿到原文继续，绝不被压缩层故障阻断");
 });
 
-test("仲裁器短路：折叠后 ≤8k 的内容不再落盘（一层归属唯一）", async (t) => {
+test("仲裁器：折叠后 ≤8k 时不再**额外**落盘预览，但折叠原文必须存档", async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "arb2-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const lineage = new Lineage();
     const dup = ("log line\n").repeat(3000); // 26k 全重复，折叠后远小于 8k
     const r = await arbitrate(dup, { seq: 9 }, { archiveDir: dir, lineage });
-    assert.deepEqual(r.layers, ["lossless-fold"], "折叠后已达标不得重复落盘");
-    assert.ok(r.text.length < 1000, "折叠后文本必须显著缩小");
+
+    // 层归属：只有折叠（不再叠加 spill-to-disk 的预览替换）
+    assert.deepEqual(r.layers, ["lossless-fold", "fold-archive"], "一层归属 + 折叠原文存档");
+    assert.ok(r.text.length < 1000, "回填表面的文本必须显著缩小");
+
+    // P0 审计（2026-10-27）：折叠的原文必须落盘，否则「无损」不成立。
+    // 旧实现在这里存档文件数为 0，原文只活在进程内存里，重启即丢。
+    const { readdir, readFile } = await import("node:fs/promises");
+    const files = await readdir(dir);
+    assert.equal(files.length, 1, "折叠必须留下 1 个原文存档");
+
+    const rec = lineage.toArray().find((e) => e.replacedBy === "lossless-fold");
+    assert.ok(rec, "谱系必须登记折叠");
+    assert.match(rec.newLocation, /\.txt$/, "谱系必须指向真实文件，不能是伪路径 fold:N");
+    assert.ok(rec.digest.length > 0, "谱系必须带 digest");
+
+    const archived = await readFile(rec.newLocation, "utf8");
+    assert.equal(archived, dup, "存档必须逐字节等于原文——这才是「无损」");
 });

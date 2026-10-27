@@ -56,7 +56,9 @@ export function foldRepeatedLines(text, options = {}) {
         const saved = (runLen - 1) * byteLength(line);
         const cost = byteLength(marker);
         if (runLen >= minRun && saved > cost) {
-            runs.push({ line, start: out.length, count: runLen });
+            // start 记**原文中的行号**（不是输出数组下标）。
+            // 审计指出旧写法存 out.length，语义错且从不被读取。
+            runs.push({ line, start: i, count: runLen });
             out.push(line);
             out.push(marker);
             i += runLen;
@@ -87,23 +89,80 @@ export function foldRepeatedLines(text, options = {}) {
  * @returns {string} 还原后的原文
  */
 export function unfold(folded, record) {
-    // 自校验 1：记录里的原文重新折叠必须得到同样的 folded（防记录被篡改/错配）
-    const refolded = foldRepeatedLines(record.original).folded;
-    if (refolded !== folded) {
-        throw new Error("lossless-fold: 折叠记录与 folded 文本不一致，拒绝逆变换");
+    if (record === null || typeof record !== "object" || !Array.isArray(record.runs)) {
+        throw new Error("lossless-fold: 折叠记录缺失或格式不对，拒绝逆变换");
     }
-    // 自校验 2：runs 摘要必须与原文重折叠的结果一致
-    for (const run of record.runs) {
-        const lines = record.original.split("\n");
-        let seen = 0;
-        for (let k = 0; k < lines.length; k += 1) {
-            if (lines[k] === run.line) seen += 1;
+    // 真正的逆变换：**按 runs 重建**，而不是相信 record.original。
+    //
+    // P0 审计发现（2026-10-27）：旧实现自校验后直接 `return record.original`，
+    // 即"还原"只是把保存的原文吐回来，runs 从头到尾没参与重建。
+    // 后果（实测）：把 runs 清空 / count 改小 / start 改成 999，
+    // 三种篡改**全部通过**——所谓自校验形同虚设。
+    //
+    // 现在改为：把折叠文本按行扫一遍，遇到折叠标记就按 runs 里的 count
+    // 展开成 N 行原文。任何不一致都拒绝。
+    const markerPattern = new RegExp(`^${FOLD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)x\\]$`);
+    const foldedLines = folded.split("\n");
+    const out = [];
+    let runIndex = 0;
+    for (const line of foldedLines) {
+        const marker = markerPattern.exec(line);
+        if (marker === null) {
+            out.push(line);
+            continue;
         }
-        if (seen < run.count) {
-            throw new Error("lossless-fold: 折叠记录的重复计数与原文不符");
+        const count = Number(marker[1]);
+        const run = record.runs[runIndex];
+        if (run === undefined) {
+            throw new Error(`lossless-fold: 第 ${runIndex + 1} 个折叠标记在记录里没有对应项`);
+        }
+        if (run.count !== count) {
+            throw new Error(
+                `lossless-fold: 折叠标记声明 ${count} 行，记录里是 ${run.count} 行（记录与文本不一致）`,
+            );
+        }
+        // 必须紧邻上一行：标记展开的就是它前面那一行
+        if (out.length === 0 || out[out.length - 1] !== run.line) {
+            throw new Error("lossless-fold: 折叠标记前一行与记录里的重复行不一致");
+        }
+        for (let k = 1; k < count; k += 1) out.push(run.line);
+        runIndex += 1;
+    }
+        if (runIndex !== record.runs.length) {
+        throw new Error(
+            `lossless-fold: 记录里有 ${record.runs.length} 个折叠组，文本里只解析出 ${runIndex} 个`,
+        );
+    }
+    const rebuilt = out.join("\n");
+    // 终检：重建结果重新折叠必须还原出传入的 folded（双向一致）
+    if (foldRepeatedLines(rebuilt).folded !== folded) {
+        throw new Error("lossless-fold: 重建结果与 folded 文本不自洽，拒绝返回");
+    }
+    // 位置校验：record.runs[i].start 记的是**原文中的行号**（从 0 起）。
+    // 审计指出旧实现里 start 存的是输出数组下标、且从不被读取——
+    // 既是死字段，语义又是错的。现在按原文行号校验，让它真正起作用。
+    if (record.runs.some((run) => typeof run?.start === "number")) {
+        const rebuiltLines = rebuilt.split("\n");
+        let lineNo = 0;
+        for (const run of record.runs) {
+            // 找到该重复行的首次出现位置（从上一个组之后开始找）
+            while (lineNo < rebuiltLines.length && rebuiltLines[lineNo] !== run.line) lineNo += 1;
+            if (lineNo >= rebuiltLines.length) {
+                throw new Error(`lossless-fold: 记录里的重复行在重建结果中找不到（第 ${run.start} 行）`);
+            }
+            if (typeof run.start === "number" && run.start !== lineNo) {
+                throw new Error(
+                    `lossless-fold: 折叠记录的位置 ${run.start} 与重建结果的实际位置 ${lineNo} 不符`,
+                );
+            }
+            lineNo += run.count;
         }
     }
-    return record.original;
+    // 若记录附带了 original，必须与重建结果逐字一致（防止记录与文本被同时篡改）
+    if (typeof record.original === "string" && record.original !== rebuilt) {
+        throw new Error("lossless-fold: 重建结果与记录中的原文不一致，拒绝返回");
+    }
+    return rebuilt;
 }
 
 /**

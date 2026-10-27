@@ -70,23 +70,62 @@ export class CircuitBreaker {
 export async function arbitrate(text, at, deps) {
     const lineage = deps.lineage;
     const layers = [];
-    // 第 1 层：无损折叠（纯内存，不设熔断；异常原样上抛属实现缺陷）
+    // 第 1 层：无损折叠（纯内存变换，但**原文必须落盘**——见下方 P0 修复说明）
     const { folded, record } = foldRepeatedLines(text);
     let current = folded;
     if (record.runs.length > 0) {
         layers.push("lossless-fold");
-        lineage.record(`node#${at.seq}`, `fold:${at.seq}`, "lossless-fold");
+        // P0-1（2026-10-27 系统审计）：折叠的原文必须持久化，否则「无损」不成立。
+        //
+        // 缺陷：旧实现只 `lineage.record(node#seq, "fold:1", ...)` ——
+        // `fold:1` 不是文件路径、没有 digest，而 `record.original`
+        // （含完整原文）被直接丢弃。实测：2599 字节原文折叠后，
+        // 存档目录 **0 个文件**，原文只活在当次进程内存里。
+        // 进程重启 → 原文永久丢失，「无损折叠」变成「不可逆丢失」。
+        //
+        // 修法：折叠发生时把**原文**落盘（threshold 设为 1，强制写入），
+        // 谱系指向真实文件路径 + SHA-256。这样折叠产物在会话里省 token，
+        // 而原文随时能从磁盘逐字节取回。
+        let foldArchive = null;
+        try {
+            foldArchive = await spillIfNeeded(text, deps.archiveDir, spillBaseName(at), { threshold: 1 });
+        } catch (error) {
+            // 存档失败 → 放弃折叠（宁可原样返回，也不能留下不可恢复的损失）
+            deps.logger?.warn?.(
+                `tiered-compaction: 折叠存档失败，放弃本次折叠以保原文可恢复：${error?.message ?? error}`,
+            );
+            return { text, layers: [] };
+        }
+        if (foldArchive !== null) {
+            lineage.record(`node#${at.seq}`, foldArchive.path, "lossless-fold", foldArchive.sha256);
+            layers.push("fold-archive");
+        } else {
+            // threshold:1 下不该出现 null；真出现就视为存档失败，同样放弃折叠
+            return { text, layers: [] };
+        }
     }
     // 第 2 层：落盘（带熔断；>8k 字节才触发，仲裁器保证不与其它层重复处理）
     // P3-1：阈值口径统一为 UTF-8 字节数，与 spillIfNeeded 内部判断一致
     if (byteLength(current) > DEFAULT_SPILL_THRESHOLD) {
         const name = spillBaseName(at);
+        // P0 审计（2026-10-27）：落盘必须写**原始文本**，不能写折叠产物。
+        //
+        // 缺陷：旧实现把 `current`（折叠后内容）传给 spillIfNeeded，而
+        // `foldRepeatedLines` 返回的 `record`（含完整原文）被直接丢弃、
+        // 从未持久化。实测：
+        //   原文 17589 字节 → 磁盘 16429 字节，且磁盘内容含 `…[folded` 标记
+        // → 「落盘 = 完整存档、可逐字节还原」这条安全底线是假的；
+        //   要还原还得依赖当次进程内存里的折叠记录，进程重启后原文永久丢失。
+        //
+        // 修法：落盘传原始 `text`。折叠只作用于**回填表面的预览**，
+        // 存档本身必须是能独立还原的原文。
         const spill = deps.spillBreaker
-            ? await deps.spillBreaker.exec(() => spillIfNeeded(current, deps.archiveDir, name))
-            : await spillIfNeeded(current, deps.archiveDir, name);
+            ? await deps.spillBreaker.exec(() => spillIfNeeded(text, deps.archiveDir, name))
+            : await spillIfNeeded(text, deps.archiveDir, name);
         if (spill) {
             layers.push("spill-to-disk");
             lineage.record(`node#${at.seq}`, spill.path, "spill-to-disk", spill.sha256);
+            // 回填表面的仍是折叠后的预览（体积小，且够模型判断要不要回读）
             current = spill.preview;
         } else {
             layers.push("spill-to-disk:bypassed(circuit-open)");

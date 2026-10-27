@@ -55,6 +55,7 @@ export class TieredCompactionEngine {
             archiveDir: this.deps.archiveDir,
             lineage: this.lineage,
             spillBreaker: this.spillBreaker,
+            logger: this.logger,
         });
         // 记下这次落盘的存档信息，供宿主替换事件写进预览（观察者取用）
         this.spillInfo ??= new Map();
