@@ -33,6 +33,9 @@ import { lossyThreshold, RESERVE_TOKENS, HEADROOM_TOKENS } from "./lossy-summari
 // 不能再依赖 index.js 里那个未被实例化的类。
 import { TieredCompactionEngine } from "./engine.js";
 import { ToolResultObserver } from "./tool-result-observer.js";
+// 摘要输入构造器（D18 新增模块）：把选区还原成结构化消息序列。
+// 这里只消费、不重复实现——旧实现在本文件里拍平成字符串，正是这次要拆掉的东西。
+import { buildSummaryInput } from "./summary-input.js";
 
 /**
  * 把流式摘要的终止状态映射成必须上抛的错误（照抄 basic finishError 判定口径）。
@@ -285,20 +288,145 @@ const CHECKPOINT_PREAMBLE =
     "This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.";
 
 /**
- * 把摘要文本包进与 basic 相同的 checkpoint 框架（basic frameSummary 的文本版）。
- * @param {string} summary 纯文本摘要
- * @returns {Array<{type: "text", text: string}>}
+ * 把摘要文本包进与 basic 相同的 checkpoint 框架（basic `frameSummary` 的文本版）。
+ *
+ * 为什么必须是三段而不是一段：投影层靠首段的 `SUMMARY_OPEN_TAG` 与末段的
+ * `SUMMARY_CLOSE_TAG` 识别「这条 user 消息是检查点」。旧实现只拼了前缀文本、
+ * 从不写闭标签，检查点在续做时不会被当成已确立背景——等于每次续做都重新读
+ * 一遍原文的摘要，压缩效果打折。basic:344-356 的 `frameSummary` 就是三段。
+ *
+ * @param {string} summary 纯文本摘要正文
+ * @returns {Array<{type: "text", text: string}>} 三段检查点内容
+ * @throws {Error} 正文为空时抛错——空检查点会覆盖原文，宁可失败
  */
 function frameSummaryText(summary) {
-    return [
-        { type: "text", text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` },
-        { type: "text", text: summary },
-        { type: "text", text: SUMMARY_CLOSE_TAG },
-    ];
+    // 卫语句：没有正文就不构造检查点，交给上层按失败处理（绝不能提交空检查点）
+    if (typeof summary !== "string") {
+        throw new Error("tiered-compaction: 摘要正文不是字符串，拒绝构造检查点");
+    }
+
+    if (summary.length === 0) {
+        throw new Error("tiered-compaction: 摘要正文为空，拒绝构造检查点");
+    }
+
+    // 首段固定前言 + 开标签：投影层据此认定检查点开始
+    const head = { type: "text", text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` };
+
+    // 中段原样承载摘要正文，不拆块、不加工——拆块会改变模型看到的文本形态
+    const body = { type: "text", text: summary };
+
+    // 末段闭标签：缺了它，检查点没有结束边界，投影层无法闭合识别
+    const tail = { type: "text", text: SUMMARY_CLOSE_TAG };
+
+    return [head, body, tail];
 }
 
-/** 估算文本 token（自算口径：字符数/4，向上取整；压力判断用 meter 正式读数）。 */
-const estimateTokens = (text) => Math.ceil(text.length / 4);
+/**
+ * 估算纯文本 token（自算口径：字符数/4，向上取整；压力判断用 meter 正式读数）。
+ * @param {string} text 文本
+ * @returns {number} 估算 token 数
+ */
+const estimateTextTokens = (text) => Math.ceil(text.length / 4);
+
+/**
+ * 估算一条消息的 token（与 `estimateTextTokens` 同口径，字符数/4）。
+ *
+ * 为什么消息要单独算：摘要输入改成了结构化消息数组（content 是块数组），
+ * 直接对对象取 `.length` 会得到 undefined。
+ *
+ * 计入哪些字符必须与旧口径 `textOfEventForSummary` 一致，否则
+ * 「摘要是否比原文小」这个判据会因输入形态变化而漂移：
+ *   - text 块：计正文
+ *   - tool-call 块：计「工具名 + 参数」，与旧实现 push 的那一行等长
+ *   - reasoning / image：不计（旧实现同样丢弃，理由见该函数注释）
+ * 少计会让 estimate 偏小，使判据**更严**（更容易判出「摘要更大」而拒提交）；
+ * 多计才会放水。因此宁可把工具参数算进去，也不能漏。
+ *
+ * @param {object} message 结构化消息 `{role, content}`
+ * @returns {number} 估算 token 数
+ */
+function estimateMessageTokens(message) {
+    const content = message?.content;
+
+    // 字符串 content 是宿主允许的简写形态，直接按文本算
+    if (typeof content === "string") {
+        return estimateTextTokens(content);
+    }
+
+    // 没有块数组就等于没有可计价内容，按 0 计（不抛错：估算不该成为失败源）
+    if (!Array.isArray(content)) {
+        return 0;
+    }
+
+    // 逐块累计字符数，块类型决定计哪些字符
+    let total = 0;
+    for (const block of content) {
+        if (block === null || typeof block !== "object") {
+            continue;
+        }
+
+        // text 块：正文本身
+        if (typeof block.text === "string") {
+            total += block.text.length;
+            continue;
+        }
+
+        // tool-call 块：按旧投影的「[调用工具 名] 参数」形态折算等长字符数
+        if (block.type === "tool-call") {
+            const name = typeof block.name === "string" ? block.name : "unknown";
+            const args = typeof block.arguments === "string" ? block.arguments : "";
+            total += `[调用工具 ${name}] ${args}`.length;
+        }
+    }
+
+    return Math.ceil(total / 4);
+}
+
+/**
+ * 估算摘要输入的 token 总量：按消息逐条累加，口径与 `estimateTextTokens` 一致。
+ *
+ * 为什么按消息算而不是按拼接后的字符串算：结构化输入保留了 role 与块边界，
+ * 若先拼成字符串再估，等于把「结构」这个本次改造的收益重新丢掉，而且拼接
+ * 长度会因为分隔符选择而漂移，让「摘要必须比原文小」的判据变得不可解释。
+ *
+ * **为什么跳过第一条 system 消息**：`buildSummaryInput` 会把会话 system 头
+ * 放进消息列表最前面（为了命中 KV 缓存），但 system 头**不在被取代的选区里**——
+ * 压缩后它仍然留在会话中。把它计入 estimate 会让分母凭空变大（真实宿主
+ * 的 system 前缀动辄数千 token），「摘要比原文小」这条判据就被放水到几乎
+ * 永远成立。跳过它才与改造前的口径等价。
+ *
+ * **为什么是「第一条」而不是「所有 role === system」**（GLM 复核挖出的口径缺口）：
+ * 旧实现跳过全部 system 消息。若选区里恰好混入一条 system（边界可达），
+ * 它的体量也被无视，分母偏小 → 判据反而变严 → **正常能通过的摘要被误拒绝**。
+ * 实测：真实 2200 token 的被压缩内容被算成 200 token，摘要一律拒提交。
+ * 正确口径是只跳过头那一条：它才是「选外」的那条。
+ *
+ * @param {{messages: object[]}} input 摘要输入
+ * @returns {number} 估算 token 数
+ */
+function estimateInputTokens(input) {
+    const messages = input?.messages;
+
+    if (!Array.isArray(messages)) {
+        return 0;
+    }
+
+    let total = 0;
+    let skippedHead = false;
+
+    for (const message of messages) {
+        // 只跳过消息列表最前面那一条 system 头（选外内容）；
+        // 选区内部若出现 system，它确实会被压缩掉，必须计入分母
+        if (skippedHead === false && message !== null && typeof message === "object" && message.role === "system") {
+            skippedHead = true;
+            continue;
+        }
+
+        total += estimateMessageTokens(message);
+    }
+
+    return total;
+}
 
 /**
  * 配置加载期校验（P4-1）。
@@ -637,17 +765,120 @@ export class TieredCompactionEngineService extends CompactionEngine {
 
     /**
      * basic 契约的摘要覆写点：第 4 层预算预留（A4a：maxTokens 写死 20k）。
-     * @param {string} input 待摘要文本
+     *
+     * **入参形状变更（D18）**：第二参从「已拍平的字符串」改为
+     * `{messages, tools?}` 结构化输入，对齐 basic `summarizeWithLlm`。
+     * 为什么必须改：原版把会话前缀（含 role、content 块、tools、toolHistory、
+     * sessionId）原样重放给 provider，provider 侧能命中 KV 缓存；
+     * 我方旧实现把消息拼成一个字符串，role 与结构全丢，缓存永远命中不了，
+     * 每次摘要都要全量重算数万 prompt token。
+     *
+     * **`config.summarizeFn` 的三参位置刻意保持不变**：
+     * `summarizeFn(request, normalized, signal)`——第二参类型由 `string` 变为
+     * `{messages, tools?}`，**形状变了，位置没变**。
+     * 为什么刻意不动位置：位置一旦挪动（例如去掉第二参、把 signal 提到第 2 位），
+     * 按旧签名 `(request, input, signal)` 实现的外部注入方不会报错——它会安静地
+     * 把 signal 当成 input 收下，拿错数据比抛错更难查。位置不变，老实现即便
+     * 语义过时也不会串位。
+     *
+     * **已知变更（验收单记录）**：旧实现若仍把第二参当字符串处理（例如直接
+     * `input.length` 或拼进 prompt），拿到的会是对象而不是字符串；这是为保住
+     * 三参位置有意接受的代价，由注入方按新形状适配。
+     *
+     * @param {{messages: object[], tools?: unknown}|string} input 结构化摘要输入（旧调用方可继续传字符串）
+     * @param {object} agent 宿主 agent（提供会话路由与 session）
+     * @param {AbortSignal|undefined} signal 可选取消信号
      * @returns {Promise<{summary: string, provider: string, model: string, maxTokens: number}>}
+     * @throws {ManualCompactionError} 路由缺失、实现缺失、输入不合法或摘要为空时
      */
     async summarize(input, agent, signal) {
+        // 卫语句①：没有摘要路由就没法发请求，不必先拼消息白做一半工作
         const target = this._summaryTargetOf(agent);
-        if (target === undefined) throw new ManualCompactionError("summary", "tiered-compaction: 无摘要路由（summaryTarget 与会话路由均缺）");
+        if (target === undefined) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 无摘要路由（summaryTarget 与会话路由均缺）");
+        }
+
+        // 卫语句②：没有摘要实现同样立刻失败，不进入组装
         const summarizeFn = this.config.summarizeFn ?? this._summarizeFnFromCtx();
-        if (!summarizeFn) throw new ManualCompactionError("summary", "tiered-compaction: 无摘要实现（config.summarizeFn 或 ctx.llm 均缺）");
-        const request = { provider: target.provider, model: target.model, maxTokens: RESERVE_TOKENS, purpose: "compaction" };
-        const summary = await summarizeFn(request, input, signal);
-        if (!summary || summary.length === 0) throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果为空，拒绝提交");
+        if (summarizeFn === undefined) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 无摘要实现（config.summarizeFn 或 ctx.llm 均缺）");
+        }
+
+        // 卫语句③：输入缺失说明上游构造器已经失败，报错比发一个空请求诚实
+        if (input === undefined || input === null) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要输入缺失");
+        }
+
+        // 入参形态归一：历史调用方（含 d17 回归用例）按旧签名传字符串进来。
+        // 这里把字符串包成一条 user 消息，让新旧两种形态共用同一条组装逻辑——
+        // 兼容层只做形状转换，不复制组装逻辑，避免两套路径日后各自跑偏。
+        let normalized = input;
+        if (typeof input === "string") {
+            normalized = { messages: [{ role: "user", content: [{ type: "text", text: input }] }] };
+        }
+
+        // 卫语句④：没有消息就没有可摘要的对象。空数组也拦——
+        // 真正发出去会得到一段凭空编造的摘要，然后覆盖掉真实原文
+        if (!Array.isArray(normalized.messages) || normalized.messages.length === 0) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要输入不含任何消息");
+        }
+
+        // 重放会话前缀，末尾追加一条压缩指令：顺序与原版一致，
+        // 前缀越靠前越可能命中 provider 的 KV 缓存
+        const messages = [
+            ...normalized.messages,
+            { role: "user", content: [{ type: "text", text: COMPACTION_INSTRUCTION }] },
+        ];
+
+        // 必带字段一次写清：这五项每次都必须在，缺任何一项都会让请求语义变形
+        const request = {
+            provider: target.provider,
+            model: target.model,
+            messages,
+            maxTokens: RESERVE_TOKENS,
+            purpose: "compaction",
+        };
+
+        // 可选字段逐条追加：缺失时键根本不存在，而不是带着 undefined 值发出去
+        // （宿主按 `in` 判断有无，undefined 值等于「有但空」，行为不同）
+        if (normalized.tools !== undefined) {
+            request.tools = [...normalized.tools];
+        }
+
+        // session 可能不存在（宿主早期或测试桩）。可选链直达，不用三元判空：
+        // 判空是控制流决定，写成三元会把「没有会话」这个分支藏进表达式里
+        const session = agent?.session;
+
+        // 工具历史是复用 KV 缓存的关键：请求头里会重放这次会话用过的工具签名
+        if (session !== undefined && session !== null && typeof session.toolHistory === "function") {
+            request.toolHistory = session.toolHistory();
+        }
+
+        // 会话标识同样参与缓存键：同一会话的连续请求才可能命中同一段缓存
+        if (session !== undefined && session !== null && session.id !== undefined) {
+            request.sessionId = session.id;
+        }
+
+        // 取消信号透传给 provider，用户取消时能真正中断在途请求
+        if (signal !== undefined) {
+            request.signal = signal;
+        }
+
+        // 发请求。三参位置与改造前一致：第二参只换了形状（字符串→结构化对象），
+        // 没有把 signal 前移，外部旧实现不会默默把 signal 当输入收下。
+        const summary = await summarizeFn(request, normalized, signal);
+
+        // 空摘要拒绝提交：写一条空检查点会覆盖掉真实原文，比不压更糟。
+        //
+        // 口径用 trim()（对齐原版 basic:331-333 的 `block.text.trim().length > 0`）：
+        // 只判 length === 0 会放过纯空白（"   " / "\n\n"），
+        // 而空白检查点提交后，续做的模型看到的是「有检查点但什么也没说」——
+        // 比没有检查点更坏：它以为上下文已确立，实际信息全丢了。
+        // 实测：旧口径下 "   "、" \t \n " 三种纯空白摘要全部放行。
+        if (summary === undefined || summary === null || summary.trim().length === 0) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果为空，拒绝提交");
+        }
+
         return { summary, provider: target.provider, model: target.model, maxTokens: RESERVE_TOKENS };
     }
 
@@ -924,33 +1155,33 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 throw new Error("compaction: the selected span is no longer a valid replacement target");
             }
             const shadowedSeqs = surfaceNodes.slice(startIdx, endIdx + 1);
-            // 摘要输入：把区间内每个节点投影成文本，按表面序拼接。
+
+            // 摘要输入改为结构化消息序列（D18）：交给 summary-input.js 还原 role 与
+            // content 块，不再在本文件里拍平成字符串。
             //
-            // P0 审计发现（2026-10-27 系统审计）：旧实现只读 `data.content`，
-            // 而真实宿主里只有 `user/message` 用这个形状：
-            //   user/message      → data.content            ✅ 能读到
-            //   assistant/message → data.message.content    ❌ 旧实现读到空
-            //   tool/result       → data.message.content    ❌ 旧实现读到空
+            // 为什么必须换：拍平后 role 与块结构全丢，摘要请求在 provider 眼里
+            // 就是一段全新文本——KV 缓存永远命中不了，每次摘要全量重算数万 token。
+            // 该模块的契约是「绝不抛错」：宿主缺投影能力或投影失败时它自己退回
+            // 文本模式，所以这里不需要 try/catch。
+            const summaryInput = buildSummaryInput(session, shadowedSeqs, this.ctx.logger);
+
+            // 被取代内容的体量，用于「摘要必须比原文小」的判据。
             //
-            // 实测量化（真实会话 14 条事件）：旧逻辑只抽出 45838 字，
-            // 而实际内容有 277328 字——**丢了 83.5%**，其中
-            // tool/result 的 224556 字**一个字都没进摘要**。
-            //
-            // 后果：摘要只看得到用户说了什么，看不到助手做了什么、
-            // 工具返回了什么。而工具结果恰恰是压缩的主要对象。
-            // 这会产出「知道用户要什么、不知道进展到哪」的半截检查点，
-            // 比不压更糟——续做的模型会重复已经做过的工作。
-            //
-            // 修法：两种形状都试，且对 assistant 消息额外收集 tool-call 摘要
-            // （工具名+参数，不含 reasoning——推理过程对续做无用且极占篇幅）。
-            const input = shadowedSeqs
-                .map((seq) => textOfEventForSummary(session.eventAt(seq)))
-                .filter((t) => t.length > 0)
-                .join("\n");
-            const estimate = estimateTokens(input);
+            // 估算口径（与改造前按文本投影估算等价，只是改为按消息聚合）：
+            //   - 只累计被取代消息的 content 字符数：text 块计正文，
+            //     tool-call 计「工具名 + 参数」，与 textOfEventForSummary 采信
+            //     的字符集合完全相同；
+            //   - reasoning / image 等块不计，理由同该函数注释（对续做无用且极占篇幅）；
+            //   - system 头不计：它由 buildSummaryInput 放进消息列表以便命中缓存，
+            //     但并不在选区里、压缩后仍留在会话中，算进来会放水判据；
+            //   - 最终按「字符数 / 4」折算 token，与 estimateTextTokens 同口径。
+            // 结论：换输入形态不会让这条判据变宽松，只会因漏计而更严
+            // （宁可拒绝提交，也不拿一条更长的「摘要」覆盖掉原文）。
+            const estimate = estimateInputTokens(summaryInput);
+
             // 摘要是一次 LLM 往返，期间会话可能已经变了。记下提交前需要校验的快照。
             const prepared = { start, end, shadowedSeqs: [...shadowedSeqs] };
-            const { summary, provider, model, maxTokens } = await this.summarize(input, agent, signal);
+            const { summary, provider, model, maxTokens } = await this.summarize(summaryInput, agent, signal);
 
             // 取消检查（交叉审计修复，2026-10-27，gpt-6-astra 报、我实跑确认）。
             //
@@ -971,7 +1202,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // 期间仍可能被取消。
             signal?.throwIfAborted();
 
-            const framedEstimate = estimateTokens(summary);
+            const framedEstimate = estimateTextTokens(summary);
             if (framedEstimate >= estimate) {
                 throw new Error(`summary is not smaller than the shadowed content (${framedEstimate} estimated framed tokens >= ${estimate})`);
             }
@@ -1117,20 +1348,39 @@ export class TieredCompactionEngineService extends CompactionEngine {
     _summarizeFnFromCtx() {
         const llm = this.ctx.llm;
         if (!llm || typeof llm.stream !== "function") return undefined;
+
+        // 三参位置与改造前保持一致（D18）：第二参只换形状，不换位置，
+        // 免得外部按旧签名 (request, input, signal) 实现时把 signal 当 input 收下。
         return async (request, input, signal) => {
+            // 第二参保留以维持三参位置，实际使用 request.messages
             const assembler = new BlockAssembler();
-            const messages = [
-                { role: "user", content: [{ type: "text", text: input }] },
-                { role: "user", content: [{ type: "text", text: COMPACTION_INSTRUCTION }] },
-            ];
+
+            // 直接重放 summarize() 组好的消息数组：多一次重建就多丢一次结构
             const options = {
                 provider: request.provider,
                 model: request.model,
-                messages,
+                messages: request.messages,
                 maxTokens: request.maxTokens,
                 purpose: request.purpose ?? "compaction",
-                ...(signal === undefined ? {} : { signal }),
             };
+
+            // 可选字段逐条转交，缺失时键不存在（宿主按 in 判断有无）
+            if (request.tools !== undefined) {
+                options.tools = request.tools;
+            }
+
+            if (request.toolHistory !== undefined) {
+                options.toolHistory = request.toolHistory;
+            }
+
+            if (request.sessionId !== undefined) {
+                options.sessionId = request.sessionId;
+            }
+
+            if (signal !== undefined) {
+                options.signal = signal;
+            }
+
             for await (const chunk of llm.stream(options)) assembler.push(chunk);
             // finish 错误必须上抛：否则会把半截输出当完整摘要提交。
             //
@@ -1151,4 +1401,4 @@ export class TieredCompactionEngineService extends CompactionEngine {
 }
 
 /** 测试用探测面：暴露内部纯函数（生产代码不消费）。 */
-export const __test = { contextWindowOf, textOfEventForSummary };
+export const __test = { contextWindowOf, textOfEventForSummary, estimateInputTokens };
