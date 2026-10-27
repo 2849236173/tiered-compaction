@@ -17,16 +17,29 @@ import { Context } from "@deepseek-ai/cordis";
 
 import { apply } from "../src/index.js";
 
-/** 宿主形状的最小 session 桩：surface + eventAt + append（事件序列可断言）。 */
-function stubSession(nodes) {
+/**
+ * 宿主形状的最小 session 桩：surface + eventAt + append（事件序列可断言）。
+ * `dispatchers` 由用例注入：append 后同步调用它们（真实宿主 commit 语义，
+ * 不 await 返回的 Promise）——D19 起桩必须与宿主一样"吵"。
+ */
+function stubSession(nodes, dispatchers = []) {
     const events = [];
     let seq = 0;
     const surface = nodes.map((n) => (n.seq = ++seq, n.seq));
     const store = new Map(nodes.map((n) => [n.seq, { seq: n.seq, type: n.type, data: n.data }]));
-    return {
+    const session = {
         surface: { get nodes() { return surface; } },
         eventAt: (seq) => store.get(seq),
         requestHeader: () => ({ config: { provider: "test", model: "test" } }),
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面（缺省无监听者）。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            dispatchers.push(listener);
+            return () => {
+                const at = dispatchers.indexOf(listener);
+                if (at !== -1) dispatchers.splice(at, 1);
+            };
+        },
         append: (type, data, opts) => {
             const ev = { seq: ++seq + 1000, type, data, opts };
             events.push(ev);
@@ -38,10 +51,18 @@ function stubSession(nodes) {
                 surface.splice(idxStart, idxEnd - idxStart + 1, ev.seq);
                 store.set(ev.seq, { seq: ev.seq, type, data });
             }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const listener of dispatchers) {
+                try {
+                    const result = listener(session, ev);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
+            }
             return ev;
         },
         events,
     };
+    return session;
 }
 
 /** 宿主形状的最小 agent 桩：runMaintenance 直通执行（常开信号兜底）。 */

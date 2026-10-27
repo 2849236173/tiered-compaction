@@ -117,7 +117,7 @@ test("D17 接管接线：走真实钩子派发即可产生归档文件（端到�
     const text = lines.join("\n");
     assert.ok(Buffer.byteLength(text, "utf8") > 8000, "测试数据必须超过落盘阈值");
 
-    // 最小会话桩
+    // 最小会话桩（append 同步派发 session/event——本测试的钩子正注册在 ctx 上）
     const log = [];
     const session = {
         surface: { nodes: [] },
@@ -129,6 +129,13 @@ test("D17 接管接线：走真实钩子派发即可产生归档文件（端到�
             if (options.surfaceOp?.op === "replace") {
                 const at = session.surface.nodes.indexOf(options.surfaceOp.startSeq);
                 if (at !== -1) session.surface.nodes[at] = seq;
+            }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const fn of hooks.get("session/event") ?? []) {
+                try {
+                    const result = fn(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
             }
             return event;
         },

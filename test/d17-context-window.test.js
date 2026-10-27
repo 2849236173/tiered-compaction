@@ -27,6 +27,9 @@ import { __test } from "../src/contract.js";
 
 const { contextWindowOf } = __test;
 
+// 本文件所有 session 字面量都是「窗口读数桩」：只供 contextWindowOf 读取，
+// 没有任何事件产生路径（不 append），因此不涉及 session/event 派发语义。
+
 test("优先走 requestContext()：官方 API 给出的窗口必须被采用", () => {
     const session = {
         requestContext: () => ({ contextWindow: 20000, provider: "p", model: "m" }),

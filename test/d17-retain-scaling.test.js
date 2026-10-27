@@ -50,16 +50,39 @@ function makeHarness(windowTokens) {
     return ctx;
 }
 
-/** 最小会话桩：只提供 _selectRange 与 contextWindowOf 会读到的东西。 */
+/** 最小会话桩：只提供 _selectRange 与 contextWindowOf 会读到的东西（真实派发语义）。 */
 function makeSession(window) {
-    return {
+    const listeners = [];
+    const session = {
         surface: { nodes: [] },
         requestHeader: () => ({ config: { provider: "test-provider", model: "test-model" } }),
         // contextWindowOf 优先走官方 requestContext()，窗口必须与用例一致，
         // 否则保留量按错的窗口算（本文件第一版就栽在这）。
         requestContext: () => ({ provider: "test-provider", model: "test-model", contextWindow: window }),
         eventAt: () => undefined,
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            listeners.push(listener);
+            return () => {
+                const at = listeners.indexOf(listener);
+                if (at !== -1) listeners.splice(at, 1);
+            };
+        },
+        // 桩没有事件产生路径（_selectRange 被替换、不进事务），
+        // 但保留与宿主一致的注册面：一旦有 append，同步派发、不 await。
+        append(type, data, options = {}) {
+            const event = { seq: 0, type, data, ...options };
+            for (const listener of listeners) {
+                try {
+                    const result = listener(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
+            }
+            return event;
+        },
     };
+    return session;
 }
 
 /** 用截获的 retainTokens 跑一次 _compactWithRetention。 */

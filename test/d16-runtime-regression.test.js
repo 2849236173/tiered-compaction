@@ -24,6 +24,7 @@ test("P1-0 真实 TokenMeter 形态：没有 contextWindow()，插件必须自�
     const { __test } = await import("../src/contract.js");
     const windowOf = __test?.contextWindowOf;
     if (windowOf === undefined) return; // 未导出探测口径时跳过（不影响主断言）
+    // 纯窗口读数桩：无事件产生路径，不涉及派发语义（P5 清查：非派发对象）
     const session = {
         surface: { nodes: [1, 2] },
         eventAt: (seq) => (seq === 2 ? { type: "request/context", data: { contextWindow: 64000 } } : undefined),
@@ -35,6 +36,7 @@ test("P1-0 找不到窗口事件时用兜底值，绝不给 0（0 会让阈值�
     const { __test } = await import("../src/contract.js");
     const windowOf = __test?.contextWindowOf;
     if (windowOf === undefined) return;
+    // 同上：纯读数桩，非派发对象
     const emptySession = { surface: { nodes: [] }, eventAt: () => undefined };
     const window = windowOf(emptySession);
     assert.ok(window > 0, `兜底窗口必须为正，实得 ${window}`);
