@@ -22,27 +22,46 @@ import { Lineage } from "../src/lineage.js";
 
 const quietLogger = { info() {}, warn() {} };
 
-/** 造会话桩：seq 从 0 开始（真实语义）。 */
+/** 造会话桩：seq 从 0 开始（真实语义，append 同步派发 session/event）。 */
 function makeSession(id) {
     const log = [];
     const nodes = [];
-    return {
+    const listeners = [];
+    const session = {
         id,
         surface: { nodes },
         eventAt: (s) => log.find((e) => e.seq === s),
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            listeners.push(listener);
+            return () => {
+                const at = listeners.indexOf(listener);
+                if (at !== -1) listeners.splice(at, 1);
+            };
+        },
         append(type, data, options = {}) {
             const seq = log.length;
-            log.push({ seq, type, data, ...options });
+            const event = { seq, type, data, ...options };
+            log.push(event);
             if (options.surfaceOp?.op === "replace") {
                 const at = nodes.indexOf(options.surfaceOp.startSeq);
                 if (at !== -1) nodes[at] = seq;
             } else if (type === "tool/result") {
                 nodes.push(seq);
             }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const listener of listeners) {
+                try {
+                    const result = listener(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
+            }
             return { seq };
         },
         log,
     };
+    return session;
 }
 
 function addReadResult(session, text, { isError = false } = {}) {

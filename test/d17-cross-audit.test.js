@@ -200,6 +200,7 @@ test("P1 摘要期间被取消时，不得提交压缩（不得写 summary / 替
 
     const log = [];
     const nodes = [];
+    const listeners = [];
     const session = {
         id: "s-abort",
         get seq() { return log.length; },
@@ -207,14 +208,31 @@ test("P1 摘要期间被取消时，不得提交压缩（不得写 summary / 替
         requestHeader: () => ({ config: { provider: "p", model: "m" } }),
         requestContext: () => ({ provider: "p", model: "m", contextWindow: 1000000 }),
         eventAt: (s) => log.find((e) => e.seq === s),
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            listeners.push(listener);
+            return () => {
+                const at = listeners.indexOf(listener);
+                if (at !== -1) listeners.splice(at, 1);
+            };
+        },
         append(type, data, options = {}) {
             const seq = log.length;
-            log.push({ seq, type, data, ...options });
+            const event = { seq, type, data, ...options };
+            log.push(event);
             if (options.surfaceOp?.op === "replace") {
                 const at = nodes.indexOf(options.surfaceOp.startSeq);
                 if (at !== -1) nodes[at] = seq;
             } else if (["user/message", "assistant/message", "tool/result"].includes(type)) {
                 nodes.push(seq);
+            }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const listener of listeners) {
+                try {
+                    const result = listener(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
             }
             return { seq };
         },

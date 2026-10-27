@@ -29,9 +29,19 @@ const quietLogger = { info() {}, warn() {} };
 /** 造一个最小会话桩（与 d16-fixes 同口径）。 */
 function fakeSession(events = []) {
     const log = [...events];
+    const listeners = [];
     const session = {
         surface: { nodes: events.map((e) => e.seq) },
         eventAt: (seq) => log.find((e) => e.seq === seq),
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            listeners.push(listener);
+            return () => {
+                const at = listeners.indexOf(listener);
+                if (at !== -1) listeners.splice(at, 1);
+            };
+        },
         append(type, data, options = {}) {
             const seq = log.length + 1;
             const event = { seq, type, data, ...options };
@@ -39,6 +49,13 @@ function fakeSession(events = []) {
             if (options.surfaceOp?.op === "replace") {
                 const at = session.surface.nodes.indexOf(options.surfaceOp.startSeq);
                 if (at !== -1) session.surface.nodes[at] = seq;
+            }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const listener of listeners) {
+                try {
+                    const result = listener(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
             }
             return event;
         },

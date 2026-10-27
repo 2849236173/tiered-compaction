@@ -67,6 +67,7 @@ function makeCtx() {
 function makeSession(initial = []) {
     // 按真实宿主语义重编号：第 i 条事件 seq = i（0 起）
     const log = initial.map((e, i) => ({ ...e, seq: i }));
+    const listeners = [];
     const session = {
         get seq() {
             return log.length;
@@ -77,6 +78,15 @@ function makeSession(initial = []) {
         requestHeader: () => ({ config: { provider: "test-provider", model: "test-model" } }),
         surface: { nodes: log.filter((e) => e.type.endsWith("/message") || e.type === "tool/result").map((e) => e.seq) },
         eventAt: (seq) => log.find((e) => e.seq === seq),
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            listeners.push(listener);
+            return () => {
+                const at = listeners.indexOf(listener);
+                if (at !== -1) listeners.splice(at, 1);
+            };
+        },
         append(type, data, options = {}) {
             const seq = log.length;
             const event = { seq, type, data, ...options };
@@ -88,6 +98,13 @@ function makeSession(initial = []) {
                 }
             } else if (type === "user/message" || type === "assistant/message" || type === "tool/result") {
                 session.surface.nodes.push(seq);
+            }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const listener of listeners) {
+                try {
+                    const result = listener(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
             }
             return event;
         },

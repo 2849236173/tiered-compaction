@@ -56,10 +56,11 @@ function makeCtx(pressureTokens) {
     return ctx;
 }
 
-/** 造一个带可重放工具结果（read）的会话桩。 */
+/** 造一个带可重放工具结果（read）的会话桩（append 同步派发 session/event）。 */
 function makeSessionWithReadResult() {
     const log = [];
     const nodes = [];
+    const listeners = [];
 
     const session = {
         get seq() {
@@ -69,6 +70,15 @@ function makeSessionWithReadResult() {
         requestHeader: () => ({ config: { provider: "test-provider", model: "test-model" } }),
         requestContext: () => ({ provider: "test-provider", model: "test-model", contextWindow: 10000 }),
         eventAt: (seq) => log.find((e) => e.seq === seq),
+        /** 与宿主 ctx.on("session/event", ...) 同构的注册面。 */
+        on(type, listener) {
+            if (type !== "session/event") return () => {};
+            listeners.push(listener);
+            return () => {
+                const at = listeners.indexOf(listener);
+                if (at !== -1) listeners.splice(at, 1);
+            };
+        },
         append(type, data, options = {}) {
             const seq = log.length;
             const event = { seq, type, data, ...options };
@@ -78,6 +88,13 @@ function makeSessionWithReadResult() {
                 if (at !== -1) nodes[at] = seq;
             } else if (["user/message", "assistant/message", "tool/result"].includes(type)) {
                 nodes.push(seq);
+            }
+            // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
+            for (const listener of listeners) {
+                try {
+                    const result = listener(session, event);
+                    if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+                } catch { /* 宿主也是 catch 掉监听者的同步异常 */ }
             }
             return event;
         },
