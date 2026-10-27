@@ -135,10 +135,32 @@ function assertCompactionInactive(session, stage) {
  * @returns {number} 窗口 token 数；找不到时用保守兜底值
  */
 function contextWindowOf(session) {
+    // 首选：宿主官方 API `requestContext()`（dsh-session lib：「Return the latest
+    // resolved route metadata」）。它把 `request/context` 事件 fold 成最新路由
+    // 元数据，包含 contextWindow——这是读取窗口的**唯一官方途径**。
+    //
+    // 为什么不能只扫 surface（D17 沙箱实测暴露的真因）：
+    //   旧实现遍历 `session.surface.nodes` 找 type === "request/context"，
+    //   但 request/context 是**路由元数据**，未必出现在表面节点里
+    //   （表面只承载消息类节点）。于是窗口永远读不到 →
+    //   回落兜底 128000 → 压力按 128k 计算，与实际窗口无关。
+    //   沙箱里把窗口设成 20000 却毫无反应，正是这个原因。
+    const folded = session?.requestContext?.();
+    const fromApi = folded?.contextWindow;
+    if (typeof fromApi === "number" && fromApi > 0) return fromApi;
+
+    // 兜底 1：扫表面（兼容没有 requestContext API 的宿主版本）
     const nodes = session?.surface?.nodes ?? [];
-    // 从最近往前找：窗口随路由模型变化，最新一条才是当前有效值
     for (let index = nodes.length - 1; index >= 0; index -= 1) {
         const event = session.eventAt?.(nodes[index]);
+        if (event?.type !== "request/context") continue;
+        const window = event.data?.contextWindow;
+        if (typeof window === "number" && window > 0) return window;
+    }
+    // 兜底 2：扫全量事件日志（不限于表面，比兜底 1 更宽）
+    const total = typeof session?.seq === "number" ? session.seq : 0;
+    for (let seq = total - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt?.(seq);
         if (event?.type !== "request/context") continue;
         const window = event.data?.contextWindow;
         if (typeof window === "number" && window > 0) return window;
