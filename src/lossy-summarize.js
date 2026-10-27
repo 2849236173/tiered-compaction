@@ -43,17 +43,35 @@ export const HEADROOM_TOKENS = 65536;
 export function lossyThreshold(contextWindow, options = {}) {
     // 窗口无效（0/负数/非数）时不触发：宁可不动，也不能反向强触发
     if (!Number.isFinite(contextWindow) || contextWindow <= 0) return Number.POSITIVE_INFINITY;
+    // P1-3（2026-10-27 系统审计）：极小窗口视为无效。
+    // 旧实现 window=1 → 阈值 0，空会话 0 token 即触发（每步都跑一次事务）。
+    // 真实最小窗口是 8k（小模型），低于 1000 的窗口只可能是读数异常。
+    if (contextWindow < 1000) return Number.POSITIVE_INFINITY;
 
-    const ratio = options.thresholdRatio ?? 0.85;
-    const headroom = options.headroomTokens ?? HEADROOM_TOKENS;
+    const rawRatio = options.thresholdRatio ?? 0.85;
+    const rawHeadroom = options.headroomTokens ?? HEADROOM_TOKENS;
     const reserve = options.reserveTokens ?? RESERVE_TOKENS;
+    // P1-2（2026-10-27 系统审计）：配置必须夹到合法区间，越界静默失效不可接受。
+    // 实测旧实现：ratio=1.5 → 阈值 150% 窗口**永不触发**；
+    //              ratio=0.5 → 抢在 80% 驱逐前且单调性破裂 1309 处；
+    //              headroom=NaN → 阈值 NaN → 永不触发。
+    // 夹取而非抛错：配置问题不该让压缩层整个罢工，但必须留痕。
+    const ratio = Number.isFinite(rawRatio) ? Math.min(0.95, Math.max(0.82, rawRatio)) : 0.85;
+    const headroom = Number.isFinite(rawHeadroom) ? Math.max(0, rawHeadroom) : HEADROOM_TOKENS;
 
     // 比例线：不超过 window × ratio（给压缩事务留出确定空间）
     const byRatio = Math.floor(contextWindow * ratio);
 
-    // 绝对线：窗口 − 摘要预留 − headroom。
-    // ≤0 表示窗口连「一次摘要的预留 + 压缩余量」都装不下——
-    // 此时比例线本身已经不安全，需要把触发线压低到 60% 档。
+    // 绝对线：窗口 − 摘要预留 − headroom（保证触发后仍装得下一次摘要的输出预算）。
+    //
+    // P1-1（2026-10-27 系统审计）：旧实现**算了 byAbsolute 却从未使用**，
+    // 注释宣称的「双约束取小」并不存在。后果：
+    //   window ≤ 112130 时，触发点之后的剩余空间 < RESERVE_TOKENS，
+    //   摘要必然撞窗（32k 窗口只剩 5899、64k 只剩 11797）。
+    //   这正是 A4a 声称「从根上杜绝 2048 截断」的地方——在小窗口上是假的。
+    //
+    // 现在真正接上：取两线较小者，但**不得低于 FLOOR_RATIO**
+    // （否则抢跑第 3 层的 80% 驱逐，四层递进失效）。
     const byAbsolute = contextWindow - reserve - headroom;
 
     // 目标占比：装得下就 85%，装不下就抬到「不与第 3 层抢跑」的下限。
@@ -77,19 +95,30 @@ export function lossyThreshold(contextWindow, options = {}) {
     const lowerEdge = reserve + headroom;
     const upperEdge = Math.ceil(lowerEdge / (1 - ratio));
 
+    // 先把「层次底线 + 比例线」算出来（这部分是四层递进的保证，不能动）
+    let base;
     if (contextWindow <= lowerEdge) {
         // 窗口装不下 reserve+headroom：比例线也不安全。
         // 但仍不许低于 FLOOR_RATIO，否则又抢跑第 3 层。
-        return Math.floor(contextWindow * FLOOR_RATIO);
-    }
-    if (contextWindow >= upperEdge) {
+        base = Math.floor(contextWindow * FLOOR_RATIO);
+    } else if (contextWindow >= upperEdge) {
         // 空间充裕：直接比例线
-        return byRatio;
+        base = byRatio;
+    } else {
+        // 过渡带：占比在 [FLOOR_RATIO, ratio] 之间线性插值，消除断崖
+        const progress = (contextWindow - lowerEdge) / (upperEdge - lowerEdge);
+        const blendedRatio = FLOOR_RATIO + progress * (ratio - FLOOR_RATIO);
+        base = Math.floor(contextWindow * blendedRatio);
     }
-    // 过渡带：占比在 [FLOOR_RATIO, ratio] 之间线性插值，消除断崖
-    const progress = (contextWindow - lowerEdge) / (upperEdge - lowerEdge);
-    const blendedRatio = FLOOR_RATIO + progress * (ratio - FLOOR_RATIO);
-    return Math.floor(contextWindow * blendedRatio);
+
+    // P1-1：真正接上绝对线——触发后必须还剩得下一次摘要的输出预算。
+    // 但**不得低于 FLOOR_RATIO**：那是四层递进的底线，宁可摘要撞窗重试，
+    // 也不能让摘要抢在 80% 驱逐之前（否则第 3 层永远轮不到执行）。
+    if (byAbsolute > 0) {
+        const floor = Math.floor(contextWindow * FLOOR_RATIO);
+        base = Math.max(floor, Math.min(base, byAbsolute));
+    }
+    return base;
 }
 
 /**

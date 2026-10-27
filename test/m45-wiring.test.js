@@ -131,7 +131,9 @@ test("A-wire③ 四层各一例经 engine 端到端", async (t) => {
     const engine3b = new TieredCompactionEngine({ archiveDir: dir, tokenMeter: meter(850) });
     const r3b = await engine3b.applySoftPressure(nodes);
     assert.equal(r3b.action, "evict", "80% 必须驱逐");
-    assert.deepEqual(r3b.evicted.map((e) => e.seq).sort(), [11, 12], "易失项驱逐");
+    // A-P0-4（2026-10-27 系统审计）：只有可重放的 read 能动；
+    // pwsh 输出不可重放且无存档，驱逐它等于永久丢数据。
+    assert.deepEqual(r3b.evicted.map((e) => e.seq).sort(), [12], "只有可重放的 read 可驱逐");
     assert.ok(engine3b.lineage.toArray().some((e) => e.replacedBy === "soft-pressure"), "驱逐登记谱系");
 
     // 第 4 层：到阈值才摘要，预算预留 20k（假 LLM 注入口径，A4a）

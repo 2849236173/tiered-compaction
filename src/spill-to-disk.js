@@ -29,6 +29,9 @@ export const DEFAULT_PREVIEW_LIMIT = 1500;
  * @returns {string} 首尾拼接的预览
  */
 export function headTailPreview(text, limit = DEFAULT_PREVIEW_LIMIT) {
+    // 非法 limit（NaN/负数/0）一律回落到默认值。
+    // 审计实测：limit=NaN 时旧实现返回**空串**——模型看不到任何内容。
+    if (!Number.isFinite(limit) || limit <= 0) limit = DEFAULT_PREVIEW_LIMIT;
     if (text.length <= limit) return text;
     // 省略标记本身要计入总长——A2 验收要求预览 ≤1.5k **字符**（含标记），
     // 不能因为多插一行说明就超限。
@@ -36,13 +39,43 @@ export function headTailPreview(text, limit = DEFAULT_PREVIEW_LIMIT) {
     const budget = Math.max(0, limit - markerReserve);
     const headSize = Math.floor(budget / 3);
     const tailSize = budget - headSize;
-    const head = text.slice(0, headSize);
-    const tail = text.slice(text.length - tailSize);
-    const omitted = text.length - headSize - tailSize;
+    // P1-4/P1-5（2026-10-27 系统审计）：切分必须落在**安全边界**上。
+    //
+    // 缺陷：裸 `slice` 按 UTF-16 code unit 切，会：
+    //   · 把 emoji 的代理对劈成两半 → 产生孤立代理项 → 写文件变 U+FFFD
+    //     （实测 limit 100..2000 中 1268 个取值会出问题）
+    //   · 把 CRLF 劈开 → 头部以孤立 \r 结尾、尾部以孤立 \n 开头
+    //     （实测 309 个取值）
+    //
+    // 修法：切点若落在代理对中间就挪一位；尾部若以孤立 \n 开头就再退一位
+    // （那是被劈开的 CRLF 的后半）。
+    const isHighSurrogate = (code) => code >= 0xd800 && code <= 0xdbff;
+    const isLowSurrogate = (code) => code >= 0xdc00 && code <= 0xdfff;
+
+    let headEnd = headSize;
+    // 头部：若切点前一字符是高代理（说明切点在代理对中间），少切一位
+    if (headEnd > 0 && isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd -= 1;
+    // 头部：若以 \r 结尾而文本此处原本是 \r\n（CRLF 被劈开），少切一位
+    if (headEnd > 0 && text[headEnd - 1] === "\r" && text[headEnd] === "\n") headEnd -= 1;
+    const head = text.slice(0, headEnd);
+
+    let tailStart = text.length - tailSize;
+    // 尾部：若切点处是低代理（切点劈开了代理对），后移一位
+    if (tailStart < text.length && isLowSurrogate(text.charCodeAt(tailStart))) tailStart += 1;
+    // 尾部：若以 \n 开头前一位是 \r（CRLF 被劈开），把 \n 也去掉
+    if (tailStart < text.length && text[tailStart] === "\n" && text[tailStart - 1] === "\r") tailStart += 1;
+    const tail = text.slice(tailStart);
+
+    const omitted = text.length - head.length - tail.length;
     const marker = `\n…[中间省略 ${omitted} 字符，完整内容见下方存档]\n`;
-    // 兜底：极端情况下（omitted 位数特别多）再裁一次，保证绝不超过 limit
+    // 兜底：极端情况下（omitted 位数特别多）再裁一次，保证绝不超过 limit。
+    // 裁尾会切到合法位置（尾部是纯文本片段），并且这里用 code point 安全切法。
     const composed = `${head}${marker}${tail}`;
-    return composed.length <= limit ? composed : composed.slice(0, limit);
+    if (composed.length <= limit) return composed;
+    let cut = limit;
+    if (cut > 0 && isHighSurrogate(composed.charCodeAt(cut - 1))) cut -= 1;
+    if (cut > 0 && composed[cut] === "\n" && composed[cut - 1] === "\r") cut -= 1;
+    return composed.slice(0, cut);
 }
 
 /**
@@ -88,11 +121,29 @@ export async function spillIfNeeded(text, archiveDir, baseName, options = {}) {
     // P3-1 修复：按 UTF-8 字节数比较，与落盘时写入的 size 口径一致
     if (byteLength(text) <= threshold) return null;
 
+    // P0-3（2026-10-27 系统审计）：落盘前必须确认 UTF-8 往返无损。
+    //
+    // 缺陷：文本含**孤立代理项**（如 "\uD800"）时，`writeFile(...,"utf8")`
+    // 会把它替换成 U+FFFD；而 `createHash().update(text,"utf8")` 做**同样的
+    // 替换**——于是两个哈希相同，`restoreSpilled` 校验通过，但内容已经变了。
+    //
+    // 实测：9003 字节含 \uD800 的串，写盘读回后 !== 原串、含 U+FFFD，
+    // 而 SHA-256 完全一致 → **校验通过、内容已变**，这是最坏的一种失败：
+    // 它不报错，还盖了"已校验"的章。
+    //
+    // 处理：往返不一致就拒绝落盘（返回 null，调用方保持原文）。
+    // 宁可少压缩一次，也不能存档一份被悄悄改过的内容。
+    const probe = Buffer.from(text, "utf8");
+    if (probe.toString("utf8") !== text) {
+        return null;
+    }
+
     await mkdir(archiveDir, { recursive: true });
     const path = await uniquePath(archiveDir, baseName);
-    await writeFile(path, text, "utf8");
+    // 写二进制缓冲（与上面探测用的同一份编码结果），避免二次编码差异
+    await writeFile(path, probe);
     const digest = sha256(text);
-    const size = byteLength(text);
+    const size = probe.length;
     // 预览首尾各留一段：结论常在末尾（错误码/汇总行/pass 计数），
     // 只留开头会让模型看不到结论、反而去重跑命令（D17 验收 P2-1）。
     const preview = headTailPreview(text, previewLimit);

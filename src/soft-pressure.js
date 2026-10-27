@@ -50,24 +50,58 @@ export function pressureAction(pressure) {
  * @returns {{evicted: Array<{seq: number, reason: string, replayable: boolean}>, kept: Array<object>}}
  *   evicted：被驱逐节点及其恢复方式；kept：保留节点（含永不清理项）
  */
-export function evictVolatile(nodes, deps) {
+export function evictVolatile(nodes, deps, options = {}) {
     const evicted = [];
     const kept = [];
-    for (const node of nodes) {
+    // 可选：本次还能腾出多少预算（token）。不传表示不限制（保持旧行为）。
+    // 审计指出旧实现「一次清空全部命中项」——200 个 read 在压力刚过 80% 时全灭。
+    let budget = Number.isFinite(options.budgetTokens) ? options.budgetTokens : Number.POSITIVE_INFINITY;
+    // 按优先级数值升序真正排序（审计指出旧实现只判断"是否驱逐"，
+    // 不决定"先驱逐谁"，实测出现 read(P2) 排在 bash(P1) 前面，与设计稿相反）。
+    const ordered = [...nodes].sort((left, right) => {
+        const a = EVICTION_PRIORITY[left.kind] ?? -1;
+        const b = EVICTION_PRIORITY[right.kind] ?? -1;
+        if (a === -1 && b === -1) return 0;
+        if (a === -1) return 1;
+        if (b === -1) return -1;
+        return a - b;
+    });
+    for (const node of ordered) {
         // 永不清理类直接保留（A3：todo/goal/plan/用户消息/摘要零丢失）
         const priority = EVICTION_PRIORITY[node.kind] ?? -1;
         if (priority === -1) {
             kept.push(node);
             continue;
         }
+        // A-P0-4（2026-10-27 系统审计）：**不可重放的内容不得驱逐**。
+        //
+        // 缺陷：旧实现把 bash/edit/write（优先级 1，设计稿明写"不可重放，
+        // 依赖落盘存档"）也驱逐了，而谱系里写的只是一句占位文本
+        // `-（已驱逐，靠落盘存档/重放恢复）`——**没有任何存档**。
+        // 一旦真的丢掉，这份内容就永久消失（命令输出/写入结果无法重来）。
+        //
+        // 修法：只有可重放（read/grep/glob，重跑即恢复）才能无条件驱逐；
+        // 不可重放的，必须调用方**已确认有存档**（node.archived === true）
+        // 才允许驱逐，否则一律保留。
         const replayable = node.kind === "read" || node.kind === "grep" || node.kind === "glob";
-        const reason = replayable ? "volatile-replayable" : "volatile-nonreplayable";
+        if (!replayable && node.archived !== true) {
+            kept.push(node);
+            continue;
+        }
+        // 预算：够了就停（避免一次清空全部）
+        const cost = Number.isFinite(node.tokens) ? node.tokens : 0;
+        if (budget <= 0) {
+            kept.push(node);
+            continue;
+        }
+        const reason = replayable ? "volatile-replayable" : "volatile-archived";
         deps.lineage.record(
             `node#${node.seq}`,
-            "-（已驱逐，靠落盘存档/重放恢复）",
+            replayable ? "-（可重跑恢复）" : String(node.archivePath ?? "-"),
             "soft-pressure",
         );
         evicted.push({ seq: node.seq, reason, replayable });
+        budget -= cost;
     }
     return { evicted, kept };
 }

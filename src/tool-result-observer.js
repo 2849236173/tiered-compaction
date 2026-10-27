@@ -71,23 +71,61 @@ export class ToolResultObserver {
         this.engine = engine;
         this.ctx = ctx;
         this.enabled = enabled;
-        /** 已处理过的源事件 seq，避免第 1-2 层重复替换（同一 seq 只加工一次）。 */
-        this.done = new Set();
         /**
-         * 已被第 3 层驱逐过的 seq。
+         * 每个会话各自的去重集合，`WeakMap<session, {done, evicted}>`。
          *
-         * 必须与 `done` 分开（D17 实测 bug）：`done` 是「内容已压缩过」，
-         * 本集合是「已换成重跑提示」。混用会让第 3 层被第 1-2 层永久禁用——
-         * 凡是被折叠/落盘过的结果，都因为已在 done 里而被跳过。
+         * **P0 审计发现（2026-10-27）**：旧实现是一个进程级 `Set`，只按
+         * `event.seq` 记账。但 `seq` 是**会话内**序号，每个会话都从 0 开始，
+         * 而 `contract.js` 全进程只创建一个 observer、注册一次钩子，所有会话
+         * 共用它。于是：
+         *
+         *   会话 A 处理 seq 0/1/2 → done = {0,1,2}
+         *   会话 B（新会话）的 seq 也是 0/1/2 → 全部命中 done → 一条都不处理
+         *
+         * 实测：会话 A replaced=3，其后三个全新会话 replaced 恒为 0，
+         * `stats` 完全冻结、**零报错**。即「第一个会话之后，压缩静默失效」。
+         *
+         * 这比之前的 bug 更隐蔽：第一个会话是好的，你根本不会怀疑它坏了。
+         *
+         * 用 WeakMap 而不是 `session.id#seq` 字符串键，还有个附带好处：
+         * 会话对象被回收时，它的集合自动释放，长驻进程不会无限增长。
          */
-        this.evicted = new Set();
+        this.perSession = new WeakMap();
         /** 统计面（供探针与安装记录核对，不进业务路径）。 */
         this.stats = { replaced: 0, bytesSaved: 0, skipped: 0, failed: 0 };
+        /** 防止重复注册（HMR 重载 / 旁路+接管并存时会有两个实例）—— P0-4。 */
+        this._registered = false;
+    }
+
+    /**
+     * 取某会话的去重集合（不存在则创建）。
+     * @param {object} session
+     * @returns {{done: Set<number>, evicted: Set<number>}}
+     */
+    stateOf(session) {
+        let state = this.perSession.get(session);
+        if (state === undefined) {
+            state = { done: new Set(), evicted: new Set() };
+            this.perSession.set(session, state);
+        }
+        return state;
     }
 
     /** 注册宿主钩子：工具结果产生即加工。 */
     register() {
         if (!this.enabled) return;
+        // P0-4（2026-10-27 系统审计）：实例级注册守卫。
+        //
+        // 缺陷：register() 没有去重，也不登记 disposer。HMR 重载、或
+        // index.js 的旁路服务与 contract.js 接管服务同时构造时，会有两个
+        // 实例各自监听同一 session/event。实测两实例并存时：
+        //   prune=2 replace=1，第二个实例的 replace 抛错
+        // → 留下**一条没有 replace 消费的影子定价**，污染宿主的计量折叠链：
+        //   `replace at seq 7 over range 5-5 has no adjacent shadow price`
+        // 紧随其后的任何 range 不匹配的 replace（官方 pruner、第 4 层摘要）
+        // 都会让宿主抛错。
+        if (this._registered) return;
+        this._registered = true;
         // 宿主钩子签名是**位置参数** `(session, event)`——见 basic 的实现
         // （dsh-compaction-basic/lib/index.js:856）与自家 contract.js:343。
         //
@@ -121,11 +159,14 @@ export class ToolResultObserver {
      */
     async handleEvent(session, event) {
         if (event?.type !== "tool/result") return;
-        if (event.seq === undefined || this.done.has(event.seq)) return;
+        if (event.seq === undefined) return;
+        // 去重集合按会话隔离（P0-1）：seq 是会话内序号，跨会话共用会串味。
+        const state = this.stateOf(session);
+        if (state.done.has(event.seq)) return;
         // D17 系统审计修复（2026-10-27）：去重标记必须在 **await 之前**占位。
         //
         // 缺陷：旧代码在 `await this.engine.processToolOutput(...)` **之后**才
-        // `this.done.add(event.seq)`。这中间有一个真实的竞态窗口：
+        // `state.done.add(event.seq)`。这中间有一个真实的竞态窗口：
         // 同一事件被并发派发两次（宿主重放、钩子重复注册、或宿主不 await 钩子），
         // 两次调用都会通过 `done.has()` 检查，于是：
         //   · engine 处理两次（白做一次折叠/落盘，多写一个存档文件）
@@ -133,8 +174,8 @@ export class ToolResultObserver {
         // 实测复现：并发两次 → processToolOutput 被调用 2 次、替换事件 2 条。
         //
         // 修法：进入前先占位（先 add 再 await），失败时再回滚。
-        // 这样即使并发进入，第二个调用会在第一行就被挡掉。
-        this.done.add(event.seq);
+        this.done = state.done; // 兼容旧字段访问（见下方 getter 说明）
+        state.done.add(event.seq);
         const text = textOfToolResult(event);
         if (text === null) {
             this.stats.skipped += 1;
@@ -152,7 +193,7 @@ export class ToolResultObserver {
             }));
         } catch (error) {
             // 处理失败必须回滚占位，否则该 seq 永久被跳过（下次重放也无法补救）
-            this.done.delete(event.seq);
+            state.done.delete(event.seq);
             throw error;
         }
         if (processed === text || layers.length === 0) {
@@ -160,13 +201,33 @@ export class ToolResultObserver {
         }
         // 落盘信息从谱系表取回（引擎在落盘层已登记）
         const spillInfo = this.engine.lastSpillInfo?.(event.seq) ?? {};
-        this.replace(session, event, processed, spillInfo);
+        try {
+            this.replace(session, event, processed, spillInfo);
+        } catch (error) {
+            // P1-4：写表面失败也必须回滚占位，否则该 seq 永久封禁。
+            // （第 2 步真正改表面的操作同样可能失败——例如 await 期间
+            //   表面被第 3 层改动，导致 startSeq 已不存在。）
+            state.done.delete(event.seq);
+            throw error;
+        }
         this.stats.replaced += 1;
         this.stats.bytesSaved += Math.max(0, text.length - processed.length);
-        this.ctx.logger.info(
-            `tiered-compaction: 工具结果 seq=${event.seq} 已压缩（${layers.join("+")}），` +
-            `${text.length} → ${processed.length} 字符`,
-        );
+        // P2-6：日志不在 try 内会外抛，导致 stats 已计数但实际未完成。
+        try {
+            this.ctx.logger.info(
+                `tiered-compaction: 工具结果 seq=${event.seq} 已压缩（${layers.join("+")}），` +
+                `${text.length} → ${processed.length} 字符`,
+            );
+        } catch { /* 日志后端异常不得影响业务 */ }
+    }
+
+    /** 兼容旧测试/探针的 `observer.done` 访问（返回最近一次会话的集合）。 */
+    get done() {
+        return this._lastDone ?? new Set();
+    }
+
+    set done(value) {
+        this._lastDone = value;
     }
 
     /**
@@ -206,6 +267,7 @@ export class ToolResultObserver {
      * @returns {Promise<{evicted: number}>}
      */
     async evictStaleToolResults(session) {
+        const state = this.stateOf(session);
         const surface = session.surface?.nodes ?? [];
         let evicted = 0;
         for (const seq of [...surface]) {
@@ -217,29 +279,49 @@ export class ToolResultObserver {
             // `done` 是**第 1-2 层的处理标记**——handleEvent 处理完就把 seq
             // 加进去。而驱逐这里也用它做去重，于是：
             //   凡是第 1-2 层碰过的工具结果，第 3 层永远轮不到。
-            // 实测：压力 83.9%（20148/24000）已越过 80% 驱逐线，
-            // read 结果也确实被第 2 层折叠/落盘过（因此全在 done 里），
-            // 结果驱逐数恒为 0——日志还会打「已驱逐 0 个」，看起来跑了。
             //
             // 两者语义不同：`done` = 已做过内容压缩；`evicted` = 已换成重跑提示。
-            // 必须分开记账，否则第 3 层等于被第 1-2 层永久禁用。
-            if (this.evicted.has(seq)) continue;
+            if (state.evicted.has(seq)) continue;
+            const text = textOfToolResult(event);
+            if (text === null) continue;
+            // P0-2（2026-10-27 系统审计）：必须用**内容判据**兜住重复驱逐。
+            //
+            // 缺陷：旧实现记的是**驱逐前**的 seq，但 replace 之后表面上的节点
+            // 已经是**新 seq**。下一轮遍历拿到新 seq，不在 evicted 里 → 再驱逐一次。
+            // 实测 6 轮：每轮 evicted=1，事件数 4→6→8…→14 无限增长。
+            // 而 contract.js 在**每次 pre-step** 都调用本方法，压力不降就是
+            // 每步追加 2 条事件（1 prune + 1 replace），会话日志无限膨胀。
+            //
+            // 内容判据是最终防线：已经是驱逐提示的节点，无论 seq 怎么变都跳过。
+            if (text.includes("已驱逐：")) {
+                state.evicted.add(seq);
+                continue;
+            }
+            // P1-2：失败结果不得驱逐。它是排障的唯一线索，
+            // 抹掉后模型只会盲目重跑同一命令（必然再次失败）。
+            if (event.data?.message?.isError === true) continue;
             const name = this.toolNameOf(session, event);
             // 只驱逐可重放类（read/grep/glob）：重跑即恢复，属设计稿 §3 优先级 2
             if (name !== "read" && name !== "grep" && name !== "glob") continue;
-            const text = textOfToolResult(event);
-            if (text === null) continue;
+            // P2-2：净收益判据。驱逐提示本身有长度成本，
+            // 把 2 字符的 "ok" 换成 58 字符提示是越驱越大。
+            const notice = `[已驱逐：${name} 的结果可随时重跑恢复]`;
+            if (Buffer.byteLength(notice, "utf8") >= Buffer.byteLength(text, "utf8")) continue;
+            // P1-1：保留第 1-2 层写入的存档路径——那是模型回读原文的唯一线索
+            const keptPath = /存档：([^\n]+)/.exec(text)?.[1];
             session.append("compaction/prune", {
                 shadowedRange: { start: seq, end: seq },
                 shadowedSeqs: [seq],
                 shadowedTokenCount: this.estimateTokens(event),
             });
-            session.append("tool/result", {
+            const replacement = session.append("tool/result", {
                 ...event.data,
                 message: {
                     ...event.data.message,
                     content: prunedContent(
-                        `[已驱逐：${name} 的结果可随时重跑恢复]`,
+                        keptPath === undefined
+                            ? `[已驱逐：${name} 的结果可随时重跑恢复]`
+                            : `[已驱逐：${name} 的结果可随时重跑恢复]\n原存档仍在：${keptPath}`,
                         {},
                     ),
                 },
@@ -247,15 +329,18 @@ export class ToolResultObserver {
                 surfaceOp: { op: "replace", startSeq: seq, endSeq: seq },
                 sourceEventSeqs: [seq],
             });
-            this.evicted.add(seq);
+            // 同时记新 seq（防止下一轮把替换产物当新节点再驱逐一次）
+            if (replacement?.seq !== undefined) state.evicted.add(replacement.seq);
+            state.evicted.add(seq);
+            // P1-3：谱系按契约逐节点登记（originalLocation = node#seq）
+            this.engine.lineage.record(
+                `node#${seq}`,
+                keptPath ?? "-（已驱逐，靠重跑恢复）",
+                "soft-pressure",
+            );
             evicted += 1;
         }
         if (evicted > 0) {
-            this.engine.lineage.record(
-                `soft-pressure@${Date.now()}`,
-                `${evicted} 个可重放工具结果已驱逐（可重跑恢复）`,
-                "soft-pressure",
-            );
             this.ctx.logger.warn(`tiered-compaction: 80% 压力驱逐 ${evicted} 个可重放工具结果`);
         }
         return { evicted };

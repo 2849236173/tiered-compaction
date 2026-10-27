@@ -181,10 +181,15 @@ test("P1 大输出（>8k 字节）走落盘层，预览里带存档路径", asyn
 test("P2-1 驱逐只动可重放工具结果（read/grep/glob），其它工具不碰", async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "p21-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
+    // 内容必须足够长：驱逐提示本身约 58 字节，太短的原文会被
+    // 「越驱越大」的净收益判据正确挡下（P2-2）。这里用真实量级的输出。
+    const longRead = "read 读到的文件内容 ".repeat(40);
+    const longPwsh = "pwsh 的命令输出 ".repeat(40);
+    const longGrep = "grep 匹配到的行 ".repeat(40);
     const session = fakeSession([
-        toolResult(1, "read 的结果", "read"),
-        toolResult(2, "pwsh 的结果", "pwsh"),
-        toolResult(3, "grep 的结果", "grep"),
+        toolResult(1, longRead, "read"),
+        toolResult(2, longPwsh, "pwsh"),
+        toolResult(3, longGrep, "grep"),
     ]);
     const engine = new TieredCompactionEngine({ archiveDir: dir, logger: quietLogger });
     const observer = new ToolResultObserver({ engine, ctx: { logger: quietLogger, on() {} } });
@@ -192,7 +197,7 @@ test("P2-1 驱逐只动可重放工具结果（read/grep/glob），其它工具�
     assert.equal(evicted, 2, "read + grep 两个可重放项被驱逐，pwsh 不动");
     // pwsh 的结果原文必须还在
     const pwshEvent = session.log.find((e) => e.type === "tool/result" && e.data?.toolName === "pwsh");
-    assert.equal(textOfToolResult(pwshEvent), "pwsh 的结果");
+    assert.equal(textOfToolResult(pwshEvent), longPwsh);
     // 谱系表登记了驱逐
     assert.ok(
         engine.lineage.toArray().some((entry) => entry.replacedBy === "soft-pressure"),
