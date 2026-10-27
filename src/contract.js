@@ -27,6 +27,7 @@ import {
 import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
+import { HealthReporter, collectHealth } from "./health-check.js";
 import { lossyThreshold, RESERVE_TOKENS, HEADROOM_TOKENS } from "./lossy-summarize.js";
 // 四层引擎与工具结果观察者：接管路径必须自己持有它们（D17 关键修复），
 // 不能再依赖 index.js 里那个未被实例化的类。
@@ -444,6 +445,29 @@ export class TieredCompactionEngineService extends CompactionEngine {
         const current = measurement?.totalTokens ?? meter.currentTokens?.(session) ?? meter.currentTokens?.() ?? 0;
         const pressure = window > 0 ? current / window : 0;
         const action = pressureAction(pressure);
+
+        // 运行时自检（健康探针）：把"各层实际计数"打成结构化日志。
+        //
+        // 为什么需要：D17 挖出的 10 个 bug 里 8 个是「日志正常、单测全绿、
+        // 功能根本没跑」的静默失效。它们不能靠"看有没有报错"发现，
+        // 只能靠计数器——某层长期为 0、或压力已高却零动作，就是异常信号。
+        //
+        // 安全边界：整段包 try/catch，探针自身失败绝不影响会话。
+        try {
+            if (this.healthReporter === undefined) {
+                this.healthReporter = new HealthReporter({ logger: this.ctx.logger });
+            }
+            this.healthReporter.maybeReport(collectHealth({
+                observer: this.observer,
+                engine: this.engine,
+                session,
+                window,
+                currentTokens: current,
+                config: this.config,
+            }));
+        } catch {
+            /* 探针失败不阻断：健康检查不该成为新的故障点 */
+        }
 
         // 第 3 层：70% 提醒（不改历史）
         if (action === "remind") {
