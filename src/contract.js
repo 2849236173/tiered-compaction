@@ -34,6 +34,39 @@ import { TieredCompactionEngine } from "./engine.js";
 import { ToolResultObserver } from "./tool-result-observer.js";
 
 /**
+ * 把流式摘要的终止状态映射成必须上抛的错误（照抄 basic finishError 判定口径）。
+ *
+ * 为什么不能用 `finish?.error`：`BlockAssembler.finish` 的返回形状是
+ * `{ kind: 'stop' | 'error' | 'aborted' | 'max-tokens', failure? }`，
+ * 没有 `error` 字段。读错字段名会让**所有** LLM 失败静默降级成「摘要为空」，
+ * 丢掉真实原因（D17 沙箱实测：21/21 事务都是这种表现）。
+ *
+ * @param {{kind: string, failure?: {message: string, code: string}}} finish
+ * @returns {Error | undefined} 正常结束返回 undefined
+ */
+function finishErrorOf(finish) {
+    switch (finish?.kind) {
+        case "error":
+        case "aborted": {
+            const failure = finish.failure ?? {};
+            const message = failure.message ?? "摘要调用失败（无错误详情）";
+            const code = failure.code ?? "SUMMARY_FAILED";
+            const error = new Error(message);
+            error.code = code;
+            if (finish.failure !== undefined) error.cause = finish.failure;
+            return error;
+        }
+        case "max-tokens": {
+            // 截断的检查点是不完整的检查点，宁可失败也不能提交
+            const error = new Error("summarization truncated at the token cap (incomplete checkpoint)");
+            error.code = "MAX_TOKENS";
+            return error;
+        }
+        default: return undefined;
+    }
+}
+
+/**
  * 摘要指令（与 basic 的 COMPACTION_INSTRUCTION 同义，独立成文以免跨模块耦合）：
  * 追加在重放前缀之后，让模型把前面对话压成可无损续做的检查点。
  */
@@ -457,8 +490,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
      * @returns {Promise<{summary: string, provider: string, model: string, maxTokens: number}>}
      */
     async summarize(input, agent, signal) {
-        const target = this.config.summaryTarget ?? this._targetFromAgent(agent);
-        if (!target) throw new ManualCompactionError("summary", "tiered-compaction: 无摘要路由（summaryTarget 与会话路由均缺）");
+        const target = this._summaryTargetOf(agent);
+        if (target === undefined) throw new ManualCompactionError("summary", "tiered-compaction: 无摘要路由（summaryTarget 与会话路由均缺）");
         const summarizeFn = this.config.summarizeFn ?? this._summarizeFnFromCtx();
         if (!summarizeFn) throw new ManualCompactionError("summary", "tiered-compaction: 无摘要实现（config.summarizeFn 或 ctx.llm 均缺）");
         const request = { provider: target.provider, model: target.model, maxTokens: RESERVE_TOKENS, purpose: "compaction" };
@@ -495,7 +528,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
         ctx.on("agent/request-error", async ({ agent, failure, signal }, next) => {
             if (failure?.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal?.aborted) return next();
             this.overflowAgents.set(agent.session, agent);
-            const target = this.config.summaryTarget ?? this._targetFromAgent(agent);
+            const target = this._summaryTargetOf(agent);
             // 无摘要路由时不接管：交回宿主（保留原始错误，不掩盖）
             if (target === undefined) return next();
             const retries = this.overflowRetries.get(agent) ?? 0;
@@ -784,6 +817,36 @@ export class TieredCompactionEngineService extends CompactionEngine {
     }
 
     /**
+     * 解析摘要路由：配置优先，缺失则回落到会话当前路由。
+     *
+     * D17 沙箱实测挖出的第二个真 bug（2026-10-27）：
+     * 配置里**没写** `summaryTarget` 时，schemastery 反序列化会把它变成
+     * **空对象 `{}`**，不是 `undefined`。于是 `config.summaryTarget ?? 会话路由`
+     * 的 `??` 短路失效——拿到的是 `{}`，`target.provider` 与 `target.model`
+     * 都是 `undefined`，摘要请求带着空路由发出去，必然失败。
+     *
+     * 这与第一个 bug 叠加成一次「双重静默」：
+     *   空路由 → LLM 调用失败 → finish 字段读错被吞 → 只报「摘要结果为空」。
+     * 实测证据：沙箱 21 次压缩事务，21 次「摘要结果为空」，零真实原因。
+     *
+     * 因此这里按「字段齐全才算有效」判断，空对象一律视为未配置。
+     *
+     * @param {object} [agent] 当前 agent（提供会话路由）
+     * @returns {{provider: string, model: string} | undefined}
+     */
+    _summaryTargetOf(agent) {
+        const configured = this.config.summaryTarget;
+        if (
+            configured !== undefined && configured !== null &&
+            typeof configured.provider === "string" && configured.provider.length > 0 &&
+            typeof configured.model === "string" && configured.model.length > 0
+        ) {
+            return { provider: configured.provider, model: configured.model };
+        }
+        return this._targetFromAgent(agent);
+    }
+
+    /**
      * 从注入的 ctx.llm 构造摘要实现（宿主真链路路径）。
      *
      * **为什么不能用 `llm.summarize`**（D16 运行时实锤）：真实 llm 服务的方法面
@@ -810,8 +873,17 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 ...(signal === undefined ? {} : { signal }),
             };
             for await (const chunk of llm.stream(options)) assembler.push(chunk);
-            // finish 错误必须上抛：否则会把半截输出当完整摘要提交
-            const failure = assembler.finish?.error;
+            // finish 错误必须上抛：否则会把半截输出当完整摘要提交。
+            //
+            // D17 沙箱实测真 bug（2026-10-27）：`assembler.finish` 的形状是
+            // `{ kind, failure }`，根本没有 `error` 字段。旧代码读
+            // `assembler.finish?.error` 永远是 undefined，于是**每一次** LLM
+            // 失败都被静默吞掉：blocks() 为空 → 返回空串 → 外层只报
+            // 「摘要结果为空」，真实错误（限流/超时/密钥）全部丢失。
+            // 实测证据：21 次压缩事务 21 次「摘要结果为空」，无一条真实原因。
+            // 原版 basic 用 finishError() 按 kind 分派（lib/index.js:358-369），
+            // 这里照抄同一判定口径。
+            const failure = finishErrorOf(assembler.finish);
             if (failure !== undefined) throw failure;
             const blocks = assembler.blocks?.() ?? [];
             return blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
