@@ -608,15 +608,39 @@ export class TieredCompactionEngineService extends CompactionEngine {
     async _compactWithRetention(session, agent, signal, options = {}) {
         const meter = this.ctx.tokenMeter;
         const window = contextWindowOf(session);
-        const retain = Math.max(16000, Math.floor(window * 0.05));
         const { threshold, measure } = options;
+        // 保留量（保留最近多少 token 原样不压）。
+        //
+        // D17 沙箱实测挖出的第三个真 bug（2026-10-27）：
+        // 旧公式 `max(16000, window × 5%)` 在小窗口下会**吃掉整个窗口**——
+        // 窗口 20000 时保留 16000（占 80%），可选区间被挤到只剩 92 token，
+        // 于是摘要必然「比被取代的内容还大」，每一次都失败：
+        //   summary is not smaller than the shadowed content (634 >= 92)
+        //
+        // 原版 basic 对此有硬约束（lib/index.js:134）：
+        //   retainTokens >= thresholdTokens 直接配置报错。
+        // 我们照抄这个约束的用意，但改成运行时收敛而不是抛错——
+        // 小窗口是合法场景，不该因此完全丧失压缩能力。
+        //
+        // 修法：保留量不得超过阈值的一半，保证至少一半阈值的内容可压。
+        // 大窗口下（1M：base=50k，cap=425k）行为完全不变；
+        // 小窗口下（20k：base=16000，cap=8200）保留量降到 8200，选区恢复正常。
+        const retainBase = Math.max(16000, Math.floor(window * 0.05));
+        const retain = threshold === undefined
+            ? retainBase
+            : Math.max(0, Math.min(retainBase, Math.floor(threshold * 0.5)));
         // 未提供阈值读数时保持原单次行为（例如手动 compactNow 走全表面）
         const maxAttempts = threshold === undefined || measure === undefined
             ? 1
             : (this.policyFor(this._targetFromAgent(agent)).compactionRetries ?? 1) + 1;
         let lastResult = null;
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-            const range = this._selectRange(session, meter.measure(session), attempt === 0 ? retain : retain);
+            // 重试时把保留量减半：第一次压不够说明选区偏小，
+            // 再选同样大小只会得到同样结果。原版重试也正是重新选区。
+            // （旧代码写成 `attempt === 0 ? retain : retain`——两边相同，
+            //   等于重试时原地重选，白白多付一次 LLM 调用。）
+            const attemptRetain = attempt === 0 ? retain : Math.floor(retain * 0.5);
+            const range = this._selectRange(session, meter.measure(session), attemptRetain);
             if (range === null) return lastResult;
             lastResult = await this._runTransaction(session, range.start, range.end, agent, signal);
             // 压完重新测量：已降到阈值以下就不必再试
