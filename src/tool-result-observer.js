@@ -225,7 +225,8 @@ export class ToolResultObserver {
             return; // 无收益，占位保留（不必重复尝试同一内容）
         }
         // 落盘信息从谱系表取回（引擎在落盘层已登记）
-        const spillInfo = this.engine.lastSpillInfo?.(event.seq) ?? {};
+        // 传 session.id：spillInfo 的键是 `sessionId#seq`，不传会按后缀兜底匹配
+        const spillInfo = this.engine.lastSpillInfo?.(event.seq, session?.id) ?? {};
         try {
             this.replace(session, event, processed, spillInfo);
         } catch (error) {

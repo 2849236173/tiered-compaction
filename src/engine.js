@@ -73,7 +73,7 @@ export class TieredCompactionEngine {
             } catch {
                 // 文件已不在（外部清理）：保持 0，预览不显示误导性数字
             }
-            this.spillInfo.set(String(at.seq), {
+            this.spillInfo.set(`${at.sessionId ?? "?"}#${at.seq}`, {
                 path: entry.newLocation,
                 sha256: entry.digest,
                 size,
@@ -84,11 +84,24 @@ export class TieredCompactionEngine {
 
     /**
      * 取某节点最近一次落盘的存档信息（无落盘返回 undefined）。
+     *
+     * 交叉审计修复（2026-10-27，gpt-6-astra 报、我实跑确认）：
+     * 键原本只是裸 seq，而 seq 是**会话内**序号。两个会话都落盘 seq=1 时，
+     * 后一个会覆盖前一个——实测会话 A 的元数据被 B 顶掉。
+     * 文件名本身带会话标识、内容不会串，但**读到的元数据会是别人的**。
+     *
      * @param {number|string} seq 节点 seq
+     * @param {string} [sessionId] 会话标识；省略时按后缀匹配（兼容旧调用）
      * @returns {{path: string, sha256?: string, size?: number} | undefined}
      */
-    lastSpillInfo(seq) {
-        return this.spillInfo?.get(String(seq));
+    lastSpillInfo(seq, sessionId) {
+        if (sessionId !== undefined) return this.spillInfo?.get(`${sessionId}#${seq}`);
+        const suffix = `#${seq}`;
+        let hit;
+        for (const [key, value] of this.spillInfo ?? []) {
+            if (key.endsWith(suffix)) hit = value;
+        }
+        return hit;
     }
 
     /**
