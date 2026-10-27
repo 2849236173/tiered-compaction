@@ -53,8 +53,72 @@ const COMPACTION_INSTRUCTION = [
  */
 const DEFAULT_MAX_OVERFLOW_RETRIES = 1;
 
-/** 缺窗口读数时的兜底窗口（保守取值，宁可晚压也不误压）。 */
+/**
+ * 摘要重试默认次数（D17 对齐原版 basic 的 compactionRetries 默认值）。
+ * 1 表示「首次 + 重试一次」：一次压不到阈值以下时，重新选区间再压一次。
+ */
+const DEFAULT_COMPACTION_RETRIES = 1;
+
+/**
+ * 缺窗口读数时的兜底窗口（保守取值，宁可晚压也不误压）。
+ */
 const FALLBACK_CONTEXT_WINDOW = 128_000;
+
+/**
+ * 检查会话里是否有「未闭合的压缩事务」（D17 对齐原版 basic 的压缩锁）。
+ *
+ * 为什么需要这把锁：摘要要调 LLM，耗时几秒到几十秒。这期间会话可能又跑
+ * 新步骤，或者用户点了 `/compact`。两个事务并发会同时改会话表面，
+ * 造成内容错位——而且**不必然报错**，可能安静地把会话搞坏。
+ *
+ * 语义照抄 basic：从事件流尾部倒着找，第一条 `compaction/start` 或
+ * `compaction/end` 决定状态。找到未配对的 start 即视为锁被持有。
+ * 但有一个豁免：如果其后出现过 `session/end-seed`（新会话生命周期），
+ * 说明那个 start 属于上一轮生命周期，不算当前锁。
+ *
+ * @param {object} session 会话
+ * @returns {{locked: boolean, sinceSeq?: number}} 锁状态
+ */
+function inspectCompactionLock(session) {
+    let unmatchedStart;
+    let stateKnown = false;
+    let latestEndSeedSeq;
+    const lastSeq = typeof session?.seq === "number" ? session.seq : (session?.surface?.nodes?.length ?? 0);
+    for (let seq = lastSeq - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt?.(seq);
+        if (event === undefined) continue;
+        if (latestEndSeedSeq === undefined && event.type === "session/end-seed") latestEndSeedSeq = event.seq;
+        if (!stateKnown) {
+            if (event.type === "compaction/start") {
+                unmatchedStart = event;
+                stateKnown = true;
+            } else if (event.type === "compaction/end") {
+                stateKnown = true;
+            }
+        }
+        if (stateKnown && latestEndSeedSeq !== undefined) break;
+    }
+    if (unmatchedStart === undefined) return { locked: false };
+    // 豁免：start 之后出现了新的会话生命周期起点，说明那个 start 是上一轮的
+    if (latestEndSeedSeq !== undefined && latestEndSeedSeq > unmatchedStart.seq) return { locked: false };
+    return { locked: true, sinceSeq: unmatchedStart.seq };
+}
+
+/**
+ * 压缩锁断言：锁被持有就抛 busy，绝不并发进入事务。
+ *
+ * @param {object} session 会话
+ * @param {string} stage 阶段标签（错误信息里标明是谁撞上了锁）
+ * @throws {ManualCompactionError} 锁被持有时抛 "busy"
+ */
+function assertCompactionInactive(session, stage) {
+    const { locked, sinceSeq } = inspectCompactionLock(session);
+    if (!locked) return;
+    throw new ManualCompactionError(
+        "busy",
+        `${stage}: compaction already in progress (unclosed compaction/start at seq ${sinceSeq}); the session compaction lock is already active`,
+    );
+}
 
 /**
  * 从会话事件流里找当前上下文窗口大小。
@@ -166,8 +230,10 @@ export class TieredCompactionEngineService extends CompactionEngine {
         headroomTokens: z.number(),
         /** 溢出恢复最大重试次数，默认 1（对齐原版 basic，旧实现写死 3 偏贵）。 */
         maxOverflowRetries: z.number(),
+        /** 摘要重试次数，默认 1（对齐原版 basic）：压不到阈值以下时再选一次区间重试。 */
+        compactionRetries: z.number(),
         /**
-         * 按模型覆盖阈值：`[{ provider, model, thresholdRatio?, headroomTokens?, maxOverflowRetries? }]`
+         * 按模型覆盖阈值：`[{ provider, model, thresholdRatio?, headroomTokens?, maxOverflowRetries?, compactionRetries? }]`
          * 匹配不到则不覆盖（沿用全局值）。数组顺序即优先级，先匹配先用。
          */
         modelPolicies: z.array(z.object({
@@ -176,6 +242,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
             thresholdRatio: z.number(),
             headroomTokens: z.number(),
             maxOverflowRetries: z.number(),
+            compactionRetries: z.number(),
         })),
     });
 
@@ -194,6 +261,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
             thresholdRatio: this.config.thresholdRatio ?? 0.85,
             headroomTokens: this.config.headroomTokens ?? HEADROOM_TOKENS,
             maxOverflowRetries: this.config.maxOverflowRetries ?? DEFAULT_MAX_OVERFLOW_RETRIES,
+            compactionRetries: this.config.compactionRetries ?? DEFAULT_COMPACTION_RETRIES,
         };
         const list = this.config.modelPolicies;
         // 路由信息可能缺失（会话早期还没有 requestHeader），也可能只填了一半。
@@ -210,6 +278,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
             thresholdRatio: hit.thresholdRatio ?? base.thresholdRatio,
             headroomTokens: hit.headroomTokens ?? base.headroomTokens,
             maxOverflowRetries: hit.maxOverflowRetries ?? base.maxOverflowRetries,
+            compactionRetries: hit.compactionRetries ?? base.compactionRetries,
         };
     }
 
@@ -345,7 +414,10 @@ export class TieredCompactionEngineService extends CompactionEngine {
             if (this.overflowRetries.get(agent)) return null; // 一次 overflow 只补一枪
             this.overflowRetries.set(agent, true);
         }
-        return this._compactWithRetention(session, agent, signal);
+        return this._compactWithRetention(session, agent, signal, {
+            threshold,
+            measure: () => this.ctx.tokenMeter?.measure?.(session)?.totalTokens ?? 0,
+        });
     }
 
     /**
@@ -464,14 +536,46 @@ export class TieredCompactionEngineService extends CompactionEngine {
         return this._runTransaction(session, range.start, range.end, agent, signal);
     }
 
-    /** 压力/溢出压缩：保留近端 tail（窗口保护量），其余交事务。 */
-    _compactWithRetention(session, agent, signal) {
+    /**
+     * 压力/溢出压缩：保留近端 tail（窗口保护量），其余交事务。
+     *
+     * D17 补上重试（对齐原版 basic 的 `compactionRetries`，默认 1）：
+     * 一次摘要可能压不到阈值以下（模型不肯缩、或选区本来就小），
+     * 原版会再选一次区间重试。此前我们一次不成就算结束，
+     * 结果是「压力仍高但不再压」，直到溢出才被动救火。
+     *
+     * @param {object} session 会话
+     * @param {object} agent agent
+     * @param {AbortSignal} [signal] 取消信号
+     * @param {{threshold?: number, measure?: () => number}} [options]
+     *   传了 threshold 与 measure 才启用重试；不传则保持单次语义（compactNow 等路径）
+     */
+    async _compactWithRetention(session, agent, signal, options = {}) {
         const meter = this.ctx.tokenMeter;
         const window = contextWindowOf(session);
         const retain = Math.max(16000, Math.floor(window * 0.05));
-        const range = this._selectRange(session, meter.measure(session), retain);
-        if (range === null) return null;
-        return this._runTransaction(session, range.start, range.end, agent, signal);
+        const { threshold, measure } = options;
+        // 未提供阈值读数时保持原单次行为（例如手动 compactNow 走全表面）
+        const maxAttempts = threshold === undefined || measure === undefined
+            ? 1
+            : (this.policyFor(this._targetFromAgent(agent)).compactionRetries ?? 1) + 1;
+        let lastResult = null;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const range = this._selectRange(session, meter.measure(session), attempt === 0 ? retain : retain);
+            if (range === null) return lastResult;
+            lastResult = await this._runTransaction(session, range.start, range.end, agent, signal);
+            // 压完重新测量：已降到阈值以下就不必再试
+            if (threshold === undefined || measure === undefined) return lastResult;
+            if (measure() < threshold) return lastResult;
+            this.ctx.logger.warn(
+                `tiered-compaction: 第 ${attempt + 1} 次压缩后仍高于阈值（${measure()} >= ${threshold}），继续重试`,
+            );
+        }
+        // 用完重试次数仍高于阈值：如实告知，不静默放弃
+        throw new ManualCompactionError(
+            "summary",
+            `tiered-compaction: 压缩 ${maxAttempts} 次后仍高于阈值（${measure?.()} >= ${threshold}）`,
+        );
     }
 
     /**
@@ -512,8 +616,15 @@ export class TieredCompactionEngineService extends CompactionEngine {
     /**
      * 事务：start → 摘要 → summary 事件 + user/message(surfaceOp replace) → end。
      * 返回形状与 basic 对齐；任何失败补一条带 error 的 compaction/end 后上抛。
+     *
+     * D17 补两道原版护栏（此前完全没有）：
+     *   1. 进入前查压缩锁（assertCompactionInactive）——防止两个事务并发改表面
+     *   2. 摘要返回后、提交前校验选区未变（assertSpanStable）——防止
+     *      「按 A 版内容生成摘要，却提交到已变成 B 版的表面」这种错位
      */
     async _runTransaction(session, start, end, agent, signal) {
+        // 护栏 1：压缩锁。放在 append start 之前，锁被占时不留任何痕迹。
+        assertCompactionInactive(session, "tiered-compaction");
         const compactionId = CompactionId(randomUUID());
         const lifecycle = { compactionId };
         const startEvent = session.append("compaction/start", lifecycle);
@@ -538,7 +649,14 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 .filter((t) => t.length > 0)
                 .join("\n");
             const estimate = estimateTokens(input);
+            // 摘要是一次 LLM 往返，期间会话可能已经变了。记下提交前需要校验的快照。
+            const prepared = { start, end, shadowedSeqs: [...shadowedSeqs] };
             const { summary, provider, model, maxTokens } = await this.summarize(input, agent, signal);
+
+            // 护栏 2：提交前校验选区仍然可替换（basic 的 assertSelectedSpanStable 等价物）。
+            // 摘要已花掉一次 LLM 调用，若此处发现变动，宁可丢弃摘要也不提交错位内容。
+            this._assertSpanStable(session, prepared);
+
             const framedEstimate = estimateTokens(summary);
             if (framedEstimate >= estimate) {
                 throw new Error(`summary is not smaller than the shadowed content (${framedEstimate} estimated framed tokens >= ${estimate})`);
@@ -579,6 +697,56 @@ export class TieredCompactionEngineService extends CompactionEngine {
             } catch { /* close 尽力而为 */ }
             if (error instanceof ManualCompactionError) throw error;
             throw new ManualCompactionError("summary", "tiered-compaction 事务失败", { cause: error });
+        }
+    }
+
+    /**
+     * 提交前校验：摘要期间选区没有被改动（D17 对齐原版 basic 的
+     * `assertSelectedSpanStable`）。
+     *
+     * 防的是什么：摘要是异步的（一次 LLM 往返，几秒到几十秒）。这期间：
+     *   - 用户可能插了新消息
+     *   - 工具结果可能新落盘
+     *   - 上一层的观察者可能替换了选区内的节点
+     * 如果选区变了却照样提交，摘要内容与提交位置就会错位——
+     * 结果是会话里留下「总结的是旧内容、替换的是新内容」的检查点，
+     * 而且**不报错**，日后很难追。
+     *
+     * 校验三件事（与 basic 同口径）：
+     *   1. 起点/终点仍在表面上，且顺序正确
+     *   2. 选区内的节点集合与摘要时记录的一致
+     *   3. 选区两端仍是配平边界（不劈开 tool-call/result 对）
+     *
+     * @param {object} session 会话
+     * @param {{start: number, end: number, shadowedSeqs: number[]}} prepared 摘要前的快照
+     * @throws {ManualCompactionError} 变动时抛 "changed"
+     */
+    _assertSpanStable(session, prepared) {
+        const nodes = session.surface?.nodes ?? [];
+        const { start, end, shadowedSeqs } = prepared;
+        const startIdx = nodes.indexOf(start);
+        const endIdx = nodes.indexOf(end);
+        if (startIdx === -1 || endIdx === -1) {
+            throw new ManualCompactionError(
+                "changed",
+                "the selected span is no longer present on the surface (summarization raced with compaction of the same region)",
+            );
+        }
+        if (startIdx > endIdx) {
+            throw new ManualCompactionError("changed", "the selected span order changed during summarization");
+        }
+        const current = nodes.slice(startIdx, endIdx + 1);
+        if (current.length !== shadowedSeqs.length || current.some((seq, i) => seq !== shadowedSeqs[i])) {
+            throw new ManualCompactionError(
+                "changed",
+                "the selected span changed during summarization; refusing to commit a summary of stale content",
+            );
+        }
+        if (!toolPairingBalancedBefore(session, nodes[startIdx]) || !toolPairingBalancedAfter(session, nodes[endIdx])) {
+            throw new ManualCompactionError(
+                "changed",
+                "the selected span is no longer a balanced boundary; refusing to split a tool-call/result pair",
+            );
         }
     }
 
