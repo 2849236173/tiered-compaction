@@ -709,6 +709,27 @@ export class TieredCompactionEngineService extends CompactionEngine {
             endIdx -= 1;
         }
         if (endIdx < firstIdx) return null;
+        // 最小可压缩量守卫（D17 真实模型实测挖出的 bug，2026-10-27）。
+        //
+        // 症状：真实会话窗口 24000、阈值 19680、retain 9840，
+        // 而被压缩表面总计只有约 11.8k token。从尾累计到 9840 时
+        // 只剩第一个节点（23 token）可压，于是摘要必然失败：
+        //   summary is not smaller than the shadowed content (306 >= 23)
+        // 实测：第 4 层 3 次事务 3 次失败、0 次成功，每一步都在重试同一件事。
+        //
+        // 关键点：这不是「摘要写得不够短」，而是**选区本身没有压缩空间**。
+        // 原版 basic 的 selectCompactableRange 在 keepFromIdx <= firstIdx 时
+        // 返回 null（= 本次不压）；我们的口径相同却仍返回了 23 token 的区间，
+        // 让它进事务里注定失败。
+        //
+        // 判据：被取代内容的预估量必须显著大于摘要本身的成本。
+        // 摘要固定预留 20000 token 预算，正文至少几百 token；
+        // 压一个几百 token 以下的区间永远净亏损。这里取 RESERVE_TOKENS 的 5%
+        // （= 1000 token）作为下限：低于它直接放弃本次（返回 null），
+        // 语义与「暂无可压内容」一致，不报错、不重试、不花 LLM 调用。
+        const compactable = priced.slice(firstIdx, endIdx + 1)
+            .reduce((total, node) => total + (node?.tokens ?? 0), 0);
+        if (compactable < Math.floor(RESERVE_TOKENS * 0.05)) return null;
         return { start: surfaceNodes[firstIdx], end: surfaceNodes[endIdx] };
     }
 
