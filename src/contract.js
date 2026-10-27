@@ -709,10 +709,27 @@ export class TieredCompactionEngineService extends CompactionEngine {
         const startEvent = session.append("compaction/start", lifecycle);
         try {
             const surfaceNodes = session.surface.nodes;
-            const shadowedSeqs = surfaceNodes.filter((seq) => seq >= start && seq <= end);
-            if (shadowedSeqs[0] !== start || shadowedSeqs[shadowedSeqs.length - 1] !== end) {
+            // D17 沙箱实测挖出的第四个真 bug（2026-10-27）：
+            // 选区必须按**表面位置**切片，不能按数值区间过滤。
+            //
+            // 表面上的 seq 不是单调递增的：一次 replace 会把新事件的 seq 放回
+            // 被替换节点原来的位置（compactCheckpoint 就插在旧位置）。
+            // 于是 `filter(seq >= start && seq <= end)` 会漏掉那些「位置在区间内、
+            // 但 seq 数值在区间外」的节点，并且首尾比对必然失败，报
+            //   compaction: the selected span is no longer a valid replacement target
+            //
+            // 实测证据：小窗口沙箱里这类失败 4 次，另有 13 次更隐蔽的
+            // 「changed during summarization」——因为过滤得到的 shadowedSeqs
+            // 与稳定性校验（用位置切片）的期望值对不上，校验必然判变动。
+            //
+            // 原版 basic 全程用位置索引（prepareCompaction / assertSelectedSpanStable
+            // 都是 nodes.slice(startIdx, endIdx + 1)），这里照抄同一口径。
+            const startIdx = surfaceNodes.indexOf(start);
+            const endIdx = surfaceNodes.indexOf(end);
+            if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) {
                 throw new Error("compaction: the selected span is no longer a valid replacement target");
             }
+            const shadowedSeqs = surfaceNodes.slice(startIdx, endIdx + 1);
             // 摘要输入：区间内节点内容按表面序拼接（basic 的 buildSummarizationInput
             // 走投影前缀；此处文本等价，第 1-2 层已在写入侧缩小过原文）
             const input = shadowedSeqs
