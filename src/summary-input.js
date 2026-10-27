@@ -265,6 +265,13 @@ function buildStructuredInput(session, shadowedSeqs) {
             continue;
         }
 
+        // system 头已在上面单独投影过一次；选区若恰好包含 0 号节点，
+        // 这里再投影一次就会让 system 消息出现两次，破坏前缀顺序（KV 缓存就此失效）。
+        // 用 seq 比对而不是对象比对，因为 eventAt 每次返回的可能是不同包装对象。
+        if (headEvent !== undefined && headEvent !== null && event.seq === headEvent.seq) {
+            continue;
+        }
+
         const message = session.deriveEventMessage(event);
         if (message === null) {
             continue;

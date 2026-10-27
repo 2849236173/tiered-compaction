@@ -389,11 +389,17 @@ function estimateMessageTokens(message) {
  * 若先拼成字符串再估，等于把「结构」这个本次改造的收益重新丢掉，而且拼接
  * 长度会因为分隔符选择而漂移，让「摘要必须比原文小」的判据变得不可解释。
  *
- * **为什么跳过 system 消息**：`buildSummaryInput` 会把会话 system 头放进
- * 消息列表最前面（为了命中 KV 缓存），但 system 头**不在被取代的选区里**——
+ * **为什么跳过第一条 system 消息**：`buildSummaryInput` 会把会话 system 头
+ * 放进消息列表最前面（为了命中 KV 缓存），但 system 头**不在被取代的选区里**——
  * 压缩后它仍然留在会话中。把它计入 estimate 会让分母凭空变大（真实宿主
  * 的 system 前缀动辄数千 token），「摘要比原文小」这条判据就被放水到几乎
- * 永远成立，结果是小摘要换掉大原文的判断失效。跳过它才与改造前的口径等价。
+ * 永远成立。跳过它才与改造前的口径等价。
+ *
+ * **为什么是「第一条」而不是「所有 role === system」**（GLM 复核挖出的口径缺口）：
+ * 旧实现跳过全部 system 消息。若选区里恰好混入一条 system（边界可达），
+ * 它的体量也被无视，分母偏小 → 判据反而变严 → **正常能通过的摘要被误拒绝**。
+ * 实测：真实 2200 token 的被压缩内容被算成 200 token，摘要一律拒提交。
+ * 正确口径是只跳过头那一条：它才是「选外」的那条。
  *
  * @param {{messages: object[]}} input 摘要输入
  * @returns {number} 估算 token 数
@@ -406,11 +412,16 @@ function estimateInputTokens(input) {
     }
 
     let total = 0;
+    let skippedHead = false;
+
     for (const message of messages) {
-        // system 头未被取代，不计入被压缩内容的体量
-        if (message !== null && typeof message === "object" && message.role === "system") {
+        // 只跳过消息列表最前面那一条 system 头（选外内容）；
+        // 选区内部若出现 system，它确实会被压缩掉，必须计入分母
+        if (skippedHead === false && message !== null && typeof message === "object" && message.role === "system") {
+            skippedHead = true;
             continue;
         }
+
         total += estimateMessageTokens(message);
     }
 
@@ -857,8 +868,14 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 没有把 signal 前移，外部旧实现不会默默把 signal 当输入收下。
         const summary = await summarizeFn(request, normalized, signal);
 
-        // 空摘要拒绝提交：写一条空检查点会覆盖掉真实原文，比不压更糟
-        if (summary === undefined || summary === null || summary.length === 0) {
+        // 空摘要拒绝提交：写一条空检查点会覆盖掉真实原文，比不压更糟。
+        //
+        // 口径用 trim()（对齐原版 basic:331-333 的 `block.text.trim().length > 0`）：
+        // 只判 length === 0 会放过纯空白（"   " / "\n\n"），
+        // 而空白检查点提交后，续做的模型看到的是「有检查点但什么也没说」——
+        // 比没有检查点更坏：它以为上下文已确立，实际信息全丢了。
+        // 实测：旧口径下 "   "、" \t \n " 三种纯空白摘要全部放行。
+        if (summary === undefined || summary === null || summary.trim().length === 0) {
             throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果为空，拒绝提交");
         }
 
@@ -1384,4 +1401,4 @@ export class TieredCompactionEngineService extends CompactionEngine {
 }
 
 /** 测试用探测面：暴露内部纯函数（生产代码不消费）。 */
-export const __test = { contextWindowOf, textOfEventForSummary };
+export const __test = { contextWindowOf, textOfEventForSummary, estimateInputTokens };

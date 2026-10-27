@@ -162,6 +162,23 @@ test("B2 输入含 tools → options.tools 等值透传", async () => {
     assert.deepEqual(capturedOptions.tools, customTools, "options.tools 必须与输入 tools 等值");
 });
 
+test("B2b 摘要路由的 provider / model 必须真的转交给 llm.stream", async () => {
+    const { capturedOptions } = await runSummarizeWithCapture({
+        input: {
+            messages: [{ role: "user", content: [{ type: "text", text: "测试路由转交" }] }],
+        },
+    });
+
+    if (capturedOptions === null) {
+        throw new Error("B2b 失败：options 未能被捕获");
+    }
+
+    // 只断言 tools 透传是不够的：provider / model 若没转交到 llm.stream，
+    // 请求会落到默认路由，摘要用错模型也不会报错——属于静默降级
+    assert.equal(capturedOptions.provider, "test-p", "provider 必须原样转交");
+    assert.equal(capturedOptions.model, "test-m", "model 必须原样转交");
+});
+
 test("B3 session 有 toolHistory → options.toolHistory 为其返回值", async () => {
     const mockToolHistory = [
         { tool: "bash", callCount: 3 },

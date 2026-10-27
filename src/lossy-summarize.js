@@ -141,6 +141,20 @@ export function summarizationRequest(target) {
  * summarizeFn 由调用方注入（测试注入假 LLM，宿主注入 ctx.llm 封装），
  * 本模块不直接依赖网络，保证可离线验证（A4a/A5 同口径）。
  *
+ * ⚠️ **当前没有生产调用方**（2026-10-27 D18 复核确认，见 `docs/D18-验收单.md`）。
+ *
+ * 真实的第 4 层摘要在 `contract.js` 的 `_runTransaction` 里完成：它走
+ * `buildSummaryInput` + `summarize()`，请求带 tools / toolHistory / sessionId，
+ * 才能复用 provider 的 KV 缓存（D18 的核心目标）。
+ *
+ * 本函数只吃 `span` 形态的纯文本数组（含 `{seq, kind, content}`），
+ * 拿不到结构化消息，**无法对齐原版架构**。保留它的原因：
+ * `engine.summarizeIfNeeded` 仍在调用，而 engine 的第 1-3 层路径是活的。
+ *
+ * **接线警告**：若将来把 `engine.summarizeIfNeeded` 接到生产路径，
+ * 第 4 层会退回「拍平纯文本」的老做法，D18 的 KV 缓存收益会**静默消失**。
+ * 届时应当改为调用 `contract.js` 的 `summarize()`，而不是本函数。
+ *
  * @param {Array<{seq: number, kind: string, content: string}>} span 待摘要的历史区间
  * @param {(req: {maxTokens: number}, text: string, signal?: AbortSignal) => Promise<string>} summarizeFn 摘要实现
  * @param {{archiveDir: string, lineage: import('./lineage.js').Lineage, sessionId?: string}} deps
