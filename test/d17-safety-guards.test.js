@@ -71,6 +71,10 @@ function makeSession(initial = []) {
         get seq() {
             return log.length;
         },
+        // 真实会话都有 requestHeader（最近一次请求的路由），摘要路由从这里取。
+        // 桩缺这个方法会让摘要因「无路由」失败——D17 修复后不再被静默吞掉，
+        // 所以桩必须照真实形状补齐，而不是让被测代码迁就桩。
+        requestHeader: () => ({ config: { provider: "test-provider", model: "test-model" } }),
         surface: { nodes: log.filter((e) => e.type.endsWith("/message") || e.type === "tool/result").map((e) => e.seq) },
         eventAt: (seq) => log.find((e) => e.seq === seq),
         append(type, data, options = {}) {
