@@ -166,3 +166,62 @@ test("D22-0 宿主 patch 递归限制的证据仍在（这是问题 0 的根因�
         "宿主 buildMap 仍只递归 group+数组；若已放宽，preset 告警需要重新评估"
     );
 });
+
+/* ---------------- 问题 2：restoreSpilled 必须接进真实路径 ---------------- */
+
+test("D22-2 tiered_restore 工具端到端：注册、校验读回、拒绝错哈希", async () => {
+    const { Context, Service } = await import("@deepseek-ai/cordis");
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { spillIfNeeded } = await import("../src/spill-to-disk.js");
+    const { TieredCompactionEngineService } = await import("../src/contract.js");
+
+    // 收集注册到的工具
+    class FakeTools extends Service {
+        constructor(c) { super(c, "tools"); this.map = new Map(); }
+        register(t) { this.map.set(t.name, t); }
+    }
+    // 契约层的 static inject 三件套必须由 Service 提供，否则类永久挂起不构造
+    class MeterStub extends Service { constructor(c) { super(c, "tokenMeter"); } }
+    class LlmStub extends Service { constructor(c) { super(c, "llm"); } }
+    class SessionsStub extends Service { constructor(c) { super(c, "sessions"); } }
+
+    const dir = await mkdtemp(join(tmpdir(), "d22-restore-"));
+    const ctx = new Context();
+    ctx.logger = { info: () => {}, warn: () => {}, error: () => {} };
+    for (const S of [FakeTools, MeterStub, LlmStub, SessionsStub]) await ctx.plugin(S, {});
+
+    try {
+        // 造一个真实存档
+        const text = "X".repeat(20000);
+        const spilled = await spillIfNeeded(text, dir, "demo", { threshold: 8000 });
+        assert.ok(spilled?.path, "落盘应产生路径");
+
+        await ctx.plugin(TieredCompactionEngineService, { archiveDir: dir, enabled: true, auto: false });
+
+        const tools = ctx.get("tools");
+        const tool = tools.map.get("tiered_restore");
+        assert.ok(tool, "tiered_restore 必须被注册（这是 restoreSpilled 唯一的生产调用点）");
+
+        // 正常读回：逐字节一致
+        const back = await tool.execute({ path: spilled.path, sha256: spilled.sha256 });
+        assert.equal(back, text, "校验通过时应返回逐字节一致的原文");
+
+        // 错哈希必须拒绝——读到坏内容比读不到更危险
+        await assert.rejects(
+            () => tool.execute({ path: spilled.path, sha256: "deadbeef" }),
+            /SHA-256 校验失败/,
+            "哈希不匹配必须拒绝返回内容"
+        );
+
+        // 缺 sha256 必须拒绝：不给校验就等于退化成普通 read
+        await assert.rejects(
+            () => tool.execute({ path: spilled.path }),
+            /sha256 必填/,
+            "缺 sha256 时必须报错，不能静默降级为不校验"
+        );
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+});
