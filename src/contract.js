@@ -645,37 +645,54 @@ export class TieredCompactionEngineService extends CompactionEngine {
             return;
         }
 
-        tools.register({
-            name: "tiered_restore",
-            description:
-                "Read back an archived tool result and verify its SHA-256. " +
-                "Use this instead of the generic read tool when a pruned tool result " +
-                "shows a tiered-compaction archive path: it proves the content is intact. " +
-                "Returns the original text only when the digest matches.",
-            parameters: {
-                path: {
-                    type: "string",
-                    required: true,
-                    description: "Absolute archive path, as shown in the pruned result preview.",
+        try {
+            tools.register({
+                name: "tiered_restore",
+                description:
+                    "Read back an archived tool result and verify its SHA-256. " +
+                    "Use this instead of the generic read tool when a pruned tool result " +
+                    "shows a tiered-compaction archive path: it proves the content is intact. " +
+                    "Returns the original text only when the digest matches.",
+                parameters: {
+                    path: {
+                        type: "string",
+                        required: true,
+                        description: "Absolute archive path, as shown in the pruned result preview.",
+                    },
+                    sha256: {
+                        type: "string",
+                        required: true,
+                        description: "Expected SHA-256 hex digest, as shown in the pruned result preview.",
+                    },
                 },
-                sha256: {
-                    type: "string",
-                    required: true,
-                    description: "Expected SHA-256 hex digest, as shown in the pruned result preview.",
+                // 宿主契约（dsh-tools 0.2.x register）：output 是必填项，
+                // 缺了会在注册时抛 TypeError —— 而注册发生在 [Service.init]，
+                // 抛错会让服务永远进不了 ready，宿主 boot 直接卡死进恢复态。
+                // 返回原文（string），故 schema 用字符串根，render 直出文本。
+                output: {
+                    schema: { type: "string" },
+                    render: (_args, value) => [{ type: "text", text: value }],
                 },
-            },
-            execute: async (args) => {
-                // 卫语句：参数缺失直接报错，不猜不填
-                if (typeof args?.path !== "string" || args.path.length === 0) {
-                    throw new Error("tiered_restore: path 必填");
-                }
-                if (typeof args?.sha256 !== "string" || args.sha256.length === 0) {
-                    throw new Error("tiered_restore: sha256 必填（校验失败的内容比读不到更危险）");
-                }
-                // 校验不通过时 restoreSpilled 抛错，不返回内容——这正是要的行为
-                return restoreSpilled(args.path, args.sha256);
-            },
-        });
+                execute: async (args) => {
+                    // 卫语句：参数缺失直接报错，不猜不填
+                    if (typeof args?.path !== "string" || args.path.length === 0) {
+                        throw new Error("tiered_restore: path 必填");
+                    }
+                    if (typeof args?.sha256 !== "string" || args.sha256.length === 0) {
+                        throw new Error("tiered_restore: sha256 必填（校验失败的内容比读不到更危险）");
+                    }
+                    // 校验不通过时 restoreSpilled 抛错，不返回内容——这正是要的行为
+                    return restoreSpilled(args.path, args.sha256);
+                },
+                });
+        } catch (error) {
+            // 兜底：工具注册失败绝不能让 [Service.init] 失败，
+            // 否则四层压缩（主功能）会跟着整插件一起挂。
+            this.ctx?.logger?.warn(
+                `dsh-tiered-compaction: tiered_restore 注册失败（${error?.message ?? error}），四层压缩照常`
+            );
+            return;
+        }
         this.ctx.logger.info("dsh-tiered-compaction: tiered_restore 工具已注册（校验读回存档）");
     }
 
