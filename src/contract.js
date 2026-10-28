@@ -866,6 +866,16 @@ export class TieredCompactionEngineService extends CompactionEngine {
 
         // 发请求。三参位置与改造前一致：第二参只换了形状（字符串→结构化对象），
         // 没有把 signal 前移，外部旧实现不会默默把 signal 当输入收下。
+        //
+        // D22：把「实际用哪个模型发摘要」记进日志。
+        // 背景：`purpose: "compaction"` 是个公开钩子，`dsh-auxiliary` 的
+        // installCompactRouter 与 `dsh-compact-selected-model` 都会按它把请求
+        // **改道到另一个 provider/model**。这本身不是 bug（它们就在做这件事），
+        // 但改道是静默的：用户配了辅助模型后摘要质量变了，日志里查不出原因。
+        // 打出目标模型，至少能对上「为什么这次摘要不一样」。
+        this.ctx?.logger?.info(
+            `tiered-compaction: 第 4 层摘要请求 → ${target.provider}/${target.model}（purpose=compaction，可能被路由插件改道）`
+        );
         const summary = await summarizeFn(request, normalized, signal);
 
         // 空摘要拒绝提交：写一条空检查点会覆盖掉真实原文，比不压更糟。
@@ -1402,3 +1412,5 @@ export class TieredCompactionEngineService extends CompactionEngine {
 
 /** 测试用探测面：暴露内部纯函数（生产代码不消费）。 */
 export const __test = { contextWindowOf, textOfEventForSummary, estimateInputTokens };
+
+
