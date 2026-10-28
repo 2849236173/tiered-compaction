@@ -29,17 +29,57 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 
 插件是纯 ESM + JSDoc，无构建链，`src/` 直出，安装前无需编译。
 
-```powershell
-# 从 GitHub 装
-dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
+### 先确认你用哪个 profile
 
-# 本地开发：软链装，改代码即生效
-dsh plugin --profile desktop add "<本仓库绝对路径>"
+DSH 每个运行形态对应一个 profile 名，装到哪个 profile 就只在那个形态生效。**你平时怎么启动 DSH，就用哪个名字**：
+
+| 你怎么用 DSH | profile 名 | 复制这条命令 |
+|---|---|---|
+| 桌面客户端（Windows/macOS 应用） | `desktop` | 见下方桌面端 |
+| 浏览器里打开的 Web 版 | `web` | 见下方 Web 端 |
+| 命令行 / 脚本调用（headless） | `headless` | 见下方 headless |
+| 终端交互界面（TUI） | `tui` | 见下方 TUI |
+
+不确定自己有哪些 profile：看 `~/.dsh/profiles/` 下的文件夹名（Windows 是 `C:\Users\<你>\.dsh\profiles\`）。
+
+> 想一次装进多个形态，就把下面命令各跑一遍，把 `--profile` 换成对应的名字。
+
+### 桌面端（最常用）
+
+```powershell
+dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
 ```
 
-`<profile>` 是 DSH 的配置档案名，对应 `~/.dsh/profiles/<名字>` 下的目录（桌面端通常是 `desktop`）。
+### Web 端
 
-**装完重启即可，无需改任何配置。**
+```powershell
+dsh plugin --profile web add "github:2849236173/tiered-compaction"
+```
+
+### headless（命令行 / 脚本）
+
+```powershell
+dsh plugin --profile headless add "github:2849236173/tiered-compaction"
+```
+
+### TUI（终端界面）
+
+```powershell
+dsh plugin --profile tui add "github:2849236173/tiered-compaction"
+```
+
+### 本地开发（改代码即生效）
+
+想在本地改插件源码、并且改完重启就生效，用软链方式装——把路径换成你的仓库位置：
+
+```powershell
+# 桌面端为例；其它形态把 desktop 换成 web / headless / tui
+dsh plugin --profile desktop add "D:\你的路径\tiered-compaction"
+```
+
+### 装完做什么
+
+**重启 DSH 即可，无需改任何配置。**
 
 插件自带的 patch 在挂载时做两件事：停用官方 `dsh-compaction-basic`（让出 `compaction` 服务位），插入并启用本插件。存档目录默认 `~/.dsh/tiered-archive`，不存在时自动创建。
 
@@ -58,7 +98,7 @@ dsh plugin --profile desktop remove dsh-tiered-compaction
 
 卸载后官方 `dsh-compaction-basic` **自动恢复**——因为停用它的 patch 属于本插件包，随包一起移除。重启即回到官方压缩，不需要手工改回配置。
 
-（如果你只想临时换成官方压缩、保留插件，也可以把 patch 里两个开关互换，但这种情况下卸载更简单。）
+（只想临时换回官方压缩、但保留插件：把 patch 里两个开关互换即可，不过这种情况卸载更简单。）
 
 ## 配置（全部可选）
 
