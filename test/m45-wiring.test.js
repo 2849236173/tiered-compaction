@@ -111,7 +111,7 @@ test("A-wire③ 前三层经 engine 端到端", async (t) => {
     const big = "The quick brown fox jumps over the lazy dog. ".repeat(240);
     const r2 = await engine.processToolOutput(big, { seq: 2 });
     assert.ok(r2.layers.includes("spill-to-disk"), "第 2 层必须命中");
-    assert.ok(r2.text.length <= 1500, "预览必须 ≤1.5k");
+    assert.ok(r2.text.length <= 5120, "预览必须 ≤5120（D20 对齐原版 pruner 预算）");
     const entry = engine.lineage.toArray().find((e) => e.replacedBy === "spill-to-disk");
     assert.ok(entry?.digest, "落盘必须带 SHA-256 谱系");
 

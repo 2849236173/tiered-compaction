@@ -1,13 +1,15 @@
 /**
- * 预览首尾都要有（D17 验收单 P2-1 建议的落地）。
+ * 预览首尾都要有（D17 验收单 P2-1 建议的落地，D20 对齐原版预算）。
  *
  * 问题：原实现 `text.slice(0, 1500)` 只留开头。但工具输出的**结论常在末尾**——
  *   错误码、`exit code: N`、测试的 `pass/fail` 计数、git 的 `N files changed`、
  *   命令的汇总行。只留开头会让模型看到一堆中间过程却看不到结论，
  *   反而促使它重跑命令（白烧 token），压缩就失去了意义。
  *
- * 修法：头部占 1/3、尾部占 2/3（结论更重要），中间一行标记说明省略量。
- * 硬约束：总长（含标记）仍必须 ≤ 1500 字符，这是 A2 验收项。
+ * D20 变更（2026-10-28 用户拍板对齐原版 pruner）：
+ *   - 预算从 1500 提到 5120（原版 headChars 4096 + 标记 + tailChars 1024）
+ *   - 头尾比例从 1:2 改为 4:1（照抄原版 4096:1024）
+ *   硬约束不变：总长（含标记）必须 ≤ limit。
  *
  * 运行：node --test test/d17-preview-head-tail.test.js
  */
@@ -48,13 +50,29 @@ test("总长（含省略标记）绝不超过限额——A2 验收项", () => {
 });
 
 test("省略量数字很大时也不超限（兜底裁剪生效）", () => {
-    // 1MB 文本，omitted 是 7 位数，标记变长，仍必须 ≤ 1500
+    // 1MB 文本，omitted 是 7 位数，标记变长，仍必须 ≤ limit
     const text = "y".repeat(1000000);
     const preview = headTailPreview(text, DEFAULT_PREVIEW_LIMIT);
     assert.ok(preview.length <= DEFAULT_PREVIEW_LIMIT, `实得 ${preview.length}`);
 });
 
-test("尾部占比大于头部：结论比开头更重要", () => {
+test("D20 预算对齐原版：5120 上限下头 4096 尾 1024 量级成立", () => {
+    // 原版 pruner（dsh-compaction-tool-result-pruner lib:10-14）：
+    //   thresholdChars 8192 / headChars 4096 / tailChars 1024
+    // 我们的单一上限 5120 下，头部应接近 4/5、尾部接近 1/5
+    const text = "x".repeat(100000);
+    const preview = headTailPreview(text, DEFAULT_PREVIEW_LIMIT);
+
+    assert.ok(preview.length <= DEFAULT_PREVIEW_LIMIT, `实得 ${preview.length}`);
+    // 头部：以 x 开头的连续段（原文头）
+    const headRun = preview.slice(0, preview.indexOf("…[")).length;
+    assert.ok(
+        headRun >= 3800 && headRun <= 4100,
+        `头部预算应接近 4096，实得 ${headRun}`,
+    );
+});
+
+test("头部占比大于尾部：对齐原版 pruner 的 4:1 预算", () => {
     // 造一个能区分的样本：头部和尾部内容不同且等长
     const headPart = "H".repeat(3000);
     const tailPart = "T".repeat(3000);
@@ -63,9 +81,9 @@ test("尾部占比大于头部：结论比开头更重要", () => {
 
     const headCount = (preview.match(/H/g) ?? []).length;
     const tailCount = (preview.match(/T/g) ?? []).length;
-    assert.ok(tailCount > 0, "尾部必须有内容");
     assert.ok(headCount > 0, "头部必须有内容");
-    assert.ok(tailCount > headCount, `尾部(${tailCount})应多于头部(${headCount})，结论更重要`);
+    assert.ok(tailCount > 0, "尾部必须有内容（结论行仍要保住）");
+    assert.ok(headCount > tailCount, `头部(${headCount})应多于尾部(${tailCount})，对齐原版 4096:1024`);
 });
 
 test("落到实际落盘路径：spillIfNeeded 的预览也是首尾式", async (t) => {
