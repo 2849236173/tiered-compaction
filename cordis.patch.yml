@@ -13,6 +13,6 @@
 #                   （同一服务位不可双注册）。
 - insert:
     - id: tiered-compaction
-      name: "@local/dsh-tiered-compaction"
+      name: "dsh-tiered-compaction"
       config:
         enabled: false

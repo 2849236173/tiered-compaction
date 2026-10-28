@@ -1,14 +1,39 @@
 {
-  "name": "@local/dsh-tiered-compaction",
-  "description": "分层压缩插件：无损折叠→落盘→软压力→有损摘要四层管线（DSH Cordis 插件）",
-  "version": "0.2.0-rc.1",
-  "private": true,
+  "name": "dsh-tiered-compaction",
+  "description": "DSH 分层上下文压缩插件：无损折叠 → 落盘 → 软压力 → 有损摘要四层管线，前三层零 LLM 成本，摘要预算预留杜绝截断。",
+  "version": "0.2.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./package.json": "./package.json"
   },
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "cordis-plugin",
+    "context-compaction",
+    "context-management",
+    "token-optimization",
+    "llm"
+  ],
+  "license": "MIT",
+  "author": "逍遥客",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2849236173/tiered-compaction.git"
+  },
+  "bugs": {
+    "url": "https://github.com/2849236173/tiered-compaction/issues"
+  },
+  "homepage": "https://github.com/2849236173/tiered-compaction#readme",
   "engines": {
     "node": ">=20"
   },
@@ -21,6 +46,8 @@
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/index.js && node -e \"import('./src/index.js').then(()=>console.log('入口可加载 OK')).catch(e=>{console.error(e);process.exit(1)})\"",
+    "build": "npm run check && npm test"
   }
 }
