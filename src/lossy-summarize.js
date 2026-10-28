@@ -16,6 +16,85 @@ export const RESERVE_TOKENS = 20000;
  */
 export const HEADROOM_TOKENS = 65536;
 
+/** 合法的 thresholdRatio 区间下界：低于它就会抢在第 3 层 80% 驱逐之前。 */
+export const MIN_THRESHOLD_RATIO = 0.82;
+
+/** 合法的 thresholdRatio 区间上界：高于它触发点贴着窗口，摘要必然撞窗。 */
+export const MAX_THRESHOLD_RATIO = 0.95;
+
+/**
+ * 已告警过的夹取组合（去重）：`lossyThreshold` 在每次 pre-step 都会跑，
+ * 不去重会把日志刷爆，而刷爆的告警等于没有告警。
+ * key 用「原值→结果」，同一个错误配置只提示一次。
+ * @type {Set<string>}
+ */
+const warnedClamps = new Set();
+
+/**
+ * 夹取告警的落点。默认 `console.warn`，由调用方（contract.js）注入 ctx.logger。
+ * 之所以做成可注入：本模块是纯函数模块，不持有 ctx；而 `lossyThreshold`
+ * 又被多处调用，不能靠参数把 logger 一路传下去污染签名。
+ * @type {(message: string) => void}
+ */
+let warn = (message) => console.warn(message);
+
+/**
+ * 注入告警落点（幂等）。插件 `apply()` 时调一次即可。
+ * @param {(message: string) => void} sink 日志函数
+ */
+export function setThresholdWarnSink(sink) {
+    if (typeof sink === "function") warn = sink;
+}
+
+/**
+ * ratio 被夹取时留痕（每个组合只报一次）。
+ * @param {number} raw 调用方传入的原值
+ * @param {number} applied 实际生效值
+ * @param {(m: string) => void} sink 日志函数
+ */
+export function warnClampedRatio(raw, applied, sink = warn) {
+    // 卫语句：没被夹取就什么都不做，正常路径零开销
+    if (!Number.isFinite(raw) || raw === applied) return;
+
+    const key = `ratio:${raw}`;
+    if (warnedClamps.has(key)) return;
+    warnedClamps.add(key);
+
+    sink(
+        `tiered-compaction: thresholdRatio ${raw} 超出合法区间 ` +
+        `[${MIN_THRESHOLD_RATIO}, ${MAX_THRESHOLD_RATIO}]，已按 ${applied} 生效。` +
+        `低于 ${MIN_THRESHOLD_RATIO} 会抢在第 3 层 80% 驱逐之前，高于 ${MAX_THRESHOLD_RATIO} 摘要必然撞窗。` +
+        `（如果你用第三方插件调这个值，注意它的滑块行程可能大部分落在这里）`
+    );
+}
+
+/**
+ * headroom 被夹取时留痕（每个组合只报一次）。
+ * @param {number} raw 调用方传入的原值
+ * @param {number} applied 实际生效值
+ * @param {(m: string) => void} sink 日志函数
+ */
+export function warnClampedHeadroom(raw, applied, sink = warn) {
+    // 卫语句：合法非负值原样通过，不打扰
+    if (!Number.isFinite(raw) || raw === applied) return;
+
+    const key = `headroom:${raw}`;
+    if (warnedClamps.has(key)) return;
+    warnedClamps.add(key);
+
+    sink(
+        `tiered-compaction: headroomTokens ${raw} 非法（必须是有限的非负数），` +
+        `已按 ${applied} 生效。${applied === 0 ? "0 意味着不给摘要留输出空间，事务可能撞窗。" : ""}`
+    );
+}
+
+/**
+ * 清空告警去重表（仅供测试使用）。
+ */
+export function resetThresholdWarnings() {
+    warnedClamps.clear();
+}
+
 /**
  * 计算压力阈值（第 4 层触发线）——**比例与绝对余量双约束取小**。
  *
@@ -51,13 +130,28 @@ export function lossyThreshold(contextWindow, options = {}) {
     const rawRatio = options.thresholdRatio ?? 0.85;
     const rawHeadroom = options.headroomTokens ?? HEADROOM_TOKENS;
     const reserve = options.reserveTokens ?? RESERVE_TOKENS;
+
     // P1-2（2026-10-27 系统审计）：配置必须夹到合法区间，越界静默失效不可接受。
     // 实测旧实现：ratio=1.5 → 阈值 150% 窗口**永不触发**；
     //              ratio=0.5 → 抢在 80% 驱逐前且单调性破裂 1309 处；
     //              headroom=NaN → 阈值 NaN → 永不触发。
     // 夹取而非抛错：配置问题不该让压缩层整个罢工，但必须留痕。
-    const ratio = Number.isFinite(rawRatio) ? Math.min(0.95, Math.max(0.82, rawRatio)) : 0.85;
+    const ratio = Number.isFinite(rawRatio)
+        ? Math.min(MAX_THRESHOLD_RATIO, Math.max(MIN_THRESHOLD_RATIO, rawRatio))
+        : 0.85;
     const headroom = Number.isFinite(rawHeadroom) ? Math.max(0, rawHeadroom) : HEADROOM_TOKENS;
+
+    // 夹取必须留痕（D22 外部改写审计）：`dsh-session-manager` 这类插件会拿
+    // `agentPresets.serviceFor(agent,'compaction')` 找到本引擎，直接写
+    // `engine.config.thresholdRatio`。它的滑块是 17%–90%，而下面 [0.82, 0.95]
+    // 的夹取让 65% 的行程成为死区——用户拖到 17% 和 81% 效果完全一样。
+    // 没有这条日志，整件事是静默的：改配置没有任何反馈，也没法从日志看出
+    // 「我的设置为什么没生效」。只记一次（用模块级 Set 去重），避免每步刷屏。
+    warnClampedRatio(rawRatio, ratio, warn);
+
+    // headroom 被改写同样要留痕（同一机制）：负数会被夹到 0，
+    // 而 0 意味着「不给摘要留输出空间」，是会让事务撞窗的危险值。
+    warnClampedHeadroom(rawHeadroom, headroom, warn);
 
     // 比例线：不超过 window × ratio（给压缩事务留出确定空间）
     const byRatio = Math.floor(contextWindow * ratio);

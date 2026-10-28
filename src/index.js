@@ -20,6 +20,8 @@ import { TieredCompactionEngine } from "./engine.js";
 import { TieredCompactionEngineService as HostContractEngineService } from "./contract.js";
 // P1/P2-1 修补：工具结果观察者——把第 1-3 层真正接到宿主会话事件流。
 import { ToolResultObserver } from "./tool-result-observer.js";
+// D22：把阈值夹取的告警接到宿主日志（见 reportCoexistingEngines 与 lossy-summarize）。
+import { setThresholdWarnSink } from "./lossy-summarize.js";
 
 /** 本插件在 Cordis 中的服务位名（不与宿主 `compaction` 冲突）。 */
 const SERVICE_NAME = "tieredCompaction";
@@ -89,6 +91,95 @@ class TieredCompactionBypassService extends Service {
 }
 
 /**
+ * 检测「preset realm 内另有压缩引擎」（D22 新增）。
+ *
+ * 为什么必须有这一步：
+ * 在 preset 架构下（web / desktop 都是），每个会话的 agent 跑在 preset 自己的
+ * `isolate` realm 里，realm 内有一份独立的 `compaction` 服务。插件自带的
+ * cordis patch 只能停用 **root 平面**那份 `compaction-basic`，因为它走的
+ * `buildMap` 只递归 `group && Array.isArray(config)`，而 preset 的插件列表
+ * 躺在 `agentPreset.config.plugins` 这个**对象字段**里，递归不进去。
+ *
+ * 后果：我们在 root realm 注册成功、日志显示「已接管 compaction 服务位」，
+ * 但每个真实会话用的是 preset realm 里那个官方 basic。用户装了插件，
+ * 实际压缩行为没有任何变化，且**全程零报错**——这是最难查的一类失效。
+ *
+ * 这一步不试图修复（改写别人 preset 的 config 风险高），只把静默变可见。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 宿主上下文
+ */
+async function reportCoexistingEngines(ctx) {
+    // 卫语句：拿不到 preset 注册表（headless / 老宿主 / 测试桩）就无事可做。
+    // 用可选链而非 ctx.get 直接调用：ctx.get 可能强制实例化懒声明服务。
+    const registry = typeof ctx.get === "function" ? ctx.get("agentPresets") : undefined;
+    if (registry === undefined || registry === null) {
+        ctx.logger.info(
+            "dsh-tiered-compaction: 无 agentPresets 服务（非 preset 架构），" +
+            "本插件即为唯一的 compaction 实现"
+        );
+        return;
+    }
+    // 卫语句：注册表版本不支持 list() 时不做无根据的结论
+    if (typeof registry.list !== "function") return;
+
+    let rows;
+    try {
+        rows = await registry.list();
+    } catch (error) {
+        // 探测失败绝不能阻断加载：它只是诊断，不是功能
+        ctx.logger.warn(
+            `dsh-tiered-compaction: 枚举 preset 失败（已忽略）：${error?.message ?? error}`
+        );
+        return;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) return;
+
+    // 逐个 preset 查它 realm 内有没有 compaction 实现。
+    // serviceFor 需要 (agent, name)，但我们只有 preset 定义、没有 agent 实例；
+    // 因此退一步：凡是「声明了 compaction 组的 preset」都要报——这些 preset
+    // 一旦被某个会话选中，realm 内就有自己的引擎，我们的 patch 管不到它。
+    const risky = [];
+    for (const row of rows) {
+        if (declaresOwnCompactionGroup(row)) risky.push(presetLabel(row));
+    }
+    if (risky.length === 0) {
+        ctx.logger.info(
+            "dsh-tiered-compaction: 所有 preset 均未自带 compaction 组，本插件为唯一压缩实现"
+        );
+        return;
+    }
+
+    ctx.logger.warn(
+        `dsh-tiered-compaction：以下 preset 自带 compaction 组，其 realm 内会挂一份独立压缩引擎：` +
+        `${risky.join("、")}。` +
+        `插件 patch 只能停用 root 平面那份 compaction-basic，管不到 preset 内部——` +
+        `**若你的会话正在使用这些 preset，实际压缩由 preset 内引擎执行，本插件的四层管线不会生效**。` +
+        `解决办法：用 tools/gen-ptc-tc.ps1 这类脚本把 preset 的 config 整块重写（把 compaction-basic 换成 tiered-compaction）。`
+    );
+}
+
+/**
+ * 判断一个 preset 定义是否自带 compaction 组。
+ * @param {object} row preset 定义（registry.list() 的一项）
+ * @returns {boolean} 自带则为 true
+ */
+function declaresOwnCompactionGroup(row) {
+    const plugins = row?.config?.plugins ?? row?.plugins;
+    if (!Array.isArray(plugins)) return false;
+    return plugins.some((entry) => entry?.id === "compaction");
+}
+
+/**
+ * preset 的可读标识，用于告警文案。
+ * @param {object} row preset 定义
+ * @returns {string} 例如 `ptc` 或 `(未命名 preset)`
+ */
+function presetLabel(row) {
+    const id = row?.config?.id ?? row?.id;
+    if (typeof id === "string" && id.length > 0) return id;
+    return "(未命名 preset)";
+}
+
+/**
  * Cordis 插件入口。
  * @param {import('@deepseek-ai/cordis').Context} ctx 宿主上下文
  * @param {{enabled?: boolean, bypassMode?: boolean, archiveDir?: string,
@@ -116,6 +207,19 @@ export async function apply(ctx, config = {}) {
     ctx.logger.info(
         `dsh-tiered-compaction apply 被调用（enabled=${resolved.enabled}）`
     );
+
+    // D22：把阈值夹取的告警接到宿主日志。
+    // 背景：`dsh-session-manager` 这类插件会直接写 engine.config.thresholdRatio
+    // （17%–90% 滑块），而我们的 lossyThreshold 把值夹到 [0.82, 0.95]。
+    // 不接这条 sink，夹取就是静默的——用户改了设置、没生效、日志里一个字都没有。
+    setThresholdWarnSink((message) => ctx.logger.warn(message));
+
+    // D22：检测「realm 内另有压缩引擎」——这是 preset 架构下最隐蔽的失效：
+    // 我们注册在 root realm 成功、日志显示「已接管」，但每个会话实际跑的是
+    // preset realm 内那份官方 basic（preset 的 plugins 是对象字段，patch 的
+    // buildMap 递归不进去，所以插件自带 patch 停不掉它）。
+    // 期望 false 以外的结果都要报出来，把「装了但没用」从静默变可见。
+    await reportCoexistingEngines(ctx);
     // 开关关闭（默认）：只注册自检服务，绝不触碰 ctx.compaction 服务位，
     // 保证与 dsh-compaction-basic 完全并存、行为与纯 basic 一致（验收 A6）。
     if (!resolved.enabled) {
