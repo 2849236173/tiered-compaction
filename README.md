@@ -56,14 +56,31 @@ DSH 默认的压缩是**一步到位**：上下文到 80% 就调一次 LLM 做�
 
 ## 安装
 
-插件遵循 DSH 插件的无构建链约定（纯 ESM + JSDoc，无需 tsc/bundler），`src/` 直出。
+插件遵循 DSH 插件的无构建链约定（纯 ESM + JSDoc，无需 tsc/bundler），`src/` 直出，**安装前无需编译**。
+
+### 方式一：从 GitHub Release 的 tarball 装（推荐）
+
+到 [Releases](https://github.com/2849236173/tiered-compaction/releases) 下载 `dsh-tiered-compaction-<版本>.tgz`，然后：
 
 ```powershell
-# 以本地路径方式装入指定 profile
-dsh plugin --profile <profile> add "<本仓库路径>"
+dsh plugin --profile <profile> add "C:\下载路径\dsh-tiered-compaction-0.2.0.tgz"
 ```
 
-然后在该 profile 的 `cordis.patch.yml` 里挂载：
+### 方式二：直接从仓库装
+
+```powershell
+dsh plugin --profile <profile> add "github:2849236173/tiered-compaction"
+```
+
+### 方式三：本地开发（软链，改代码即生效）
+
+```powershell
+dsh plugin --profile <profile> add "<本仓库绝对路径>"
+```
+
+### 挂载配置
+
+装好后在该 profile 的 `cordis.patch.yml` 里挂载：
 
 ```yaml
 - insert:
@@ -75,6 +92,8 @@ dsh plugin --profile <profile> add "<本仓库路径>"
 ```
 
 > ⚠️ 注意 DSH patch 的写法：新增条目必须只写 `insert:`，`id`/`config` 全部放进 insert 数组项内。写成顶层 `id:` 会被当作「修改已存在条目」而报 `not found`。
+
+> ⚠️ 同一 `compaction` 服务位不可双注册。`enabled: true` 时必须在同一 profile 里停用 `dsh-compaction-basic`，否则后加载者会被跳过。`enabled: false` 时二者可以共存。
 
 ## 配置项
 
