@@ -10,6 +10,8 @@
   },
   "files": [
     "src/",
+    "docs/",
+    "scripts/",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",

@@ -15,23 +15,28 @@
  *   4. 压缩事务四段落地（start / summary / user-message / end），检查点带 OPEN/CLOSE 标签
  *
  * 用法：
- *   node scripts/verify-e2e.mjs [会话文件路径]
- *   不传路径时用脚本内置的默认会话（本机路径，其它机器需传参）。
+ *   node scripts/verify-e2e.mjs <会话文件路径>
  *
- * 退出码：0 = 全部通过；1 = 有失败项。
+ * 会话文件就是 DSH 的 session.v4.jsonl.zstd，位置随平台不同：
+ *   Windows  %USERPROFILE%\.dsh\sessions\<工作区目录>\<会话ID>\session.v4.jsonl.zstd
+ *   macOS    ~/.dsh/sessions/<工作区目录>/<会话ID>/session.v4.jsonl.zstd
+ *   Linux    ~/.dsh/sessions/<工作区目录>/<会话ID>/session.v4.jsonl.zstd
+ * 也可以设环境变量 DSH_SESSION_FILE 指定，避免每次带长参数。
+ *
+ * 为什么必须传真实会话：这个脚本验证的是「摘要请求是正常对话请求的严格前缀」，
+ * 只有真实会话的 surface 才能证明结构等价；自造夹具盖不到真实形状的边界。
+ *
+ * 退出码：0 = 全部通过；1 = 有失败项；2 = 未提供会话文件。
  */
 import { readFileSync } from "node:fs";
 import { zstdDecompressSync } from "node:zlib";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { Context } from "@deepseek-ai/cordis";
 import { foldSurface, deriveEventMessage } from "@deepseek-ai/dsh-session";
 import { apply } from "../src/index.js";
-
-const DEFAULT_SESSION =
-    "C:/Users/asus/.dsh/sessions/--C-Users-asus-.dsh-bot-workspace--/session-e350d45d-0c05-480a-ab2c-e451a225d7ee/session.v4.jsonl.zstd";
 
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
@@ -103,7 +108,17 @@ function stable(v) {
 
 /* ────────────── 1. 加载真实会话 ────────────── */
 
-const sessionPath = process.argv[2] ?? DEFAULT_SESSION;
+// 会话路径来自命令行参数或 DSH_SESSION_FILE 环境变量。
+// 不给默认值：写死任何人的本机路径都会让脚本在别人机器上直接失败。
+const sessionArg = process.argv[2] ?? process.env.DSH_SESSION_FILE;
+if (sessionArg === undefined || sessionArg.length === 0) {
+    console.error("用法：node scripts/verify-e2e.mjs <session.v4.jsonl.zstd 路径>");
+    console.error("或设置环境变量 DSH_SESSION_FILE 指向该文件。");
+    console.error("会话文件位于 ~/.dsh/sessions/<工作区目录>/<会话ID>/session.v4.jsonl.zstd");
+    process.exit(2);
+}
+
+const sessionPath = resolve(sessionArg);
 const events = loadEvents(sessionPath);
 
 console.log(`═══ 真实会话 ═══`);

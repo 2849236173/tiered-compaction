@@ -28,7 +28,10 @@
  *
  * 运行：
  *   node --test test/d18-kv-prefix.test.js
- *   $env:D18_REAL_SESSION="C:\Users\...\session.v4.jsonl.zstd"; node --test test/d18-kv-prefix.test.js
+ *
+ * 会话文件在 ~/.dsh/sessions/<工作区目录>/<会话ID>/session.v4.jsonl.zstd：
+ *   Windows  %USERPROFILE%\.dsh\sessions\...
+ *   macOS / Linux  ~/.dsh/sessions/...
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

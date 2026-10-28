@@ -4,3 +4,13 @@ tools/out/
 
 # 打包产物
 *.tgz
+
+# Archify 生成中间产物
+.archify/
+
+# IDE 配置
+.idea/
+
+# 内部决策与过程文档（不对外发布）
+.local-docs/
+
