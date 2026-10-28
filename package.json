@@ -28,7 +28,7 @@
     "llm"
   ],
   "license": "MIT",
-  "author": "逍遥客",
+  "author": "xiaoyaoke1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/2849236173/tiered-compaction.git"
@@ -54,3 +54,4 @@
     "build": "npm run check && npm test"
   }
 }
+
