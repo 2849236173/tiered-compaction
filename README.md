@@ -50,20 +50,15 @@ dsh-tiered-compaction 已接管 compaction 服务位（enabled=true，archiveDir
 dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
 ```
 
-### 要退回官方压缩
+### 卸载
 
-在 profile 的 `cordis.patch.yml` 里把两个开关互换：
-
-```yaml
-- id: compaction-basic
-  disabled: false        # 改回 false
-
-- id: tiered-compaction
-  config:
-    enabled: false       # 改回 false
+```powershell
+dsh plugin --profile desktop remove dsh-tiered-compaction
 ```
 
-此时本插件只注册只读自检服务，不占用服务位，与官方 basic 并存。
+卸载后官方 `dsh-compaction-basic` **自动恢复**——因为停用它的 patch 属于本插件包，随包一起移除。重启即回到官方压缩，不需要手工改回配置。
+
+（如果你只想临时换成官方压缩、保留插件，也可以把 patch 里两个开关互换，但这种情况下卸载更简单。）
 
 ## 配置（全部可选）
 
