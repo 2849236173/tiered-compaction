@@ -1,0 +1,18 @@
+# 挂载声明：本插件的 profile bundle patch（由 package.json 的 dsh.bundle.patch 指向）。
+#
+# 写法说明（2026-10-26 D15 装机实测修正）：
+#   一个 patch 条目若带顶层 `id`，宿主按「修改已存在的条目」处理，找不到就报
+#   `patch insert: entry "<id>" not found`。新增条目必须只写 `insert:`，
+#   且 `id` / `config` 全部放在 insert 数组项内，不能提到条目顶层。
+#   （旧写法把 id/config 误放在 insert 同级，装机时被宿主判为 not found。）
+#
+# 语义：本插件独立于 dsh-compaction-basic；enabled 默认 false。
+#   enabled=false → 只注册自检服务 tieredCompaction，不占 compaction 服务位，
+#                   与 basic 完全并存、行为不变。
+#   enabled=true  → 接管 compaction 服务位；此时 profile 侧必须停用 basic
+#                   （同一服务位不可双注册）。
+- insert:
+    - id: tiered-compaction
+      name: "dsh-tiered-compaction"
+      config:
+        enabled: false
