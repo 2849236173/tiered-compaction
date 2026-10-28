@@ -1,7 +1,7 @@
 {
   "name": "dsh-tiered-compaction",
   "description": "DSH 分层上下文压缩插件：无损折叠 → 落盘 → 软压力 → 有损摘要四层管线，前三层零 LLM 成本。装完即生效。",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

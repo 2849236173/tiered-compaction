@@ -3,6 +3,40 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-10-28
+
+**自身审计修复**：对 22 个同类插件做源码级对比时，反过来查出本插件三处
+「看着在跑、实际没做」的静默失效，以及一处只有测试在调的死代码。
+
+### 修复
+
+- **`restoreSpilled()` 是死代码 → 接成 `tiered_restore` 工具。**
+  此前全库零调用点，只有测试在调。也就是说「原文 100% 落盘可读回」这句话，
+  实际靠的是模型用通用 `read` 工具直接读文件，那套 SHA-256 校验永远不跑。
+  现在模型可以按存档路径 + 摘要读回原文，校验不通过一律抛错不返回内容
+  （读到坏内容比读不到更危险）。
+
+- **阈值夹取无痕 → 留痕。** `dsh-session-manager` 这类插件会直接写
+  `engine.config.thresholdRatio`（滑块 17%–90%），而本插件把值夹到
+  `[0.82, 0.95]`，导致 65% 的滑块行程是死区且零反馈。现在夹取会打一条
+  去重告警，说明原值、生效值、以及为什么有这个区间。
+
+- **摘要改道无痕 → 留痕。** 摘要请求带 `purpose: "compaction"`，
+  `dsh-auxiliary` / `dsh-compact-selected-model` 会按它把请求改派到别的
+  模型。改道本身不是 bug，但现在会记录实际目标 provider/model，
+  否则「为什么这次摘要质量变了」无从排查。
+
+### 新增
+
+- **preset 共存检测。** 在 preset 架构（web / desktop）下，每个会话的
+  agent 跑在 preset 自己的 `isolate` realm 里，realm 内有一份独立的
+  `compaction` 服务。插件自带的 cordis patch **只能停用 root 平面那份**
+  `compaction-basic`——因为宿主 `buildMap` 只递归 `group && Array.isArray(config)`，
+  而 preset 的插件列表躺在 `agentPreset.config.plugins` 这个对象字段里。
+  现在加载时会枚举 preset，凡是自带 `compaction` 组的都会告警，明确说
+  「若你的会话正在使用这些 preset，实际压缩由 preset 内引擎执行」。
+  这条不试图自动修复（改写别人 preset 的 config 风险高），只把静默变可见。
+
 ## [0.3.0] - 2026-10-28
 
 **装完即生效**：不再要求安装后手工改配置。
