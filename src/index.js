@@ -107,6 +107,40 @@ class TieredCompactionBypassService extends Service {
  * 这一步不试图修复（改写别人 preset 的 config 风险高），只把静默变可见。
  * @param {import('@deepseek-ai/cordis').Context} ctx 宿主上下文
  */
+/** 诊断探测的截止时间：够快出结论，又不至于把启动拖住。 */
+const DIAGNOSTICS_DEADLINE_MS = 1500;
+
+/**
+ * 给只用于诊断的 await 加截止时间。
+ * 为什么需要：诊断代码一旦 await 到「要等本插件激活完成」的服务，就会与
+ * 激活本身互锁（preset 注册表 list() 即此类），表现为 boot 静默卡死。
+ * @template T
+ * @param {Promise<T>|T} value 待等待的 Promise
+ * @param {number} ms 超时毫秒
+ * @param {string} label 超时报错里的名字
+ * @returns {Promise<T>}
+ */
+function withDeadline(value, ms, label) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(
+            () => reject(new Error(`${label} 在 ${ms}ms 内未返回（诊断跳过，避免与 realm 激活互锁）`)),
+            ms
+        );
+        // 诊断计时器不得独自把进程吊住
+        timer.unref?.();
+        Promise.resolve(value).then(
+            (result) => {
+                clearTimeout(timer);
+                resolve(result);
+            },
+            (error) => {
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
+}
+
 async function reportCoexistingEngines(ctx) {
     // 卫语句：拿不到 preset 注册表（headless / 老宿主 / 测试桩）就无事可做。
     // 用可选链而非 ctx.get 直接调用：ctx.get 可能强制实例化懒声明服务。
@@ -123,7 +157,12 @@ async function reportCoexistingEngines(ctx) {
 
     let rows;
     try {
-        rows = await registry.list();
+        // 死锁陷阱（实测踩中）：preset 注册表的 list() 会对每个 preset 跑
+        // diagnostic()，而 diagnostic 要等该 preset realm 激活完成；本插件
+        // 恰恰挂在 preset realm 里，apply 又在等 list() 返回 —— 互相等，boot
+        // 永久卡死（日志停在 workspace-registry，无任何报错）。
+        // 因此诊断必须带截止时间：超时就跳过，宁可少一条告警也不能拖死启动。
+        rows = await withDeadline(registry.list(), DIAGNOSTICS_DEADLINE_MS, "preset 注册表 list()");
     } catch (error) {
         // 探测失败绝不能阻断加载：它只是诊断，不是功能
         ctx.logger.warn(
