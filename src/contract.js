@@ -16,6 +16,8 @@
  *    挂进 pressure 触发、第 4 层（20k 预算摘要）挂进阈值与 overflow 触发
  */
 import { randomUUID } from "node:crypto";
+// D22：Service 用于 `[Service.init]`（工具注册必须在服务就绪后，构造期拿不到 tools）
+import { Service } from "@deepseek-ai/cordis";
 import {
     CompactionEngine,
     CompactionId,
@@ -36,6 +38,8 @@ import { ToolResultObserver } from "./tool-result-observer.js";
 // 摘要输入构造器（D18 新增模块）：把选区还原成结构化消息序列。
 // 这里只消费、不重复实现——旧实现在本文件里拍平成字符串，正是这次要拆掉的东西。
 import { buildSummaryInput } from "./summary-input.js";
+// D22：把「校验读回」接成真实工具（此前 restoreSpilled 零调用点）
+import { restoreSpilled } from "./spill-to-disk.js";
 
 /**
  * 把流式摘要的终止状态映射成必须上抛的错误（照抄 basic finishError 判定口径）。
@@ -463,6 +467,11 @@ function validateConfig(config) {
  * 宿主契约引擎服务。
  */
 export class TieredCompactionEngineService extends CompactionEngine {
+    // 注意：**不要**把 "tools" 加进 inject。
+    // 试过，代价不可接受：inject 是硬依赖，宿主或测试桩没有 tools 服务时
+    // 整个服务类构造失败 → 降级旁路模式 → 四层压缩全废。
+    // 一个「额外读回通道」不值得让主功能承担这个风险。
+    // 因此改为在 _registerRestoreTool 里用 ctx.get 探测，拿不到就跳过。
     static inject = ["llm", "tokenMeter", "sessions"];
 
     /**
@@ -590,6 +599,84 @@ export class TieredCompactionEngineService extends CompactionEngine {
         /** session → agent 映射：清理钩子只拿得到 session，据此找回 agent 清账（P3-3） */
         this.overflowAgents = new WeakMap();
         if (config.auto ?? true) this._registerAutomaticCompaction();
+
+        // D22：tiered_restore 工具的注册**不在这里**，在下面的 [Service.init]。
+        // 原因：cordis 的 Service 在构造期间尚未完成自身 provide，此刻
+        // `ctx.get('tools')` 拿不到已注册的服务（实测返回 undefined，工具
+        // 静默不注册——正是本插件反复踩的「看起来接上了、实际没跑」）。
+        // Service.init 才是服务就绪时点。
+    }
+
+    /**
+     * 服务就绪后注册 `tiered_restore` 工具（D22）。
+     *
+     * 为什么必须做：`restoreSpilled` 此前**零调用点**，全库只有测试在调。
+     * 「原文 100% 落盘可读回」实际靠的是模型用通用 `read` 直接读文件——
+     * 那套 SHA-256 校验永远不跑。文档承诺的「校验回读」在真实链路上不存在。
+     *
+     * 为什么放 init 而不是构造：构造期 `ctx.get('tools')` 还拿不到服务，
+     * 注册会静默失败。init 时服务已 provide，是唯一可靠时点。
+     */
+    async [Service.init]() {
+        this._registerRestoreTool();
+    }
+
+    /**
+     * 注册 `tiered_restore` 工具：按存档路径 + SHA-256 校验读回原文。
+     *
+     * 为什么不能只给路径让模型用 `read`：
+     * 存档是异步写入的普通文件，可能被外部截断/覆盖/磁盘损坏。只读不校验
+     * 时，模型拿到一份坏内容会当成真实原文继续推理——比读不到更危险。
+     */
+    _registerRestoreTool() {
+        // 只用 `ctx.get('tools')`：**不能**碰 `ctx.tools`。
+        // cordis 的服务属性访问在没 inject 声明时会直接抛
+        // "cannot get property without inject"——那会让构造函数失败、整个
+        // 服务降级旁路。`ctx.get` 是探针式的，安全。
+        // 也不走 static inject：inject 是硬依赖，没有 tools 的宿主（headless、
+        // 测试桩）会让服务类构造失败 → 四层压缩全废。一个额外的校验读回通道
+        // 不值得让主功能承担这个风险。
+        const tools = this.ctx?.get?.("tools");
+        // 卫语句：拿不到 tools 服务就跳过注册，四层压缩照常
+        if (tools === undefined || tools === null || typeof tools.register !== "function") {
+            this.ctx?.logger?.info(
+                "dsh-tiered-compaction: 无 tools 服务，跳过 tiered_restore 注册（不影响四层压缩）"
+            );
+            return;
+        }
+
+        tools.register({
+            name: "tiered_restore",
+            description:
+                "Read back an archived tool result and verify its SHA-256. " +
+                "Use this instead of the generic read tool when a pruned tool result " +
+                "shows a tiered-compaction archive path: it proves the content is intact. " +
+                "Returns the original text only when the digest matches.",
+            parameters: {
+                path: {
+                    type: "string",
+                    required: true,
+                    description: "Absolute archive path, as shown in the pruned result preview.",
+                },
+                sha256: {
+                    type: "string",
+                    required: true,
+                    description: "Expected SHA-256 hex digest, as shown in the pruned result preview.",
+                },
+            },
+            execute: async (args) => {
+                // 卫语句：参数缺失直接报错，不猜不填
+                if (typeof args?.path !== "string" || args.path.length === 0) {
+                    throw new Error("tiered_restore: path 必填");
+                }
+                if (typeof args?.sha256 !== "string" || args.sha256.length === 0) {
+                    throw new Error("tiered_restore: sha256 必填（校验失败的内容比读不到更危险）");
+                }
+                // 校验不通过时 restoreSpilled 抛错，不返回内容——这正是要的行为
+                return restoreSpilled(args.path, args.sha256);
+            },
+        });
+        this.ctx.logger.info("dsh-tiered-compaction: tiered_restore 工具已注册（校验读回存档）");
     }
 
     /* ---------------- 宿主三入口 ---------------- */
