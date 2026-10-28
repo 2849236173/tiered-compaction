@@ -90,6 +90,50 @@ dsh-tiered-compaction 已接管 compaction 服务位（enabled=true，archiveDir
 dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
 ```
 
+### 更新到新版本
+
+装过一次之后，**重复执行 `add` 不会更新**——`add` 不是升级命令。pnpm 会把 git 依赖的 commit hash 写进 `pnpm-lock.yaml`，只要那条记录还在，它就认为「已满足」，直接跳过：
+
+```
+Already up to date
+```
+
+第一次装的是哪个 commit，就一直停在哪。正确的升级命令是 `update`：
+
+```powershell
+# 桌面端
+dsh plugin --profile desktop update dsh-tiered-compaction
+
+# Web 端
+dsh plugin --profile web update dsh-tiered-compaction
+
+# headless / TUI 同理，只换 --profile
+```
+
+**升级后必须完全退出并重启 DSH**，否则跑的还是内存里的旧代码。
+
+如果 `update` 之后版本没变（多见于改过仓库名或换过安装来源），用「卸载再装」强制重新解析：
+
+```powershell
+dsh plugin --profile desktop remove dsh-tiered-compaction
+dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
+```
+
+怎么确认升级成功：看实际加载的版本号。
+
+```powershell
+# 桌面端；其它形态把 desktop 换成 web / headless / tui
+$base = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules"
+foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
+    $f = Join-Path $base "$name\package.json"
+    if (Test-Path $f) { "$name → $((Get-Content $f -Raw | ConvertFrom-Json).version)" }
+}
+```
+
+输出形如 `dsh-tiered-compaction → 0.3.1`，那就是当前生效的版本。
+
+> **注意**：DSH 不会主动提示有新版本。想知道有没有更新，得自己看仓库的 [CHANGELOG](CHANGELOG.md) 或 `package.json` 的 `version`。
+
 ### 卸载
 
 ```powershell
