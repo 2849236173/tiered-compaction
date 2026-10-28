@@ -15,6 +15,9 @@
 
 ### 修复
 
+- **严重：写出的会话文件会损坏，下次加载报 `compaction turn must be a non-negative safe integer`。**
+  `compaction/start` 与 `compaction/end` 的 `data` 里缺 `turn` 字段。宿主 v4 会话格式要求该字段必须是非负安全整数，且等于当前打开的 turn（`dsh-session-format-v3-to-v4` 的 `Relationships.compact`）。缺失时写入不报错，**读取时才判定会话损坏**，整个群/会话的历史因此加载失败。
+  修法：新增 `openTurnOf(session)`——从事件流尾部反向查找最近的 `turn/start` 取 `turn` 值，写进两条 compaction 事件的 `data`。触发过该问题的旧会话需要用修复脚本补字段（见 `docs/` 说明）。
 - 落盘预览预算对齐官方 pruner：上限从 1500 提到 5120 字符，头尾比从 1:2 改为 4:1（对齐 `headChars 4096` / `tailChars 1024`）。此前的 1500 比官方少 3.4 倍可见上下文。
 - 纯空白摘要拒绝提交（`summary.trim()` 判定，此前 `"   "` 会被放行并覆盖原文）。
 - 选区包含 system 头节点时不再重复投影（重复会破坏前缀顺序，导致 KV 缓存失效）。
