@@ -58,29 +58,69 @@ DSH 默认的压缩是**一步到位**：上下文到 80% 就调一次 LLM 做�
 
 插件遵循 DSH 插件的无构建链约定（纯 ESM + JSDoc，无需 tsc/bundler），`src/` 直出，**安装前无需编译**。
 
-### 方式一：从 GitHub Release 的 tarball 装（推荐）
+### 先搞清楚 `<profile>` 是什么
+
+`<profile>` 是 DSH 的**配置档案名** —— 一套独立隔离的配置实例，在磁盘上对应一个文件夹：
+
+```
+C:\Users\<你>\.dsh\profiles\
+├── desktop\      ← 桌面端在用的（日常跑 Bot 就是它）
+├── web\          ← Web 模式用的
+├── m6h\          ← 沙箱示例（自己起的测试用）
+└── ...
+```
+
+每个 profile 有**各自独立**的 `package.json`、`cordis.patch.yml`、`node_modules`，互不干扰：往沙箱里装插件，桌面端一点都不会变。
+
+**装到哪一个，就把 `<profile>` 换成那个名字**：
+
+| 你想装到哪 | 命令里的 `--profile` |
+|---|---|
+| 桌面端（日常使用） | `--profile desktop` |
+| Web 模式 | `--profile web` |
+| 先建个沙箱试水 | `--profile tc-test`（名字随便起，但要先创建，见下） |
+
+```powershell
+# 桌面端
+dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
+
+# Web 模式
+dsh plugin --profile web add "github:2849236173/tiered-compaction"
+
+# 新建一个沙箱再装（--from-default-profile 决定模板，headless 最轻，不占端口）
+dsh --profile tc-test --from-default-profile headless --dump-config
+dsh plugin --profile tc-test add "github:2849236173/tiered-compaction"
+```
+
+> 不确定有哪些 profile 时，看 `C:\Users\<你>\.dsh\profiles\` 下的文件夹名即可。
+
+### 三种安装来源
+
+**方式一：从 GitHub Release 的 tarball 装（版本可锁定，推荐）**
 
 到 [Releases](https://github.com/2849236173/tiered-compaction/releases) 下载 `dsh-tiered-compaction-<版本>.tgz`，然后：
 
 ```powershell
-dsh plugin --profile <profile> add "C:\下载路径\dsh-tiered-compaction-0.2.0.tgz"
+dsh plugin --profile desktop add "C:\下载路径\dsh-tiered-compaction-0.2.0.tgz"
 ```
 
-### 方式二：直接从仓库装
+**方式二：直接从仓库装（跟随 main 分支最新代码）**
 
 ```powershell
-dsh plugin --profile <profile> add "github:2849236173/tiered-compaction"
+dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
 ```
 
-### 方式三：本地开发（软链，改代码即生效）
+**方式三：本地开发（软链，改代码即生效）**
 
 ```powershell
-dsh plugin --profile <profile> add "<本仓库绝对路径>"
+dsh plugin --profile desktop add "<本仓库绝对路径>"
 ```
 
-### 挂载配置
+> 装完插件自带的 `cordis.patch.yml` 会被自动挂载（`enabled` 默认 `false`，仅注册自检服务，不影响任何现有压缩行为），无需手工加 patch。要接管压缩再按下面改配置。
 
-装好后在该 profile 的 `cordis.patch.yml` 里挂载：
+### 挂载配置（要真正启用时才改）
+
+装好后编辑该 profile 的 `cordis.patch.yml`：
 
 ```yaml
 - insert:
@@ -94,6 +134,8 @@ dsh plugin --profile <profile> add "<本仓库绝对路径>"
 > ⚠️ 注意 DSH patch 的写法：新增条目必须只写 `insert:`，`id`/`config` 全部放进 insert 数组项内。写成顶层 `id:` 会被当作「修改已存在条目」而报 `not found`。
 
 > ⚠️ 同一 `compaction` 服务位不可双注册。`enabled: true` 时必须在同一 profile 里停用 `dsh-compaction-basic`，否则后加载者会被跳过。`enabled: false` 时二者可以共存。
+
+> ⚠️ 从 `github:` 装的是 main 分支的最新代码，不是某个 tag 的快照。要可复现的版本，用方式一的 tarball。
 
 ## 配置项
 
