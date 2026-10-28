@@ -23,16 +23,21 @@ function stubCtx() {
     };
 }
 
-test("默认 enabled=false：仅注册自检服务，不触碰 compaction 服务位", () => {
+test("默认 enabled=true：装上即接管，不要求用户改配置", async () => {
     const ctx = stubCtx();
-    apply(ctx, {});
-    assert.equal(ctx.calls.length, 1);
-    assert.equal(ctx.calls[0].config.enabled, false);
+    await apply(ctx, {});
+    assert.equal(ctx.calls.length >= 1, true, "apply 必须注册服务");
+    const cfg = ctx.calls.at(-1).config;
+    assert.equal(cfg.enabled, true, "默认必须为 true——装了就该生效");
+    assert.ok(
+        typeof cfg.archiveDir === "string" && cfg.archiveDir.length > 0,
+        "默认必须带可用存档目录，否则第 1-2 层静默跳过",
+    );
 });
 
-test("enabled=true：注册服务并携带开关配置", () => {
+test("显式 enabled=false 时退化为自检服务", async () => {
     const ctx = stubCtx();
-    apply(ctx, { enabled: true });
+    await apply(ctx, { enabled: false });
     assert.equal(ctx.calls.length, 1);
-    assert.equal(ctx.calls[0].config.enabled, true);
+    assert.equal(ctx.calls[0].config.enabled, false);
 });

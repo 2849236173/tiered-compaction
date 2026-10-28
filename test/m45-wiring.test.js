@@ -24,7 +24,8 @@ import { Lineage } from "../src/lineage.js";
 /** A-wire ①：enabled=false 与 M2 骨架行为逐字一致。 */
 test("A-wire① enabled=false：仅注册自检服务，不触碰 compaction 位", async () => {
     const ctx = new Context();
-    await apply(ctx, {});
+    // D21：默认值已改为 true（装上即生效）。要与 basic 并存必须显式关闭。
+    await apply(ctx, { enabled: false });
     // 自检服务以 tieredCompaction 名注册（ctx 上可读，A6 口径）
     assert.ok(ctx.tieredCompaction, "必须注册 tieredCompaction 自检服务");
     assert.equal(ctx.tieredCompaction.config.enabled, false);

@@ -1,18 +1,32 @@
-# 挂载声明：本插件的 profile bundle patch（由 package.json 的 dsh.bundle.patch 指向）。
+# 插件挂载声明（package.json 的 dsh.bundle.patch 指向本文件）。
 #
-# 写法说明（2026-10-26 D15 装机实测修正）：
-#   一个 patch 条目若带顶层 `id`，宿主按「修改已存在的条目」处理，找不到就报
-#   `patch insert: entry "<id>" not found`。新增条目必须只写 `insert:`，
-#   且 `id` / `config` 全部放在 insert 数组项内，不能提到条目顶层。
-#   （旧写法把 id/config 误放在 insert 同级，装机时被宿主判为 not found。）
+# 装完即生效：本 patch 一次做两件事——
+#   ① 停用 @deepseek-ai/dsh-compaction-basic，让出 compaction 服务位；
+#   ② 插入 tiered-compaction 并直接启用。
 #
-# 语义：本插件独立于 dsh-compaction-basic；enabled 默认 false。
-#   enabled=false → 只注册自检服务 tieredCompaction，不占 compaction 服务位，
-#                   与 basic 完全并存、行为不变。
-#   enabled=true  → 接管 compaction 服务位；此时 profile 侧必须停用 basic
-#                   （同一服务位不可双注册）。
+# 为什么必须停用 basic：compaction 是隔离组，组内 ctx.compaction 只能有一个实现。
+# 两个同时启用时，后来的那个命中服务位冲突并降级为旁路模式——
+# 表现为「装了但没生效」，且界面不报错。
+#
+# patch 语义（宿主 dsh-app-boot/lib/index.js:61-110 `applyEntryPatches`）：
+#   - 顶层只有 insert → 新增条目，id/config 放在 insert 数组项内；
+#   - 顶层带 id + 字段 → 修改已存在条目，未列出的字段保持原值；
+#   - 找不到 id 时该条被跳过并告警，不影响其它条目。
+#
+# 回退到官方压缩：把下面两处的开关互换——
+#   compaction-basic 的 disabled 改为 false，
+#   tiered-compaction 的 enabled 改为 false。
+
+# ── ① 停用官方 basic，让出 compaction 服务位 ──
+- id: compaction-basic
+  disabled: true
+
+# ── ② 插入并启用本插件 ──
 - insert:
     - id: tiered-compaction
       name: "dsh-tiered-compaction"
       config:
-        enabled: false
+        enabled: true
+        # archiveDir 不填则用宿主默认目录（~/.dsh/tiered-archive）。
+        # 要自定义就取消注释并改成你的绝对路径。
+        # archiveDir: /absolute/path/to/archive

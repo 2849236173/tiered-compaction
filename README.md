@@ -30,36 +30,63 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 插件是纯 ESM + JSDoc，无构建链，`src/` 直出，安装前无需编译。
 
 ```powershell
-# 从 GitHub 装（跟随 main 最新）
+# 从 GitHub 装
 dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
 
 # 本地开发：软链装，改代码即生效
 dsh plugin --profile desktop add "<本仓库绝对路径>"
 ```
 
-`<profile>` 是 DSH 的配置档案名，对应 `~/.dsh/profiles/<名字>` 下的目录（桌面端通常是 `desktop`）。每个 profile 的 `package.json`、`node_modules` 互相独立，装到沙箱里不会影响桌面端。
+`<profile>` 是 DSH 的配置档案名，对应 `~/.dsh/profiles/<名字>` 下的目录（桌面端通常是 `desktop`）。
 
-插件自带的 `cordis.patch.yml` 会被自动挂载，`enabled` 默认 `false`——只注册自检服务，不改变任何现有压缩行为。要真正接管压缩，需在该 profile 的 `cordis.patch.yml` 里把 `enabled` 改为 `true`，同时停用 `@deepseek-ai/dsh-compaction-basic`（同一服务位不可双注册）。
+**装完重启即可，无需改任何配置。**
 
-## 配置
+插件自带的 patch 在挂载时做两件事：停用官方 `dsh-compaction-basic`（让出 `compaction` 服务位），插入并启用本插件。存档目录默认 `~/.dsh/tiered-archive`，不存在时自动创建。
 
-```yaml
-- insert:
-    - id: tiered-compaction
-      name: "@local/dsh-tiered-compaction"
-      config:
-        enabled: true
-        archiveDir: ~/.dsh/tiered-archive   # 存档目录
+装好的标志——启动日志里能看到这两行：
+
+```
+dsh-tiered-compaction 已接管 compaction 服务位（enabled=true，archiveDir=...）
+dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
 ```
 
-主要字段：
+### 要退回官方压缩
+
+在 profile 的 `cordis.patch.yml` 里把两个开关互换：
+
+```yaml
+- id: compaction-basic
+  disabled: false        # 改回 false
+
+- id: tiered-compaction
+  config:
+    enabled: false       # 改回 false
+```
+
+此时本插件只注册只读自检服务，不占用服务位，与官方 basic 并存。
+
+## 配置（全部可选）
+
+装完即用，以下字段仅在需要自定义时才填：
+
+```yaml
+- id: tiered-compaction
+  config:
+    enabled: true                        # 默认 true
+    archiveDir: ~/.dsh/tiered-archive    # 默认值，可改
+    auto: true                           # 是否自动触发
+    summaryTarget:                       # 摘要用哪个模型，不填则跟随当前会话
+      provider: deepseek-official
+      model: deepseek-chat
+    modelPolicies: {}                    # 按模型覆盖阈值与重试次数
+```
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `enabled` | `false` | `true` 才接管压缩服务位 |
-| `archiveDir` | — | 落盘与摘要存档目录，未配置时跳过落盘层 |
+| `enabled` | `true` | 是否接管压缩服务位 |
+| `archiveDir` | `~/.dsh/tiered-archive` | 落盘与摘要存档目录，自动创建 |
 | `auto` | `true` | 是否自动触发（压力/溢出） |
-| `summaryTarget` | 会话路由 | 摘要用的 provider/model，不配则跟随当前会话 |
+| `summaryTarget` | 会话路由 | 摘要用的 provider/model |
 | `modelPolicies` | `{}` | 按模型覆盖阈值、重试次数等 |
 
 ## 运行状态
