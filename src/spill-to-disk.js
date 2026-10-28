@@ -11,18 +11,27 @@ import { join } from "node:path";
 
 /** 默认落盘阈值（字符数）。 */
 export const DEFAULT_SPILL_THRESHOLD = 8000;
-/** 默认上下文预览上限（字符数），验收 A2 要求 ≤1500。 */
-export const DEFAULT_PREVIEW_LIMIT = 1500;
+/**
+ * 默认上下文预览上限（字符数）。
+ *
+ * **对齐原版 pruner**（dsh-compaction-tool-result-pruner lib/index.js:10-14）：
+ * 原版预算是 headChars 4096 + 标记 + tailChars 1024 ≈ 5100+，
+ * 这里取 5120 作为同一量级的单一上限（头 4096 + 尾 1000 + 标记余量 24）。
+ * 曾经的 1500 过紧：比原版少 3.4 倍上下文，模型更容易回头重读文件。
+ * 我们比原版多做的事——原文 100% 落盘存档——是「保留量可以更小」的资本，
+ * 但用户拍板按原版量给足上下文（2026-10-28）。
+ */
+export const DEFAULT_PREVIEW_LIMIT = 5120;
 
 /**
- * 生成「首尾各留一段」的预览（D17 验收 P2-1 建议）。
+ * 生成「首尾各留一段」的预览（D17 验收 P2-1 建议，D20 对齐原版预算）。
  *
  * 为什么不能只留开头：工具输出的**结论常在末尾**——错误码、汇总行、
  * `exit code: N`、测试结果的 `pass/fail` 计数、git 的 `N files changed`。
  * 只留开头会让模型看到一堆中间过程却看不到结论，反而促使它重跑命令。
  *
- * 分配策略：尾部优先（结论更重要），头部占 1/3，尾部占 2/3，
- * 中间用一行标记说明省略了多少字符并可查存档。
+ * 分配策略：头尾 4:1（对齐原版 pruner 的 4096:1024），头部为主但保留
+ * 结论行；中间用一行标记说明省略了多少字符并可查存档。
  *
  * @param {string} text 原始文本
  * @param {number} limit 总字符上限
@@ -33,11 +42,14 @@ export function headTailPreview(text, limit = DEFAULT_PREVIEW_LIMIT) {
     // 审计实测：limit=NaN 时旧实现返回**空串**——模型看不到任何内容。
     if (!Number.isFinite(limit) || limit <= 0) limit = DEFAULT_PREVIEW_LIMIT;
     if (text.length <= limit) return text;
-    // 省略标记本身要计入总长——A2 验收要求预览 ≤1.5k **字符**（含标记），
+    // 省略标记本身要计入总长——预览总长必须 ≤ limit（含标记），
     // 不能因为多插一行说明就超限。
     const markerReserve = 60; // "…[中间省略 N 字符，完整内容见下方存档]" 预留
     const budget = Math.max(0, limit - markerReserve);
-    const headSize = Math.floor(budget / 3);
+    // 头尾 4:1（对齐原版 pruner 的 headChars 4096 : tailChars 1024）。
+    // 曾经是 1:2（结论更重要）——原版选头部 4 倍于尾部，官方判断是
+    // 开头（命令、参数、路径）信息量更大；2026-10-28 用户拍板照抄原版。
+    const headSize = Math.floor((budget / 5) * 4);
     const tailSize = budget - headSize;
     // P1-4/P1-5（2026-10-27 系统审计）：切分必须落在**安全边界**上。
     //
