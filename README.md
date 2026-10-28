@@ -29,6 +29,8 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 
 插件是纯 ESM + JSDoc，无构建链，`src/` 直出，安装前无需编译。
 
+**推荐从 npm 装**（版本号清晰、`update` 能自动升到最新稳定版）；没有 npm 网络条件时用 GitHub 路线。
+
 ### 先确认你用哪个 profile
 
 DSH 每个运行形态对应一个 profile 名，装到哪个 profile 就只在那个形态生效。**你平时怎么启动 DSH，就用哪个名字**：
@@ -47,24 +49,37 @@ DSH 每个运行形态对应一个 profile 名，装到哪个 profile 就只在�
 ### 桌面端（最常用）
 
 ```powershell
+# 从 npm 装（推荐）：不指定 tag 就是最新稳定版
+dsh plugin --profile desktop add dsh-tiered-compaction
+
+# 或从 GitHub 装
 dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
 ```
 
 ### Web 端
 
 ```powershell
+dsh plugin --profile web add dsh-tiered-compaction
+
+# 或从 GitHub 装
 dsh plugin --profile web add "github:2849236173/tiered-compaction"
 ```
 
 ### headless（命令行 / 脚本）
 
 ```powershell
+dsh plugin --profile headless add dsh-tiered-compaction
+
+# 或从 GitHub 装
 dsh plugin --profile headless add "github:2849236173/tiered-compaction"
 ```
 
 ### TUI（终端界面）
 
 ```powershell
+dsh plugin --profile tui add dsh-tiered-compaction
+
+# 或从 GitHub 装
 dsh plugin --profile tui add "github:2849236173/tiered-compaction"
 ```
 
@@ -98,7 +113,7 @@ dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
 Already up to date
 ```
 
-第一次装的是哪个 commit，就一直停在哪。正确的升级命令是 `update`：
+正确的升级命令是 `update`：
 
 ```powershell
 # 桌面端
@@ -110,13 +125,16 @@ dsh plugin --profile web update dsh-tiered-compaction
 # headless / TUI 同理，只换 --profile
 ```
 
+**从 npm 装的**：`update` 只升到 `latest`（稳定版），不会误吃 beta。
+**从 GitHub 装的**：`update` 升到 main 最新提交。
+
 **升级后必须完全退出并重启 DSH**，否则跑的还是内存里的旧代码。
 
 如果 `update` 之后版本没变（多见于改过仓库名或换过安装来源），用「卸载再装」强制重新解析：
 
 ```powershell
 dsh plugin --profile desktop remove dsh-tiered-compaction
-dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
+dsh plugin --profile desktop add dsh-tiered-compaction
 ```
 
 怎么确认升级成功：看实际加载的版本号。
@@ -132,7 +150,7 @@ foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
 
 输出形如 `dsh-tiered-compaction → 0.3.1`，那就是当前生效的版本。
 
-> **注意**：DSH 不会主动提示有新版本。想知道有没有更新，得自己看仓库的 [CHANGELOG](CHANGELOG.md) 或 `package.json` 的 `version`。
+> **注意**：DSH 不会主动提示有新版本。想知道有没有更新，从 npm 装的可以跑 `npm view dsh-tiered-compaction version` 对比；也可以看仓库的 [CHANGELOG](CHANGELOG.md)。
 
 ### 卸载
 
