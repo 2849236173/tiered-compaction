@@ -91,31 +91,24 @@ dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
 
 ## 运行状态
 
-插件每 10 分钟写一行健康日志，异常时立即上报（不受节流限制）：
+日常不需要关注。想看它是否在正常工作，在宿主日志里搜 `tiered-compaction`：
 
 ```
-tiered-compaction 健康 window=1000000 pressure=12.7% l12=107/31repl/0fail l3=0evict spill=29 lineage=31 status=ok
+tiered-compaction 健康 window=1000000 pressure=12.7% l12=107/31repl/0fail l3=0evict spill=29 status=ok
 ```
 
-| 字段 | 含义 |
-|---|---|
-| `window` | 读到的上下文窗口 |
-| `pressure` | 当前压力 |
-| `l12=a/b/c` | 第 1-2 层处理数 / 替换数 / 失败数 |
-| `l3=N` | 第 3 层驱逐数 |
-| `spill` / `lineage` | 落盘次数 / 谱系条目数 |
-| `status` | `ok` 或 `warn` |
+`status=ok` 即正常；出现 `status=warn` 表示自检发现了异常（窗口读数为 0、前两层有失败但零成功、压力 ≥80% 却零动作、`summaryTarget` 只配一半）。
 
-能识别四类明确异常：窗口读数为 0、第 1-2 层有失败但零成功、压力 ≥80% 却零动作、`summaryTarget` 只配一半。
+压力到 82% 左右会触发一次摘要压缩，日志里会有 `compaction/summary` 记录。
 
-## 验证
+## 开发
 
 ```bash
-node --test test/*.test.js          # 全量用例
-node scripts/verify-e2e.mjs <会话文件>   # 端到端链路（需真实会话）
+node --test test/*.test.js              # 全量用例
+node scripts/verify-e2e.mjs <会话文件>    # 端到端链路（需真实会话，验证 KV 前缀等价）
 ```
 
-端到端脚本验证的是「摘要请求是否为正常对话请求的严格前缀」——相同即必然命中 provider 的 KV 缓存，不同则一次都命中不了。传真实会话文件路径即可，会话在 `~/.dsh/sessions/<工作区>/<会话ID>/session.v4.jsonl.zstd`。
+端到端脚本验证的是「摘要请求是否为正常对话请求的严格前缀」——相同即必然命中 provider 的 KV 缓存。会话文件在 `~/.dsh/sessions/<工作区>/<会话ID>/session.v4.jsonl.zstd`。
 
 ## 已知限制
 
