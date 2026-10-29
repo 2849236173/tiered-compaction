@@ -22,9 +22,19 @@ import { TieredCompactionEngineService as HostContractEngineService } from "./co
 import { ToolResultObserver } from "./tool-result-observer.js";
 // D22：把阈值夹取的告警接到宿主日志（见 reportCoexistingEngines 与 lossy-summarize）。
 import { setThresholdWarnSink } from "./lossy-summarize.js";
+// D24：单写者守卫——全进程内最多一个「会写归档 / 会产 prune」的活跃实例。
+// 背景：插件曾被多处装配（bundle 根平面 + preset realm），两个实例都把观察者
+// 接到同一条会话事件流上，各自对同一批工具结果发 compaction/prune，第二枚
+// 落盘时目标已换出 surface，宿主重放必抛 SessionFormatError（会话打不开）。
+import { acquireSingleWriter, releaseSingleWriter } from "./single-writer-guard.js";
 
 /** 本插件在 Cordis 中的服务位名（不与宿主 `compaction` 冲突）。 */
 const SERVICE_NAME = "tieredCompaction";
+
+/** D24：本模块实例当前持有的写者席位 token（null = 未持票）。
+ *  detach() 时归还；同一份模块代码被多路径解析时，各副本各有此变量，
+ *  而 Symbol.for 席位表是全局的——只有真正持票的副本能够归还。 */
+let writerSeat = null;
 
 /**
  * 存档目录默认值：`~/.dsh/tiered-archive`。
@@ -238,6 +248,12 @@ export async function apply(ctx, config = {}) {
         // 这正是「装了但没生效」最典型的一种。
         // 默认放在宿主配置目录下，与 DSH 自身的存储位置同级，不污染用户目录。
         archiveDir: config.archiveDir ?? defaultArchiveDir(),
+        // D24：preset 组挂载点应显式携带 scopeId（如 'ptc-tc-realm'），
+        // 使各 realm 的实例各自持有独立席位；不携带则视为 root/bundle 挂载，
+        // 参与「全进程唯一写者」竞争。
+        scopeId: typeof config.scopeId === "string" && config.scopeId.length > 0
+            ? config.scopeId
+            : undefined,
     };
     // 观测：apply 是否被调用、拿到的配置是什么。放在最前面——
     // 「preset 内插件静默不生效」时，这一行能区分两种完全不同的原因：
@@ -252,6 +268,31 @@ export async function apply(ctx, config = {}) {
     // （17%–90% 滑块），而我们的 lossyThreshold 把值夹到 [0.82, 0.95]。
     // 不接这条 sink，夹取就是静默的——用户改了设置、没生效、日志里一个字都没有。
     setThresholdWarnSink((message) => ctx.logger.warn(message));
+
+    // 开关关闭（默认）：只注册自检服务，绝不触碰 ctx.compaction 服务位，
+    // 保证与 dsh-compaction-basic 完全并存、行为与纯 basic 一致（验收 A6）。
+    if (!resolved.enabled) {
+        ctx.plugin(TieredCompactionService, resolved);
+        return;
+    }
+
+    // D24：单写者守卫（仅在即将开始写盘动作前申请；enabled=false 的纯自检
+    // 实例不占座，避免「自检僵尸」把后来者挤成降级）。
+    // scope 语义：bundle/root 平面挂载（默认）使用 global 座——全进程唯一写者；
+    // preset compaction 组内的挂载经由配置显式携带 scopeId（如 'ptc-tc-realm'），
+    // 各 realm 一座——realm 天然按会话隔离，合法并存。
+    const seatScope = resolved.scopeId ? `realm:${resolved.scopeId}` : "global";
+    if (writerSeat === null) {
+        writerSeat = acquireSingleWriter("contract", { logger: ctx.logger, scope: seatScope });
+    }
+    if (writerSeat === null) {
+        ctx.logger.warn(
+            `dsh-tiered-compaction：本实例未取得单写者席位（scope=${seatScope} 已有别的实例在写），` +
+            "降级为纯自检服务（无观察者、无引擎、不写任何归档）"
+        );
+        ctx.plugin(TieredCompactionService, resolved);
+        return;
+    }
 
     // D22：检测「realm 内另有压缩引擎」——这是 preset 架构下最隐蔽的失效：
     // 我们注册在 root realm 成功、日志显示「已接管」，但每个会话实际跑的是
@@ -298,5 +339,8 @@ export async function apply(ctx, config = {}) {
     }
 }
 
-/** 插件卸载：Cordis 依据 Service 自动回收，无需手动清理。 */
-export function detach() {}
+/** 插件卸载：Cordis 依据 Service 自动回收；本模块归还单写者席位。 */
+export function detach() {
+    releaseSingleWriter(writerSeat);
+    writerSeat = null;
+}
