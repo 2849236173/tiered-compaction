@@ -6,10 +6,12 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./client/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "src/",
+    "client/",
     "docs/",
     "scripts/",
     "cordis.patch.yml",
@@ -48,6 +50,10 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
     }
   },
   "scripts": {
