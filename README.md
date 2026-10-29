@@ -1,3 +1,5 @@
+[English](README.en.md) | 简体中文
+
 # tiered-compaction
 
 **DSH 分层上下文压缩插件** —— 用四层递进替代一次摘要。
