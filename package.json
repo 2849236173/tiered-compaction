@@ -14,7 +14,9 @@
     "scripts/",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "CHANGELOG.md",
+    "CHANGELOG.en.md",
     "LICENSE"
   ],
   "keywords": [

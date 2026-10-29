@@ -1,3 +1,5 @@
+[English](README.en.md) | 简体中文
+
 # 修复：会话报 `compaction turn must be a non-negative safe integer`
 
 ## 症状

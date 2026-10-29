@@ -1,3 +1,5 @@
+[English](CHANGELOG.en.md) | 简体中文
+
 # Changelog
 
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
