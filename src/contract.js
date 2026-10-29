@@ -40,6 +40,9 @@ import { ToolResultObserver } from "./tool-result-observer.js";
 import { buildSummaryInput } from "./summary-input.js";
 // D22：把「校验读回」接成真实工具（此前 restoreSpilled 零调用点）
 import { restoreSpilled } from "./spill-to-disk.js";
+// 任务 #1：只读状态路由。同样探针式取 webServer，不进 static inject——
+// 理由与 tiered_restore 相同（详见 status-route.js 头注）。
+import { registerStatusRoute } from "./status-route.js";
 
 /**
  * 把流式摘要的终止状态映射成必须上抛的错误（照抄 basic finishError 判定口径）。
@@ -180,6 +183,23 @@ const DEFAULT_COMPACTION_RETRIES = 1;
  * 缺窗口读数时的兜底窗口（保守取值，宁可晚压也不误压）。
  */
 const FALLBACK_CONTEXT_WINDOW = 128_000;
+
+/**
+ * 无活跃会话时的空窗口径（任务 #1）。
+ * 为什么独立于 collectHealth：纯函数收不到「零值」读数时会把窗口 0
+ * 记成 problems（那是给日志看的），而 API 的 idle 态是合法状态，
+ * 不该被渲染成「数据可疑」。
+ */
+const IDLE_LAYERS = Object.freeze({
+    l12Processed: 0,
+    l12Replaced: 0,
+    l12Failed: 0,
+    l12Skipped: 0,
+    l12BytesSaved: 0,
+    l3Evicted: 0,
+    spillCount: 0,
+    lineageEntries: 0,
+});
 
 /**
  * 检查会话里是否有「未闭合的压缩事务」（D17 对齐原版 basic 的压缩锁）。
@@ -598,6 +618,11 @@ export class TieredCompactionEngineService extends CompactionEngine {
         this.overflowRetries = new WeakMap();
         /** session → agent 映射：清理钩子只拿得到 session，据此找回 agent 清账（P3-3） */
         this.overflowAgents = new WeakMap();
+        // 任务 #1：状态路由的数据底座。口径=「本次运行」（方案 §七定案），
+        // 全部内存计数，重启自然归零——API 的 since 字段就来自这里。
+        this.startedAt = Date.now();
+        this.lastCompaction = null;
+        this.latestSession = null;
         if (config.auto ?? true) this._registerAutomaticCompaction();
 
         // D22：tiered_restore 工具的注册**不在这里**，在下面的 [Service.init]。
@@ -619,6 +644,9 @@ export class TieredCompactionEngineService extends CompactionEngine {
      */
     async [Service.init]() {
         this._registerRestoreTool();
+        // 任务 #1：与 tiered_restore 同一时点注册 status 路由（探针式取
+        // webServer，失败只降级不阻断，详见 status-route.js）。
+        registerStatusRoute({ ctx: this.ctx, buildPayload: () => this._statusPayload() });
     }
 
     /**
@@ -704,6 +732,9 @@ export class TieredCompactionEngineService extends CompactionEngine {
      */
     async compactNow(agent, signal, sourceCommandId) {
         signal?.throwIfAborted();
+        // 任务 #1：手动路径也触碰 latestSession（非 agent 桩会话无 agent 映射）
+        const session = agent?.session;
+        if (session !== undefined && session !== null) this.latestSession = session;
         const result = typeof agent?.runMaintenance !== "function"
             // 非 agent 桩（测试/探针）：直接走事务，语义等价
             ? await this._compactWholeSurface(agent, { sourceCommandId, signal })
@@ -717,6 +748,75 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 缺这一步时压缩结果只在内存里，进程崩溃会丢掉整次压缩。
         await this._flushAfterCommit(agent?.session);
         return result;
+    }
+
+    /**
+     * 只读状态载荷工厂（任务 #1）：GET /api/tiered-compaction/status 的响应体。
+     * 数据口径=「本次运行」（since 起），零新增采集通道——全部复用
+     * collectHealth 已在读的东西 + lastCompaction/startedAt 记账。
+     * @returns {object} 方案规定的七字段 + problems/sessionId
+     */
+    _statusPayload() {
+        // 卫语句：无活跃会话（宿主刚启动、还没触发过压缩路径）时返回
+        // 诚实的零值形状，不虚报兜底窗口
+        const idle = {
+            status: "ok",
+            pressure: 0,
+            window: 0,
+            layers: IDLE_LAYERS,
+            lastCompaction: this.lastCompaction,
+            archiveDir: this.config?.archiveDir ?? null,
+            since: this.startedAt,
+            problems: [],
+            sessionId: null,
+        };
+        const session = this.latestSession;
+        if (session === undefined || session === null) return idle;
+
+        try {
+            const { window, current } = this._readingOf(session);
+            const health = collectHealth({
+                observer: this.observer,
+                engine: this.engine,
+                session,
+                window,
+                currentTokens: current,
+                config: this.config,
+            });
+            // 只补 API 独有的三个字段：archiveDir/since/lastCompaction（与
+            // 方案 §五 任务 #1 的字段清单对齐），其余全用健康快照原值
+            return {
+                ...health,
+                lastCompaction: this.lastCompaction,
+                archiveDir: this.config?.archiveDir ?? null,
+                since: this.startedAt,
+            };
+        } catch (error) {
+            // 与路由层约定一致：拼装失败不抛进 handler，由路由的 500 降级
+            // 兜住（双保险，谁先炸都拿不到挂掉的连接）
+            this.ctx?.logger?.warn(
+                `dsh-tiered-compaction: status 载荷拼装失败（${error?.message ?? error}）`,
+            );
+            return idle;
+        }
+    }
+
+    /**
+     * 会话读数（任务 #1 抽取）：窗口 + 当前 token。
+     * compactIfNeeded 的原内联链搬来这里，读数口径单点化，避免状态 API
+     * 与压缩触发判定日后各自漂移。
+     * @param {object} session 活跃会话
+     * @returns {{window: number, current: number}}
+     */
+    _readingOf(session) {
+        const meter = this.ctx.tokenMeter;
+        if (!meter) throw new Error("tiered-compaction: ctx.tokenMeter 缺失（static inject 未生效或宿主版本不匹配）");
+        const window = contextWindowOf(session);
+        // 读数口径与 basic 一致：压力取 meter.measure(session).totalTokens
+        // （conversation meter 的会话面读数；currentTokens 是兼容面，仅兜底）
+        const measurement = meter.measure?.(session);
+        const current = measurement?.totalTokens ?? meter.currentTokens?.(session) ?? meter.currentTokens?.() ?? 0;
+        return { window, current };
     }
 
     /**
@@ -757,13 +857,10 @@ export class TieredCompactionEngineService extends CompactionEngine {
     async compactIfNeeded(agent, trigger, signal) {
         const session = agent?.session;
         if (!session) return null;
-        const meter = this.ctx.tokenMeter;
-        if (!meter) throw new Error("tiered-compaction: ctx.tokenMeter 缺失（static inject 未生效或宿主版本不匹配）");
-        const window = contextWindowOf(session);
-        // 读数口径与 basic 一致：压力取 meter.measure(session).totalTokens
-        // （conversation meter 的会话面读数；currentTokens 是兼容面，仅兜底）
-        const measurement = meter.measure?.(session);
-        const current = measurement?.totalTokens ?? meter.currentTokens?.(session) ?? meter.currentTokens?.() ?? 0;
+        // 任务 #1：自动路径（pressure/overflow）记录活跃会话，状态 API 据此取读数
+        this.latestSession = session;
+        // 读数链已抽为 _readingOf（任务 #1）：与状态 API 共用同一口径
+        const { window, current } = this._readingOf(session);
         const pressure = window > 0 ? current / window : 0;
         const action = pressureAction(pressure);
 
@@ -1339,6 +1436,15 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowedSeqs],
             });
             const endEvent = session.append("compaction/end", lifecycle);
+            // 任务 #1：单点记账（手动/自动/overflow 三条路径都过 _runTransaction，
+            // 只在这里写 lastCompaction，状态 API 直接读，无需二次聚合）
+            this.lastCompaction = {
+                compactionId,
+                at: Date.now(),
+                shadowedTokenCount: estimate,
+                startSeq: startEvent.seq,
+                endSeq: endEvent.seq,
+            };
             return {
                 compactionId,
                 startSeq: startEvent.seq,
