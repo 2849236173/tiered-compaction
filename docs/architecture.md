@@ -1,4 +1,5 @@
-[English](architecture.md) | [简体中文](架构与设计理念.md)
+English | [![简体中文](https://img.shields.io/badge/docs-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-blue)](架构与设计理念.md)
+
 
 # Architecture and Design Philosophy
 

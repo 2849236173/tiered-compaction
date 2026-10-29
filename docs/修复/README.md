@@ -1,4 +1,5 @@
-[English](README.en.md) | 简体中文
+**简体中文** | [![English](https://img.shields.io/badge/docs-English-blue)](README.en.md)
+
 
 # 修复：会话报 `compaction turn must be a non-negative safe integer`
 
