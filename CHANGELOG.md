@@ -6,6 +6,50 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0-beta.1] - 2026-10-29
+
+**档位：beta / 尝新版（未完全测试通过）**——自动化测试 246 项全绿、病案
+现场根因闭环；守卫语义按「任何 GitHub / npm 用户的任意挂载组合」设计并
+附带混合互斥收敛测试，但尚未经过生产环境长跑观察；求稳可暂留 0.3.x
+等正式版。
+
+### 新增
+
+- **D24 单写者守卫（`src/single-writer-guard.js`）**：全进程内最多一个
+  「会写归档 / 会产 prune」的活跃族群。第二处挂载自动降级为纯自检服务
+  （无观察者、不写盘）并在日志鸣笛。采用 `Symbol.for` 全局座位表，
+  抗多副本加载（旧 tarball 与 link 目录并存同样受保护）；支持 realm 作用域
+  （preset 组挂载传 `scopeId` 分座）；**global 与 realm 互斥混居**——
+  无论用户从 GitHub / npm 以何种挂载组合安装（根平面 + preset 并挂、
+  多 preset、多副本），最终都收敛为「恰一个全局写者」或「若干 realm 写者」，
+  杜绝同一会话流出现两个 prune 来源。逃生阀 `DSH_TC_ALLOW_MULTI_ENGINE=1`
+  （调试双写病理用）。
+
+- **防抹除 tripwire（`test/d24-single-writer.test.js`，随 npm 包分发）**：
+  直接读 `src/index.js` 源码断言守卫仍在接线链路上（导入存在、申请先于
+  接管路径、`detach` 归还席位）。将来任何更新把守卫整包替换掉，
+  `npm test` 当场红灯，杜绝静默回退。`package.json` 的 `files` 白名单
+  已纳入 `test/`，并新增 `postinstall` 自检（守卫文件缺失时安装即告警）。
+
+### 面向 GitHub / npm 用户的保障边界（诚实声明）
+
+- **能保证**：同一进程内无论怎么挂（根平面 + preset 并挂、多 preset、
+  多副本并存），都会收敛为单一写者；守卫与 tripwire 随包分发
+  （`files` 含 `src/` 与 `test/`，pack 仿真 59 个 JS 文件零缺失）。
+- **不保证**：跨进程的多开（同一台机同时跑两个 DSH 实例共用同一
+  sessions 目录）不属于本守卫管辖范围——那是宿主层的话题，README
+  会提醒此类部署避免共享会话目录。
+
+### 修复
+
+- **双装配双写导致会话归档损坏（病案 2026-10-29）**：root 平面（bundle
+  清单自动装配）实例与 preset realm 实例同时观察同一条会话事件流，各自
+  对同一批工具结果发 `compaction/prune`；第二枚落盘时目标已换出 surface，
+  宿主冷重放校验抛 `SessionFormatError: compaction/prune shadowedSeqs do
+  not name an exact current surface span`，会话从此打不开。守卫落地后，
+  多挂载点自动收敛为单写者；配合 profile 侧把 root 实例
+  `enabled: false`（cordis.patch.yml D24 区块）双层防線根治。
+
 ## [0.3.1] - 2026-10-28
 
 **自身审计修复**：对 22 个同类插件做源码级对比时，反过来查出本插件三处

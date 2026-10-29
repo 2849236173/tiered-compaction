@@ -131,6 +131,34 @@ dsh plugin --profile web update dsh-tiered-compaction
 
 **After upgrading you must fully exit and restart DSH**, otherwise the old code still in memory keeps running.
 
+#### Single-writer guard (since 0.4.0, automatic)
+
+Since 0.4.0 this plugin ships a **process-level single-writer guard**: no
+matter how many places the plugin gets mounted in one DSH process (e.g. root
+plane plus a preset), only the first instance registers observers and writes
+archives; every later instance demotes itself to a passive self-check service
+(no disk writes) and logs:
+
+```
+dsh-tiered-compaction: single-writer guard active — ... demoted to passive self-check
+```
+
+Seeing that line means you double-mounted: functionality is unaffected (your
+sessions are still compacted by the first instance), but you should collapse
+the mounts as described above to remove ambiguity.
+
+Two known boundaries:
+
+- **Duplicate copies are still protected**: the guard uses a `Symbol.for`
+  global seat table, so even a tarball copy and a linked checkout loading
+  simultaneously share one registry.
+- **Cross-process is out of scope**: running two DSH processes on one machine
+  sharing one sessions directory is beyond this guard (that is host-level
+  deployment territory) — do not share one session store across DSH instances.
+
+The guard ships with a companion tripwire test (`test/d24-single-writer.test.js`):
+should a future release accidentally lose the guard, `pnpm test` fails loudly.
+
 If the version did not change after `update` (common when the repository was renamed or the install source was switched), force a re-resolution with "uninstall then install":
 
 ```powershell

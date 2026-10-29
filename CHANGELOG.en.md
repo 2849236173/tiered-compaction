@@ -6,6 +6,57 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.1] - 2026-10-29
+
+**Release tier: beta (NOT fully tested yet)** — 246 automated tests green and
+root cause verified against a live corruption case, but no production soak
+period yet. Stay on 0.3.x if you prefer stability.
+
+### Added
+
+- **D24 single-writer guard (`src/single-writer-guard.js`)**: at most one
+  writing instance family per process. Any second mount demotes itself to a
+  passive self-check service (no observers, no disk writes) and logs a warning.
+  Uses a `Symbol.for` global seat table so multiple copies of the package
+  (tarball + linked checkout) still share one seat registry; supports realm
+  scoping (preset-group mounts pass `scopeId`); **global and realm classes are
+  mutually exclusive** — whatever combination a GitHub / npm user installs
+  (root-plane + preset co-mount, multiple presets, duplicate copies), the
+  final topology converges to "exactly one global writer" or "realm writers
+  only", so a single session event stream can never gain two prune emitters.
+  Escape hatch: `DSH_TC_ALLOW_MULTI_ENGINE=1` (debugging only).
+
+- **Anti-regression tripwire (`test/d24-single-writer.test.js`, shipped in the
+  npm package)**: reads `src/index.js` and asserts the guard is still wired
+  (import present, acquisition precedes takeover path, `detach` releases the
+  seat). A future update that wipes the guard fails `npm test` loudly instead
+  of silently regressing. `files` whitelist now includes `test/`, and a
+  `postinstall` check warns immediately when guard files are missing.
+
+### Fixed
+
+- **Corrupted session archives caused by double-mounted instances (case
+  2026-10-29)**: a root-plane (auto-installed by bundle manifest) instance and
+  a preset-realm instance observed the same session event stream and each
+  emitted `compaction/prune` for the same tool results; the second prune hit a
+  target already replaced off the surface, and cold replay validation failed
+  with `SessionFormatError: compaction/prune shadowedSeqs do not name an exact
+  current surface span`, making sessions unopenable. With the guard in place,
+  extra mounts auto-collapse to a single writer; combined with disabling the
+  root-plane instance via `cordis.patch.yml` (D24 block), the failure chain is
+  closed at both ends.
+
+### Guarantee boundary for GitHub / npm users (honest scope statement)
+
+- **Guaranteed**: within one process, any mount topology (root-plane + preset
+  co-mount, multiple presets, duplicate package copies) collapses to a single
+  writer; guard and tripwire ship inside the npm package (`files` covers
+  `src/` and `test/`, pack simulation: 59 JS files, zero missing).
+- **Not guaranteed**: multi-instance deployments (two DSH processes on one
+  machine sharing the same sessions directory) are outside this guard's
+  jurisdiction — that is a host-level concern; the README advises such setups
+  not to share session storage.
+
 ## [0.3.1] - 2026-10-28
 
 **Self-audit fixes**: while doing a source-level comparison against 22 similar plugins, three "looks like it's running but actually does nothing" silent failures of this plugin itself were uncovered, plus one piece of dead code that only tests were calling.
