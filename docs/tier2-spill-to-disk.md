@@ -1,4 +1,5 @@
-[English](tier2-spill-to-disk.md) | [简体中文](第2层-落盘.md)
+English | [![简体中文](https://img.shields.io/badge/docs-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-blue)](第2层-落盘.md)
+
 
 # Tier 2 · Spill to Disk
 

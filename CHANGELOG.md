@@ -1,4 +1,5 @@
-[English](CHANGELOG.en.md) | 简体中文
+**简体中文** | [![English](https://img.shields.io/badge/changelog-English-blue)](CHANGELOG.en.md)
+
 
 # Changelog
 

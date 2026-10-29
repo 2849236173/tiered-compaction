@@ -1,4 +1,5 @@
-[English](data-structures.md) | [简体中文](数据结构.md)
+English | [![简体中文](https://img.shields.io/badge/docs-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-blue)](数据结构.md)
+
 
 # Data Structures
 
