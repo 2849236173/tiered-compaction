@@ -48,7 +48,8 @@ function buildPtcTc(ptc, pluginName) {
     tc.id = "preset-ptc-tc";
     tc.config.id = "ptc-tc";
     tc.config.order = order;
-
+    // 一句话描述（typert.host.js schema 可选字段），预设列表 UI 直接显示。
+    tc.config.description = "基于官方 ptc，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开";
     const group = tc.config.plugins.find((p) => p.id === "compaction");
     if (!group) throw new Error("ptc 里找不到 id=compaction 的组");
     const idx = group.config.findIndex((p) => p.id === "compaction-basic");
@@ -133,6 +134,7 @@ const expected = [
     { path: "(root).id", to: "preset-ptc-tc" },
     { path: "(root).config.id", to: "ptc-tc" },
     { path: "(root).config.order", to: order },
+    { path: "(root).config.description", to: "基于官方 ptc，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开" },
     { path: `${base}.id`, to: "tiered-compaction" },
     { path: `${base}.name`, to: pluginName },
     { path: `${base}.config.enabled`, to: true },
@@ -141,7 +143,7 @@ const archivePath = `${base}.config.archiveDir`;
 
 const problems = [];
 if (flat.length !== expected.length + 1) {
-    problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 1}（含 archiveDir）`);
+    problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 1}（含 description/archiveDir）`);
 }
 for (const exp of expected) {
     const hit = flat.find((d) => d.path === exp.path);

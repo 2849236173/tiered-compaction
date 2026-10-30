@@ -120,9 +120,17 @@ if ($Apply) {
     $newBlock = $beginMarker + " ══`n" + ((Get-Content $outFile -Encoding UTF8) -join "`n") + "`n" + $endMarker + "`n"
 
     if ($patchText.Contains($beginMarker)) {
-        # 已有区块：整段替换（幂等）
-        $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?' + [regex]::Escape($endMarker) + '\r?\n'
-        $patchText = [regex]::Replace($patchText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $newBlock }, 1)
+        # 已有区块：从开始标记替换到「结束标记 / 下一个顶层条目 / 文件末尾」——
+        # 历史写入的块可能缺结束标记（老版本 bug），三种边界都要认，否则 Replace
+        # 静默不命中、还误报「已替换」。
+        # 注意：不能用 (?=^- id: )——^ 在未开启 Multiline 时只匹配字符串开头，
+        # 该分支会永远失效，正则退回 \z 把块后面所有条目一并吞掉。
+        $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?(\r?\n' + [regex]::Escape($endMarker) + '\r?\n|\r?\n(?=- id: )|\r?\n?\z)'
+        $replaced = [System.Text.RegularExpressions.Regex]::Replace($patchText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $newBlock }, 1)
+        if ($replaced -eq $patchText) {
+            Write-Error "替换未命中：D17 开始标记存在但边界匹配失败，中止写回（profile 未被改动）。"
+        }
+        $patchText = $replaced
         Write-Host "      已替换既有 D17 区块"
     } else {
         # 首次：追加到文件末尾

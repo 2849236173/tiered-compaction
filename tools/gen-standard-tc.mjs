@@ -79,6 +79,9 @@ function loadPreset(dumpText, ids) {
 function buildStandardTc(standard, pluginName) {
     const tc = JSON.parse(JSON.stringify(standard));
     // config.id 原样保留（"standard"），不改名。
+    // 一句话描述（typert.host.js schema 可选字段，预设列表 UI 显示）；
+    // standard 原本无 description，新增属预期差异（见下方 expected 清单）。
+    tc.config.description = "基于官方 standard，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开";
 
     const group = tc.config.plugins.find((p) => p.id === "compaction");
     if (!group) throw new Error("standard 里找不到 id=compaction 的组");
@@ -160,6 +163,7 @@ for (const d of raw) {
 }
 
 const expected = [
+    { path: "(root).config.description", to: "基于官方 standard，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开" },
     { path: `${base}.id`, to: "tiered-compaction" },
     { path: `${base}.name`, to: pluginName },
 ];
@@ -176,7 +180,7 @@ if (tc.config.id !== standard.config.id) {
 // 差异条数会不同；此时只校验「最终形态正确」，不要求差异条数。
 if (!alreadyApplied) {
     if (flat.length !== expected.length + 2) {
-        problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 2}（含 enabled 与 archiveDir）`);
+        problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 2}（含 description/enabled/archiveDir）`);
     }
     for (const exp of expected) {
         const hit = flat.find((d) => d.path === exp.path);
@@ -195,6 +199,11 @@ else {
     if (applied.name !== pluginName) problems.push(`引擎 name 错误：${applied.name}`);
     if (applied.config?.enabled !== true) problems.push("引擎 enabled 必须为 true");
     if (applied.config?.archiveDir !== archiveDir) problems.push(`archiveDir 应为 ${archiveDir}，实际 ${applied.config?.archiveDir}`);
+}
+// description 护栏：宿主列表 UI 依赖它显示介绍（PO 单 #1）。
+// 放在 alreadyApplied 分支之外，重复 Apply 时也校验最终形态。
+if (tc.config?.description !== "基于官方 standard，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开") {
+    problems.push(`config.description 应为一句话介绍，实际 ${JSON.stringify(tc.config?.description)}`);
 }
 
 const enabledHit = flat.find((d) => d.path === enabledPath);
