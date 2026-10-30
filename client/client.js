@@ -6,10 +6,14 @@
  * `window.__ModuleLoader__.load({ id, factory })`——与官方模板
  * decoration/client.js 同构，不 import/export（combo 走普通 script 通道）。
  *
- * 三入口共用一个组件，按 `surface` prop 分支：settings/sidebar 全尺寸
- * （含标题与刻度线图例），overlay 紧凑（隐藏标题/图例，条与三线保留，
- * 方案 §3.3）并额外具备 #4 的 HUD 行为：角落常驻、可拖动、颜色随压力、
- * 可关闭（关闭状态与位置存 localStorage）。统计等其余 UI 属 #5~#6。
+ * 数据区共用同一份实现，入口只差外围壳，按 `surface` 分支：
+ *   - settings：全尺寸（标题 + 状态 + 条 + 刻度线图例），设置页主入口；
+ *   - sidebar（main 槽位）：侧栏面板，标题 + 状态 + 条，图例属设置页专有
+ *     （方案 §3.2 侧栏版没有图例行），点侧栏图标后展示的就是这一层；
+ *   - sidebar.panellist：图标行精简态——图标 + 一行摘要（状态字 + 压力 +
+ *     窗口），条/图例/四层统计一概不渲染（任务 #5，验收「点击显示精简状态」）；
+ *   - overlay：迷你 HUD（条与三线保留＋#4 的拖动/关闭/随压力变色）。
+ * 统计等其余 UI 属 #6。
  */
 
 /** 模块 id 必须等于包名（dshmarket 同款约定）。 */
@@ -139,12 +143,38 @@ const BAR_LEGEND_ROW_STYLE = {
     whiteSpace: "nowrap",
 };
 
-/** surface 取值：组件按它分支渲染（方案 §2.3「一个组件三入口」）。 */
+/**
+ * surface 取值：组件按它分支渲染（方案 §2.3「一个组件三入口」）。
+ * PANELLIST 是 #5 新增的第四种渲染面：它不占三入口中的任何一个，只在
+ * sidebar.panellist（图标行）里用——图标行空间只够一行字，所以单独成型，
+ * 不能复 main 的侧栏面板（那会把标题与压力条挤进图标行）。
+ */
 const SURFACE_SETTINGS = "settings";
 const SURFACE_SIDEBAR = "sidebar";
+const SURFACE_PANELLIST = "sidebar-panellist";
 const SURFACE_OVERLAY = "overlay";
 
 const PANEL_TITLE = "tiered-compaction 分层压缩";
+
+/** 侧栏图标（方案 §3.2 手绘图里的 🐋）：图标行没有标题位，靠它也认得出来。 */
+const PANEL_ICON = "🐋";
+
+/** 精简态的几个可点定位点：图标行、图标、状态点、摘要行（验收按图标 testid 断言）。 */
+const SIDEBAR_PANEL_TESTID = "sidebar-panel";
+const PANELLIST_TESTID = "sidebar-panellist";
+const PANELLIST_ICON_TESTID = "sidebar-panellist-icon";
+const PANELLIST_DOT_TESTID = "sidebar-panellist-dot";
+const PANELLIST_SUMMARY_TESTID = "sidebar-panellist-summary";
+
+/**
+ * 状态字的中文短名表：只翻译「压缩进行中」这一类，其余状态原样透出。
+ * 为什么单独一张表：状态字是 API 字段的展示，不是第二套状态机——宿主半
+ * 当前只产出 ok/warn，`compacting` 是任务 #5 要求覆盖的「压缩中」态，日后
+ * 事件源接入时这里不用再改渲染；表里没有的词（含 ok/warn）一律按原字面显示，
+ * 既有断言（d23「/ok/」等）因此不受影响。
+ */
+const STATUS_LABELS = Object.freeze({ compacting: "压缩中" });
+
 const PHASE_LOADING = "loading";
 const PHASE_READY = "ready";
 const PHASE_UNAVAILABLE = "unavailable";
@@ -152,12 +182,41 @@ const LOADING_TEXT = "读取中…";
 const UNAVAILABLE_TEXT = "数据不可用";
 
 /**
+ * 侧栏精简态样式（方案 §3.2：图标 + 一行「● 正常 27.0%」）。
+ * 只做行内排版，不预设任何定位——图标行的位置由宿主侧栏布局决定，
+ * 与 d23「非 overlay 不预设定位」的约定一致。
+ */
+const PANELLIST_ROW_STYLE = {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    whiteSpace: "nowrap",
+};
+const PANELLIST_ICON_STYLE = { flex: "0 0 auto", fontSize: "14px", lineHeight: "1" };
+const PANELLIST_DOT_STYLE = { flex: "0 0 auto", width: "6px", height: "6px", borderRadius: "50%" };
+const PANELLIST_SUMMARY_STYLE = { fontSize: "12px", opacity: "0.85" };
+
+/**
  * 初始快照：挂载后 fetch 完成前的诚实占位（不是「数据不可用」）。
  * freeze 的原因：两者是模块级共享对象，#4~#6 扩展时若误改字段会污染所有
  * 入口的初值；相位切换本就该造新对象，锁死是零成本的护栏（任务 #3 顺检）。
+ * window（任务 #5）：非 ready 相位没有可信窗口值，一律 null——渲染层据此
+ * 决定「不显示窗口」，绝不拿 0 冒充「窗口是 0」。
  */
-const LOADING_SNAPSHOT = Object.freeze({ phase: PHASE_LOADING, status: null, pressure: null, pressureWidth: null });
-const UNAVAILABLE_SNAPSHOT = Object.freeze({ phase: PHASE_UNAVAILABLE, status: null, pressure: null, pressureWidth: null });
+const LOADING_SNAPSHOT = Object.freeze({
+    phase: PHASE_LOADING,
+    status: null,
+    pressure: null,
+    pressureWidth: null,
+    window: null,
+});
+const UNAVAILABLE_SNAPSHOT = Object.freeze({
+    phase: PHASE_UNAVAILABLE,
+    status: null,
+    pressure: null,
+    pressureWidth: null,
+    window: null,
+});
 
 /**
  * overlay 盒子样式（任务 #4）：定位固定，唯一可变的是 left/top——未拖动过用
@@ -230,8 +289,10 @@ window.__ModuleLoader__.load({
          * 把路由 JSON 收窄成渲染快照（JSDoc 口径：unknown 收窄不隐式信任）。
          * status/pressure 任一缺失即整条判为不可用：半截数据比「数据不可用」
          * 更容易骗过用户（后续扩字段时继续沿用这条规则）。
+         * window（任务 #5 侧栏用）：它是可选字段——缺了/形状不对只让窗口这一项
+         * 不显示（null），不把整条快照打成不可用；压力与状态仍可渲染。
          * @param {unknown} payload 路由 JSON
-         * @returns {{phase: string, status: string|null, pressure: string|null, pressureWidth: string|null}}
+         * @returns {{phase: string, status: string|null, pressure: string|null, pressureWidth: string|null, window: number|null}}
          */
         function buildReadySnapshot(payload) {
             if (payload === null || typeof payload !== "object") return UNAVAILABLE_SNAPSHOT;
@@ -246,7 +307,20 @@ window.__ModuleLoader__.load({
                 // 填充宽度的唯一定型点：与数值文本同源（percentNumberOf），
                 // 保证条形与文本永远说的是同一个数
                 pressureWidth: `${percentNumberOf(payload.pressure)}%`,
+                // 窗口大小：只做形状校验（有限非负数），不做换算——
+                // 显示层直接用它，避免与 host 半的口径分叉
+                window: windowNumberOf(payload.window),
             };
+        }
+
+        /**
+         * 路由里的 window → 可显示的数字或 null（外部数据不隐式信任）。
+         * @param {unknown} raw 路由 JSON 的 window 字段
+         * @returns {number|null}
+         */
+        function windowNumberOf(raw) {
+            if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return null;
+            return raw;
         }
 
         /** pressure 是 0~1 小数（host 半 toFixed(4) 口径），显示层唯一的 ×100 点。 */
@@ -297,6 +371,64 @@ window.__ModuleLoader__.load({
             if (snapshot.phase === PHASE_UNAVAILABLE) return UNAVAILABLE_TEXT;
             if (snapshot.phase === PHASE_LOADING) return LOADING_TEXT;
             return `状态 ${snapshot.status}`;
+        }
+
+        /* ------------------------------------------------------------------ *
+         * #5 侧栏面板：精简态文案（两个侧栏入口共用，取数/换算与设置页同源）
+         * ------------------------------------------------------------------ */
+
+        /**
+         * 状态字：已知状态给中文短名，其余原样透出（见 STATUS_LABELS 的取舍）。
+         * ok/warn 不在表里，因此仍显示 API 原字面——既有断言与「数值可追溯到
+         * API」的性质都不变。
+         * 为什么用 hasOwnProperty 而不是直接下标：status 是外部数据，`toString`
+         * 这类原型键会让下标命中原型上的函数，渲染出 `function toString()…`。
+         * @param {string} status API 的 status 字段
+         * @returns {string}
+         */
+        function statusWordOf(status) {
+            if (!Object.prototype.hasOwnProperty.call(STATUS_LABELS, status)) return status;
+            return STATUS_LABELS[status];
+        }
+
+        /**
+         * 侧栏用的状态文本：非 ready 相位直接复用 statusLineOf（占位文案只说
+         * 一次），ready 相位才套状态字表。为什么不改 statusLineOf：settings 与
+         * overlay 的文案是 #2/#4 的既定行为，侧栏不该顺手改掉它们。
+         * @param {{phase: string, status: string|null}} snapshot 渲染快照
+         * @returns {string}
+         */
+        function sidebarStatusTextOf(snapshot) {
+            if (snapshot.phase !== PHASE_READY) return statusLineOf(snapshot);
+            return `状态 ${statusWordOf(snapshot.status)}`;
+        }
+
+        /**
+         * 窗口大小文案：只有 ready 且有可信窗口值时才出——
+         * loading/unavailable 说「读取中…」「数据不可用」，不编一个窗口数。
+         * @param {{phase: string, window: number|null}} snapshot 渲染快照
+         * @returns {string|null}
+         */
+        function windowTextOf(snapshot) {
+            if (snapshot.phase !== PHASE_READY) return null;
+            if (snapshot.window === null) return null;
+            return `窗口 ${snapshot.window}`;
+        }
+
+        /**
+         * 图标行摘要（一行）：状态字 + 压力百分比 + 窗口，三项全部取自同一
+         * 快照字段，不在这里二次换算（pressure 已在 buildReadySnapshot 定型）。
+         * 非 ready 相位只留占位文案，杜绝「读取中 0.0%」这种假读数。
+         * @param {{phase: string, pressure: string|null}} snapshot 渲染快照
+         * @returns {string} 单行摘要
+         */
+        function panellistSummaryOf(snapshot) {
+            const parts = [sidebarStatusTextOf(snapshot)];
+            if (snapshot.phase !== PHASE_READY) return parts.join(" · ");
+            parts.push(snapshot.pressure ?? "");
+            const windowText = windowTextOf(snapshot);
+            if (windowText !== null) parts.push(windowText);
+            return parts.join(" · ");
         }
 
         /* ------------------------------------------------------------------ *
@@ -628,8 +760,10 @@ window.__ModuleLoader__.load({
         /**
          * 状态文本 + 压力条（三入口共用）：入口之间只差外围（标题/图例/HUD 壳），
          * 数据区永远同一份实现，避免三个入口各写一遍渲染分支。
+         * options.statusText 供侧栏换成自己的状态字（状态字表只影响文案，
+         * 数值仍来自同一快照）；不传就沿用三入口共用的 statusLineOf。
          * @param {{phase: string}} snapshot 渲染快照
-         * @param {{compact: boolean, valueColor?: string}} options 紧凑开关 + 数值色
+         * @param {{compact: boolean, valueColor?: string, statusText?: string}} options 紧凑开关 + 数值色 + 状态文案
          * @returns {object[]} 状态行与压力条 vnodes
          */
         function panelBodyOf(snapshot, options) {
@@ -638,14 +772,14 @@ window.__ModuleLoader__.load({
                 h(
                     "div",
                     { key: "status-line", style: isCompact ? HUD_STATUS_STYLE : undefined },
-                    statusLineOf(snapshot),
+                    options.statusText ?? statusLineOf(snapshot),
                 ),
                 pressureBarBlockOf(snapshot, options),
             ];
         }
 
         /**
-         * 全尺寸面板（settings / sidebar）：标题 + 状态文本 + 带图例的压力条。
+         * 全尺寸面板（settings）：标题 + 状态文本 + 带图例的压力条。
          * 注意：不透传 ownerProps——合成链末尾 ownerProps 会覆盖同名键
          * （close/size 等宿主常用名），干脆不接任何宿主 prop。
          * 非 ready 相位不出假数字（数值文本各自降级）。
@@ -657,6 +791,84 @@ window.__ModuleLoader__.load({
                 { "data-surface": props.surface },
                 h("div", { key: "panel-title" }, PANEL_TITLE),
                 ...panelBodyOf(snapshot, { compact: false }),
+            );
+        }
+
+        /**
+         * 侧栏面板（main 槽位，任务 #5）：「点侧栏图标后看到的那一屏」。
+         * 与设置页的差别只有两处，都是为了「精简」（方案 §3.2）：
+         *   1. 压力条走 compact——刻度线保留（70/80/82 仍要看得见），刻度线
+         *      图例那行字是设置页专有，侧栏不重复；
+         *   2. 多一行「窗口 xxx」——侧栏用户最关心的是「窗口还够不够」，
+         *      数值直接来自 status API 的 window，不在这里换算。
+         * 状态文案用侧栏自己的状态字表（ok 仍是 ok，只是支持「压缩中」这类词）。
+         */
+        function SidebarPanel() {
+            const snapshot = useStatusSnapshot();
+            const windowText = windowTextOf(snapshot);
+            return h(
+                "div",
+                { "data-surface": SURFACE_SIDEBAR, "data-testid": SIDEBAR_PANEL_TESTID },
+                h("div", { key: "panel-title" }, PANEL_TITLE),
+                ...panelBodyOf(snapshot, {
+                    compact: true,
+                    statusText: sidebarStatusTextOf(snapshot),
+                }),
+                // 无窗口数据时整行不出现：宁可少一行，也不给一个假窗口数
+                ...(windowText === null
+                    ? []
+                    : [h("div", { key: "sidebar-window", style: PANELLIST_SUMMARY_STYLE }, windowText)]),
+            );
+        }
+
+        /**
+         * 侧栏图标行精简态（sidebar.panellist，任务 #5 验收「图标可见，点击显示
+         * 精简状态」）。
+         * 为什么必须与 SidebarPanel 分开：图标行只有一行的宽高，标题/压力条/四层
+         * 统计塞进去会把侧栏撑坏；这里只要「图标 + 一行摘要（状态 · 压力 · 窗口）」。
+         * 点它之后宿主按 id=key 把 main 槽位换成 SidebarPanel——两屏都精简，
+         * 详细内容留给设置页。
+         * 数据源完全相同：useStatusSnapshot + 同一份 buildReadySnapshot 换算。
+         */
+        function SidebarPanellist() {
+            const snapshot = useStatusSnapshot();
+            const toneKey = pressureToneOf(snapshot);
+            const tone = PRESSURE_TONES[toneKey];
+            return h(
+                "div",
+                {
+                    "data-surface": SURFACE_PANELLIST,
+                    "data-testid": PANELLIST_TESTID,
+                    "data-tone": toneKey,
+                    title: PANEL_TITLE,
+                    style: PANELLIST_ROW_STYLE,
+                },
+                h(
+                    "span",
+                    {
+                        key: "icon",
+                        "data-testid": PANELLIST_ICON_TESTID,
+                        "aria-hidden": "true",
+                        style: PANELLIST_ICON_STYLE,
+                    },
+                    PANEL_ICON,
+                ),
+                h("span", {
+                    key: "tone-dot",
+                    "data-testid": PANELLIST_DOT_TESTID,
+                    "data-tone": toneKey,
+                    title: `压力${tone.label}`,
+                    style: { ...PANELLIST_DOT_STYLE, backgroundColor: tone.color },
+                }),
+                h(
+                    "span",
+                    {
+                        key: "summary",
+                        "data-testid": PANELLIST_SUMMARY_TESTID,
+                        style: PANELLIST_SUMMARY_STYLE,
+                    },
+                    panellistSummaryOf(snapshot),
+                ),
             );
         }
 
@@ -745,8 +957,11 @@ window.__ModuleLoader__.load({
 
         /**
          * 生成绑定到某个 surface 的组件（包装层不透传 ownerProps，见 StatusPanel 注释）。
-         * overlay 单独走 HUD 壳：它要自己的关闭/拖动状态，塞进全尺寸面板会把两套
-         * 状态搅在一起；数据源仍是同一个 useStatusSnapshot（一个组件三入口）。
+         * 两个入口各自有自己的壳，不能合并：
+         *   - overlay 走 HUD 壳（#4 的关闭/拖动状态，塞进面板会把两套状态搅在一起）；
+         *   - sidebar 走 SidebarPanel（精简版：无图例、多窗口行，#5）；
+         *   - settings 才用 StatusPanel（全量视图）。
+         * 数据源始终是同一个 useStatusSnapshot。
          */
         function makeSurfaceComponent(surface) {
             if (surface === SURFACE_OVERLAY) {
@@ -754,8 +969,25 @@ window.__ModuleLoader__.load({
                     return h(OverlayHud);
                 };
             }
+            if (surface === SURFACE_SIDEBAR) {
+                return function SidebarPanelEntry() {
+                    return h(SidebarPanel);
+                };
+            }
             return function SurfacePanel() {
                 return h(StatusPanel, { surface });
+            };
+        }
+
+        /**
+         * 侧栏图标行（sidebar.panellist）的精简态组件。
+         * 为什么单独一个工厂而不是 makeSurfaceComponent(SURFACE_SIDEBAR)：注册处
+         * 一眼就能看出「图标行≠主面板」——两者是不同组件，#5 的核心改动就是
+         * 这条注册不再指向主面板。
+         */
+        function makePanellistComponent() {
+            return function SidebarPanellistEntry() {
+                return h(SidebarPanellist);
             };
         }
 
@@ -775,7 +1007,12 @@ window.__ModuleLoader__.load({
             );
         }
 
-        /** 侧栏双注册：main 面板（keyed）+ panellist 图标行（list）。label 用 thunk（dshmarket 同款）。 */
+        /**
+         * 侧栏双注册：main 面板（keyed，点图标后展开的那一屏）+ panellist 图标行
+         * （list，图标 + 一行摘要）。label 用 thunk（dshmarket 同款）。
+         * 两处 id/key 必须同字符串：DesktopLayoutState 按 key 匹配面板，否则点了
+         * 图标主区找不到面板（方案 §2.2）。组件则必须是两个——图标行只有一行宽高。
+         */
         function injectSidebarPanel(ctx) {
             ctx.slots.inject(MAIN_SLOT, () =>
                 ctx.slots.register({ name: MAIN_SLOT, key: PANEL_KEY }, makeSurfaceComponent(SURFACE_SIDEBAR)),
@@ -788,7 +1025,7 @@ window.__ModuleLoader__.load({
                         order: SIDEBAR_PANELLIST_ORDER,
                         label: () => PANEL_TITLE,
                     },
-                    makeSurfaceComponent(SURFACE_SIDEBAR),
+                    makePanellistComponent(),
                 ),
             );
         }
