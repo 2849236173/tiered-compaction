@@ -6,6 +6,20 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0-beta.2] - 2026-10-30
+
+**档位：beta / 尝新版（未完全测试通过）** —— 本次只改开发工具链与发版脚本，
+不触碰 `src/` 运行时压缩逻辑；自动化测试全绿，但未做生产环境浸泡。
+求稳可直接留在 0.3.x 稳定版。
+
+### 修复
+
+- **生成器硬编码旧包名，导致 preset 挂载失败、会话 resume 报错**：`tools/gen-standard-tc.mjs` / `tools/gen-ptc-tc.mjs` 里写死了 `@local/dsh-tiered-compaction`，而包自 0.2.0 起已去 scope（npm 上叫 `dsh-tiered-compaction`）。名字解析不到时，cordis loader 的 `Entry._init` 把 import 失败吞成 `logger.error`，`agent-preset-registry` 只报 `tiered-compaction (@local/dsh-tiered-compaction): never started`，随后 `mountPreset` 抛错、整个会话 resume 失败（`gateway/internal: resume failed for session ...`）——错误链里看不到真因。
+  - 新增 `tools/lib/plugin-name.mjs`：包名一律从「实际装了什么」推导（`dsh.profile.bundles` → `dependencies` → `dsh --dump-config` 兜底），并校验解析结果与包自报 `name` 完全一致。
+  - 两个生成器改为通过 `--profile-dir` 注入 profile 路径，产物写盘前过 `assertNoStaleScopeNames` 护栏，杜绝再次写死 scope。
+  - 新增 `tools/check-install.mjs`：一条命令自检 profile 补丁里的插件名能否解析；换安装来源（npm ↔ 本地软链）后即可验证。`files` 现已包含该命令与 `tools/lib/`，装完即可自查。
+  - 两个 `.ps1` 写回后自动跑自检，不通过即报错退出，不再「静默写坏」。
+
 ## [0.4.0-beta.1] - 2026-10-29
 
 **档位：beta / 尝新版（未完全测试通过）**——自动化测试 246 项全绿、病案

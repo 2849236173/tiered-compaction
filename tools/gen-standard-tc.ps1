@@ -49,7 +49,8 @@
 param(
     [string]$Profile = "desktop",
     [switch]$Apply,
-    [string]$ArchiveDir = ""
+    [string]$ArchiveDir = "",
+    [string]$PluginName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +60,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $generator = Join-Path $PSScriptRoot "gen-standard-tc.mjs"
 $outDir = Join-Path $PSScriptRoot "out"
 $outFile = Join-Path $outDir "preset-standard-tc.yml"
+$profileDir = Join-Path $env:USERPROFILE ".dsh\profiles\$Profile"
 if (-not $ArchiveDir) { $ArchiveDir = Join-Path $env:USERPROFILE ".dsh\tiered-archive" }
 
 if (-not (Test-Path $generator)) { Write-Error "缺少生成器：$generator" }
@@ -86,9 +88,11 @@ Write-Host "      已写入 $dumpFile（$((Get-Content $dumpFile).Count) 行）"
 
 # ── 2) 生成 + 自检（Node 侧，失败即退且不写产物）──────────────
 Write-Host "[2/3] 生成 standard 覆盖块并自检 ..." -ForegroundColor Cyan
+$genArgs = @($dumpFile, $outFile, $ArchiveDir, "--profile-dir", $profileDir)
+if ($PluginName) { $genArgs += @("--plugin-name", $PluginName) }
 Push-Location $repoRoot
 try {
-    & node $generator $dumpFile $outFile $ArchiveDir
+    & node $generator @genArgs
     $genExit = $LASTEXITCODE
 } finally {
     Pop-Location
@@ -130,6 +134,11 @@ if ($Apply) {
     [System.IO.File]::WriteAllText($patchPath, $patchText, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "      已写回 $patchPath"
     Write-Host "      生效方式：重启 DSH Desktop（新会话才会重新解析 preset）" -ForegroundColor Yellow
+    Write-Host "[自检] 校验补丁里的插件名能否解析 ..." -ForegroundColor Cyan
+    & node (Join-Path $PSScriptRoot "check-install.mjs") --profile-dir $profileDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "自检失败：补丁里的插件名解析不到，宿主挂载 preset 会报 never started。请按上面提示修正后重跑。"
+    }
 }
 
 # 清理中间文件

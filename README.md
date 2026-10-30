@@ -179,6 +179,26 @@ foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
 
 > **注意**：DSH 不会主动提示有新版本。想知道有没有更新，从 npm 装的可以跑 `npm view dsh-tiered-compaction version` 对比；也可以看仓库的 [CHANGELOG](CHANGELOG.md)。
 
+### 包名必须与已装包一致（换安装来源后必读）
+
+preset 行里的 `name:` 是**包名**：宿主拿它去 `profile/node_modules` 里解析模块。名字对不上时不会明说，只会得到：
+
+```
+tiered-compaction (@local/dsh-tiered-compaction): never started
+```
+
+后面跟着该会话 resume 失败（`gateway/internal: resume failed for session ...`）。真因是模块解析不到，被 loader 吞成一句 `logger.error`。
+
+本插件自 0.2.0 起包名是 **`dsh-tiered-compaction`（无 scope）**：npm 装、tarball 装、`github:` 装、本地 `link:` 装，落地的都是同名的 `node_modules/dsh-tiered-compaction`。**不要写 `@local/...`** —— npm 上没有这个 scope，写了必然解析不到。
+
+生成器（`tools/gen-standard-tc.*`、`tools/gen-ptc-tc.*`）已改为从已装包推导包名，并在写回后自动跑一次自检。手工改过配置、或想确认现状时：
+
+```powershell
+node tools/check-install.mjs --profile desktop
+```
+
+输出里每行都是 `✔ 包名 → 实际路径` 才算正常；出现 `✖` 就先修名字，再重启 DSH。
+
 ### 卸载
 
 ```powershell

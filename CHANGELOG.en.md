@@ -6,6 +6,20 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.2] - 2026-10-30
+
+**Release tier: beta (NOT fully tested yet)** — tooling and release-script only;
+`src/` compaction logic untouched. Automated tests are green, but no production soak.
+Stay on 0.3.x stable if you want maximum safety.
+
+### Fixed
+
+- **Generators hardcoded a stale package name, breaking preset mounts and session resume**: `tools/gen-standard-tc.mjs` / `tools/gen-ptc-tc.mjs` wrote `@local/dsh-tiered-compaction`, but the package dropped its scope in 0.2.0 (it is `dsh-tiered-compaction` on npm). When the name does not resolve, the cordis loader's `Entry._init` swallows the import failure into a single `logger.error`, `agent-preset-registry` reports only `tiered-compaction (@local/dsh-tiered-compaction): never started`, and `mountPreset` then fails the whole session resume (`gateway/internal: resume failed for session ...`) — the real cause never surfaces.
+  - Added `tools/lib/plugin-name.mjs`: derive the package name from what is actually installed (`dsh.profile.bundles` → `dependencies` → `dsh --dump-config` fallback) and verify the resolved package reports that exact `name`.
+  - Both generators now take `--profile-dir` and run `assertNoStaleScopeNames` on the generated body before writing, so a hardcoded scope can no longer slip through.
+  - Added `tools/check-install.mjs`: one command to verify the plugin name in the profile patch resolves; `files` now ships it plus `tools/lib/`.
+  - Both `.ps1` scripts run the self-check after writing back and fail loudly instead of writing a broken config silently.
+
 ## [0.4.0-beta.1] - 2026-10-29
 
 **Release tier: beta (NOT fully tested yet)** — 246 automated tests green and
