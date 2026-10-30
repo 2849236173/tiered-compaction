@@ -24,6 +24,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import yaml from "js-yaml";
+import { assertNoStaleScopeNames, optionValue, resolvePluginName } from "./lib/plugin-name.mjs";
 
 /** `!!js` 自定义标量：构造成 { __js: 源码 }，与现有 gen-ptc-tc 保持一致。 */
 const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
@@ -37,7 +38,10 @@ const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
 });
 const SCHEMA = yaml.DEFAULT_SCHEMA.extend([JS_TYPE]);
 
-const [dumpPath, outPath, archiveDir, flag] = process.argv.slice(2);
+const [dumpPath, outPath, archiveDir, ...restArgs] = process.argv.slice(2);
+const flag = restArgs.includes("--diff-only") ? "--diff-only" : "";
+const profileDir = optionValue(restArgs, "--profile-dir");
+const pluginNameOverride = optionValue(restArgs, "--plugin-name");
 
 if (!archiveDir) {
     console.error("缺少 archiveDir 参数");
@@ -72,7 +76,7 @@ function loadPreset(dumpText, ids) {
  *   tiered-compaction 而不再有 compaction-basic。此时必须识别为「已应用」
  *   并原样重建同一产物，否则第二次 Apply 会直接报错。
  */
-function buildStandardTc(standard) {
+function buildStandardTc(standard, pluginName) {
     const tc = JSON.parse(JSON.stringify(standard));
     // config.id 原样保留（"standard"），不改名。
 
@@ -82,7 +86,7 @@ function buildStandardTc(standard) {
 
     const target = {
         id: "tiered-compaction",
-        name: "@local/dsh-tiered-compaction",
+        name: pluginName,
         config: { enabled: true, archiveDir },
     };
 
@@ -126,8 +130,12 @@ function diffTree(a, b, path = "(root)", out = []) {
 }
 
 const dumpText = readFileSync(dumpPath, "utf8");
+// 包名一律从「这台机器实际装了什么」推导，禁止硬编码（见 tools/lib/plugin-name.mjs 顶部事故说明）。
+const pluginName = resolvePluginName({ profileDir, override: pluginNameOverride, dumpText });
+console.log(`插件包名（从已装包推导）: ${pluginName}`);
+
 const { entry: standard, span } = loadPreset(dumpText, "standard");
-const { entry: tc, alreadyApplied } = buildStandardTc(standard);
+const { entry: tc, alreadyApplied } = buildStandardTc(standard, pluginName);
 
 /* ---------------- 自检：差异必须恰好是「引擎替换 + config.id 改名」 ---------------- */
 const compIdx = standard.config.plugins.findIndex((p) => p.id === "compaction");
@@ -153,7 +161,7 @@ for (const d of raw) {
 
 const expected = [
     { path: `${base}.id`, to: "tiered-compaction" },
-    { path: `${base}.name`, to: "@local/dsh-tiered-compaction" },
+    { path: `${base}.name`, to: pluginName },
 ];
 const archivePath = `${base}.config.archiveDir`;
 const enabledPath = `${base}.config.enabled`;
@@ -184,7 +192,7 @@ const group = tc.config.plugins.find((p) => p.id === "compaction");
 const applied = group.config.find((p) => p.id === "tiered-compaction");
 if (!applied) problems.push("最终形态里 compaction 组没有 tiered-compaction");
 else {
-    if (applied.name !== "@local/dsh-tiered-compaction") problems.push(`引擎 name 错误：${applied.name}`);
+    if (applied.name !== pluginName) problems.push(`引擎 name 错误：${applied.name}`);
     if (applied.config?.enabled !== true) problems.push("引擎 enabled 必须为 true");
     if (applied.config?.archiveDir !== archiveDir) problems.push(`archiveDir 应为 ${archiveDir}，实际 ${applied.config?.archiveDir}`);
 }
@@ -245,6 +253,7 @@ const body = yaml.dump([{ id: "preset-standard", config: tc.config }], {
     schema: SCHEMA,
 });
 
+assertNoStaleScopeNames(body, pluginName);
 writeFileSync(outPath, header.join("\n") + "\n" + body, "utf8");
 
 console.log(`\n=== 自检通过${alreadyApplied ? "（检测到已应用过，产物已按目标形态重建）" : ""}，产物已写入 ${outPath} ===`);

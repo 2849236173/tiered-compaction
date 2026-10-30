@@ -13,6 +13,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import yaml from "js-yaml";
+import { assertNoStaleScopeNames, optionValue, resolvePluginName } from "./lib/plugin-name.mjs";
 
 const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
     kind: "scalar",
@@ -20,7 +21,10 @@ const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
 });
 const SCHEMA = yaml.DEFAULT_SCHEMA.extend([JS_TYPE]);
 
-const [dumpPath, outPath, orderArg, archiveDir, flag] = process.argv.slice(2);
+const [dumpPath, outPath, orderArg, archiveDir, ...restArgs] = process.argv.slice(2);
+const flag = restArgs.includes("--diff-only") ? "--diff-only" : "";
+const profileDir = optionValue(restArgs, "--profile-dir");
+const pluginNameOverride = optionValue(restArgs, "--plugin-name");
 const order = Number(orderArg);
 
 /** 从 dump 中切出 preset-ptc 顶层条目并解析为对象。 */
@@ -39,7 +43,7 @@ function loadPtc(dumpText) {
 }
 
 /** 生成 ptc-tc 对象：只改 id / config.id / order / compaction 组的引擎项。 */
-function buildPtcTc(ptc) {
+function buildPtcTc(ptc, pluginName) {
     const tc = JSON.parse(JSON.stringify(ptc));
     tc.id = "preset-ptc-tc";
     tc.config.id = "ptc-tc";
@@ -51,7 +55,7 @@ function buildPtcTc(ptc) {
     if (idx < 0) throw new Error("compaction 组里找不到 compaction-basic");
     group.config[idx] = {
         id: "tiered-compaction",
-        name: "@local/dsh-tiered-compaction",
+        name: pluginName,
         config: { enabled: true, archiveDir },
     };
     return tc;
@@ -81,8 +85,12 @@ function stabilize(node) {
 }
 
 const dumpText = readFileSync(dumpPath, "utf8");
+// 包名一律从「这台机器实际装了什么」推导，禁止硬编码（见 tools/lib/plugin-name.mjs 顶部事故说明）。
+const pluginName = resolvePluginName({ profileDir, override: pluginNameOverride, dumpText });
+console.log(`插件包名（从已装包推导）: ${pluginName}`);
+
 const { entry: ptc } = loadPtc(dumpText);
-const tc = buildPtcTc(ptc);
+const tc = buildPtcTc(ptc, pluginName);
 
 /* ---------------- 自检：递归 diff ---------------- */
 function diffTree(a, b, path = "(root)", out = []) {
@@ -126,7 +134,7 @@ const expected = [
     { path: "(root).config.id", to: "ptc-tc" },
     { path: "(root).config.order", to: order },
     { path: `${base}.id`, to: "tiered-compaction" },
-    { path: `${base}.name`, to: "@local/dsh-tiered-compaction" },
+    { path: `${base}.name`, to: pluginName },
     { path: `${base}.config.enabled`, to: true },
 ];
 const archivePath = `${base}.config.archiveDir`;
@@ -182,6 +190,7 @@ const body = yaml.dump([{ insert: [tc] }], {
     noRefs: true,
     schema: SCHEMA,
 });
+assertNoStaleScopeNames(body, pluginName);
 writeFileSync(outPath, header.join("\n") + "\n" + body, "utf8");
 
 console.log(`\n=== 自检通过，产物已写入 ${outPath} ===`);

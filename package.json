@@ -1,7 +1,7 @@
 {
   "name": "dsh-tiered-compaction",
   "description": "DSH 分层上下文压缩插件：无损折叠 → 落盘 → 软压力 → 有损摘要四层管线，前三层零 LLM 成本。装完即生效。",
-  "version": "0.4.0-beta.1",
+  "version": "0.4.0-beta.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -13,6 +13,8 @@
     "src/",
     "test/",
     "client/",
+    "tools/check-install.mjs",
+    "tools/lib/",
     "docs/",
     "scripts/",
     "cordis.patch.yml",
@@ -59,6 +61,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
+    "check:install": "node tools/check-install.mjs",
     "postinstall": "node -e \"const fs=require('fs');const ok=fs.existsSync('src/single-writer-guard.js')&&fs.existsSync('test/d24-single-writer.test.js');console.log(ok?'dsh-tiered-compaction: single-writer guard & tripwire present':'WARN: guard files missing—double-mount protection incomplete')\"",
     "check": "node --check src/index.js && node -e \"import('./src/index.js').then(()=>console.log('入口可加载 OK')).catch(e=>{console.error(e);process.exit(1)})\"",
     "build": "npm run check && npm test"
