@@ -7,13 +7,15 @@
  * decoration/client.js 同构，不 import/export（combo 走普通 script 通道）。
  *
  * 数据区共用同一份实现，入口只差外围壳，按 `surface` 分支：
- *   - settings：全尺寸（标题 + 状态 + 条 + 刻度线图例），设置页主入口；
- *   - sidebar（main 槽位）：侧栏面板，标题 + 状态 + 条，图例属设置页专有
- *     （方案 §3.2 侧栏版没有图例行），点侧栏图标后展示的就是这一层；
+ *   - settings：全尺寸（标题 + 状态 + 条 + 刻度线图例 + 四层数字块），
+ *     设置页主入口；
+ *   - sidebar（main 槽位）：侧栏面板，标题 + 状态 + 条 + 窗口行 +
+ *     四层数字一行式，图例属设置页专有（方案 §3.2 侧栏版没有图例行），
+ *     点侧栏图标后展示的就是这一层；
  *   - sidebar.panellist：图标行精简态——图标 + 一行摘要（状态字 + 压力 +
  *     窗口），条/图例/四层统计一概不渲染（任务 #5，验收「点击显示精简状态」）；
- *   - overlay：迷你 HUD（条与三线保留＋#4 的拖动/关闭/随压力变色）。
- * 统计等其余 UI 属 #6。
+ *   - overlay：迷你 HUD（条与三线保留＋#4 的拖动/关闭/随压力变色），
+ *     不加四层数字（任务 #6 定案：保持迷你）。
  */
 
 /** 模块 id 必须等于包名（dshmarket 同款约定）。 */
@@ -182,6 +184,21 @@ const LOADING_TEXT = "读取中…";
 const UNAVAILABLE_TEXT = "数据不可用";
 
 /**
+ * 四层数字块的中文标签（任务 #6，方案 §3.1 顺序）。
+ * 折叠用 l12Processed 口径（第 1-2 层处理数）；落盘附省字节数；
+ * 摘要来自 host 半的 l4Summaries（提交过的摘要事务数）。
+ */
+const LAYERS_LABELS = Object.freeze({
+    l12Processed: "无损折叠",
+    spillCount: "落盘存档",
+    l3Evicted: "软压力驱逐",
+    l4Summaries: "有损摘要",
+});
+
+/** 四层数字块的 testid（d28 按它定位断言；panellist 摘要行沿用既有 testid）。 */
+const LAYERS_BLOCK_TESTID = "layer-stats";
+
+/**
  * 侧栏精简态样式（方案 §3.2：图标 + 一行「● 正常 27.0%」）。
  * 只做行内排版，不预设任何定位——图标行的位置由宿主侧栏布局决定，
  * 与 d23「非 overlay 不预设定位」的约定一致。
@@ -209,6 +226,8 @@ const LOADING_SNAPSHOT = Object.freeze({
     pressure: null,
     pressureWidth: null,
     window: null,
+    layers: null,
+    sinceText: null,
 });
 const UNAVAILABLE_SNAPSHOT = Object.freeze({
     phase: PHASE_UNAVAILABLE,
@@ -216,6 +235,8 @@ const UNAVAILABLE_SNAPSHOT = Object.freeze({
     pressure: null,
     pressureWidth: null,
     window: null,
+    layers: null,
+    sinceText: null,
 });
 
 /**
@@ -292,7 +313,7 @@ window.__ModuleLoader__.load({
          * window（任务 #5 侧栏用）：它是可选字段——缺了/形状不对只让窗口这一项
          * 不显示（null），不把整条快照打成不可用；压力与状态仍可渲染。
          * @param {unknown} payload 路由 JSON
-         * @returns {{phase: string, status: string|null, pressure: string|null, pressureWidth: string|null, window: number|null}}
+         * @returns {{phase: string, status: string|null, pressure: string|null, pressureWidth: string|null, window: number|null, layers: object|null, sinceText: string|null}}
          */
         function buildReadySnapshot(payload) {
             if (payload === null || typeof payload !== "object") return UNAVAILABLE_SNAPSHOT;
@@ -310,7 +331,62 @@ window.__ModuleLoader__.load({
                 // 窗口大小：只做形状校验（有限非负数），不做换算——
                 // 显示层直接用它，避免与 host 半的口径分叉
                 window: windowNumberOf(payload.window),
+                // 四层数字（任务 #6）：与 window 同规——缺了只让这一项不显示，
+                // 不把整条快照打成不可用
+                layers: layersOf(payload.layers),
+                sinceText: sinceTextOf(payload.since),
             };
+        }
+
+        /**
+         * 路由里的 layers → 可显示的四层数字（任务 #6）。
+         * 只挑方案 §3.1 要展示的四个字段并做形状校验；缺字段给 null，
+         * 渲染层对 null 显示 0 之外的诚实处理（见 layersTextOf）。
+         * bytesSaved 一并收窄：只给落盘行的省字节数用，不参与四层计数。
+         * @param {unknown} raw 路由 JSON 的 layers 字段
+         * @returns {{l12Processed: number|null, spillCount: number|null, l3Evicted: number|null, l4Summaries: number|null, bytesSaved: number|null}|null}
+         */
+        function layersOf(raw) {
+            if (raw === null || typeof raw !== "object") return null;
+            const pick = (value) =>
+                typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+            return {
+                l12Processed: pick(raw.l12Processed),
+                spillCount: pick(raw.spillCount),
+                l3Evicted: pick(raw.l3Evicted),
+                l4Summaries: pick(raw.l4Summaries),
+                bytesSaved: pick(raw.l12BytesSaved),
+            };
+        }
+
+        /**
+         * 路由里的 since（epoch ms）→ 本地 HH:mm（任务 #6「自 HH:mm 起」）。
+         * 缺失/非数字/非法时间一律 null——宁可不标，也不显示 "NaN:NaN"。
+         * @param {unknown} raw 路由 JSON 的 since 字段
+         * @returns {string|null}
+         */
+        function sinceTextOf(raw) {
+            if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
+            const date = new Date(raw);
+            if (Number.isNaN(date.getTime())) return null;
+            const pad2 = (value) => String(value).padStart(2, "0");
+            return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+        }
+
+        /**
+         * 载荷里的省字节数 → 可读文本（任务 #6）。
+         * 显示口径：≥1MB 用 MB（一位小数），≥1KB 用 KB（整数），否则原样字节数；
+         * 形状不对给 null，渲染层不显示省字节括号。
+         * @param {unknown} raw 路由 JSON 的 layers.l12BytesSaved
+         * @returns {string|null}
+         */
+        function bytesSavedTextOf(raw) {
+            if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
+            const KB = 1024;
+            const MB = KB * 1024;
+            if (raw >= MB) return `省 ~${(raw / MB).toFixed(1)} MB`;
+            if (raw >= KB) return `省 ~${Math.round(raw / KB)} KB`;
+            return `省 ~${raw} 字节`;
         }
 
         /**
@@ -428,6 +504,74 @@ window.__ModuleLoader__.load({
             parts.push(snapshot.pressure ?? "");
             const windowText = windowTextOf(snapshot);
             if (windowText !== null) parts.push(windowText);
+            return parts.join(" · ");
+        }
+
+        /* ------------------------------------------------------------------ *
+         * #6 四层活动统计：设置页数字块 + 侧栏一行式（数据源同一份快照）
+         * ------------------------------------------------------------------ */
+
+        /**
+         * 「自 HH:mm 起」标注：只有 ready 且 since 可读时才出。
+         * sinceTextOf 已把非法值收窄成 null，这里 null 就整段省略，
+         * 绝不渲染 "自 NaN:NaN 起"。
+         * @param {{phase: string, sinceText: string|null}} snapshot 渲染快照
+         * @returns {string|null}
+         */
+        function sinceMarkOf(snapshot) {
+            if (snapshot.phase !== PHASE_READY) return null;
+            if (snapshot.sinceText === null) return null;
+            return `自 ${snapshot.sinceText} 起`;
+        }
+
+        /**
+         * 设置页四层数字块：方案 §3.1 顺序（折叠/落盘/驱逐/摘要），
+         * 落盘附省字节数。数字 0 也如实显示——那是「真的在跑」的证据。
+         * 某项缺失（null）显示「—」：与 0 有区别（0 是读到的，— 是没拿到），
+         * 不用假零冒充读数。
+         * @param {{phase: string, layers: object|null}} snapshot 渲染快照
+         * @returns {object|null} 区块 vnode；无数据（非 ready 或 layers 缺失）时不渲染
+         */
+        function layersBlockOf(snapshot) {
+            if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
+            const layers = snapshot.layers;
+
+            const rowOf = (key) =>
+                h(
+                    "div",
+                    { key: `layer-${key}` },
+                    `${LAYERS_LABELS[key]}　${layers[key] ?? "—"}${key === "spillCount" && layers.spillCount !== null && layers.spillCount > 0 ? `（${bytesSavedTextOf(layers.bytesSaved)}）` : ""}`,
+                );
+
+            const sinceMark = sinceMarkOf(snapshot);
+            return h(
+                "div",
+                { key: "layer-stats", "data-testid": LAYERS_BLOCK_TESTID },
+                h("div", { key: "layer-stats-title" }, sinceMark === null ? "本次会话：" : `本次会话（${sinceMark}）：`),
+                rowOf("l12Processed"),
+                rowOf("spillCount"),
+                rowOf("l3Evicted"),
+                rowOf("l4Summaries"),
+            );
+        }
+
+        /**
+         * 侧栏一行式四层数字（任务 #6，方案 §3.2「折叠 N · 落盘 N · 驱逐 N · 摘要 N」）。
+         * 同样带 since 标注；缺数据时整行不出现（同 window 行的取舍）。
+         * @param {{phase: string, layers: object|null}} snapshot 渲染快照
+         * @returns {string|null}
+         */
+        function layersLineOf(snapshot) {
+            if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
+            const l = snapshot.layers;
+            const parts = [
+                `折叠 ${l.l12Processed ?? "—"}`,
+                `落盘 ${l.spillCount ?? "—"}`,
+                `驱逐 ${l.l3Evicted ?? "—"}`,
+                `摘要 ${l.l4Summaries ?? "—"}`,
+            ];
+            const sinceMark = sinceMarkOf(snapshot);
+            if (sinceMark !== null) parts.push(sinceMark);
             return parts.join(" · ");
         }
 
@@ -779,18 +923,21 @@ window.__ModuleLoader__.load({
         }
 
         /**
-         * 全尺寸面板（settings）：标题 + 状态文本 + 带图例的压力条。
+         * 全尺寸面板（settings）：标题 + 状态文本 + 带图例的压力条 + 四层数字块。
          * 注意：不透传 ownerProps——合成链末尾 ownerProps 会覆盖同名键
          * （close/size 等宿主常用名），干脆不接任何宿主 prop。
          * 非 ready 相位不出假数字（数值文本各自降级）。
          */
         function StatusPanel(props) {
             const snapshot = useStatusSnapshot();
+            const layersBlock = layersBlockOf(snapshot);
             return h(
                 "div",
                 { "data-surface": props.surface },
                 h("div", { key: "panel-title" }, PANEL_TITLE),
                 ...panelBodyOf(snapshot, { compact: false }),
+                // 无四层数据时整块不出现：宁可少一块，也不给假读数
+                ...(layersBlock === null ? [] : [layersBlock]),
             );
         }
 
@@ -806,6 +953,8 @@ window.__ModuleLoader__.load({
         function SidebarPanel() {
             const snapshot = useStatusSnapshot();
             const windowText = windowTextOf(snapshot);
+            // 任务 #6：四层数字一行式（折叠 N · 落盘 N · 驱逐 N · 摘要 N + since 标注）
+            const layersLine = layersLineOf(snapshot);
             return h(
                 "div",
                 { "data-surface": SURFACE_SIDEBAR, "data-testid": SIDEBAR_PANEL_TESTID },
@@ -818,6 +967,10 @@ window.__ModuleLoader__.load({
                 ...(windowText === null
                     ? []
                     : [h("div", { key: "sidebar-window", style: PANELLIST_SUMMARY_STYLE }, windowText)]),
+                // 四层数字行同样：缺数据整行不出现，不出假零
+                ...(layersLine === null
+                    ? []
+                    : [h("div", { key: "sidebar-layers", style: PANELLIST_SUMMARY_STYLE }, layersLine)]),
             );
         }
 
