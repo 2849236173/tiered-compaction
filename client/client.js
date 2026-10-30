@@ -8,7 +8,8 @@
  *
  * 三入口共用一个组件，按 `surface` prop 分支：settings/sidebar 全尺寸
  * （含标题与刻度线图例），overlay 紧凑（隐藏标题/图例，条与三线保留，
- * 方案 §3.3）。状态文本/统计/拖动等其余 UI 属 #4~#6。
+ * 方案 §3.3）并额外具备 #4 的 HUD 行为：角落常驻、可拖动、颜色随压力、
+ * 可关闭（关闭状态与位置存 localStorage）。统计等其余 UI 属 #5~#6。
  */
 
 /** 模块 id 必须等于包名（dshmarket 同款约定）。 */
@@ -36,9 +37,36 @@ const SIDEBAR_PANELLIST_ORDER = 1;
 const OVERLAY_SLOT = "shell.overlay";
 const OVERLAY_ID = "tiered-compaction-hud";
 const OVERLAY_LABEL = "tiered-compaction";
-/** overlay 悬浮层级：高于宿主常规内容即可，具体定位/拖动是 #4 的职责。 */
+/** overlay 悬浮层级：高于宿主常规内容即可。 */
 const OVERLAY_Z_INDEX = 1000;
 const OVERLAY_CORNER_OFFSET = "16px";
+
+/**
+ * overlay 记忆键（方案 §五 #4「可关闭（localStorage 记住）」+ 拖动位置）。
+ * 关闭状态与位置存同一个键：一次读写即一致，不会出现「关了但记不住了」的半截
+ * 状态。名字带 v1 后缀——形状变了就换键，旧存档不会把新代码带进未定义字段。
+ */
+const HUD_STATE_KEY = "tiered-compaction-hud-state";
+
+/**
+ * 压力配色档位（方案 §3.3 原文：<70% 绿、70-80% 黄、≥80% 橙）。
+ * 分档切点直接复用上面的镜像阈值（PRESSURE_REMIND_RATIO / PRESSURE_EVICT_RATIO），
+ * 与刻度线共用同一组数字，不引入第二套阈值源。
+ * 82%（摘要线）不参与配色：它是第 4 层的触发底线，不是压力档位边界；
+ * 配色只做视觉提示，数值仍以 API 返回为准。
+ */
+const PRESSURE_TONE_CALM = "calm";
+const PRESSURE_TONE_REMIND = "remind";
+const PRESSURE_TONE_EVICT = "evict";
+const PRESSURE_TONE_UNKNOWN = "unknown";
+
+/** 档位 → 颜色 + 中文短名。tone 名进 data-tone、颜色进 style，两者同源于此表。 */
+const PRESSURE_TONES = {
+    [PRESSURE_TONE_CALM]: { color: "#2f9e44", label: "正常" },
+    [PRESSURE_TONE_REMIND]: { color: "#f0a020", label: "偏高" },
+    [PRESSURE_TONE_EVICT]: { color: "#e8590c", label: "危险" },
+    [PRESSURE_TONE_UNKNOWN]: { color: "#868e96", label: "未知" },
+};
 
 /**
  * 压力刻度线镜像常量（任务 #3）。浏览器端不能 import src/，三处与 host 半
@@ -131,12 +159,50 @@ const UNAVAILABLE_TEXT = "数据不可用";
 const LOADING_SNAPSHOT = Object.freeze({ phase: PHASE_LOADING, status: null, pressure: null, pressureWidth: null });
 const UNAVAILABLE_SNAPSHOT = Object.freeze({ phase: PHASE_UNAVAILABLE, status: null, pressure: null, pressureWidth: null });
 
-/** overlay 固定角落占位样式（定位/拖动是组件自己的职责，#4 再做）。 */
-const OVERLAY_STYLE = {
+/**
+ * overlay 盒子样式（任务 #4）：定位固定，唯一可变的是 left/top——未拖动过用
+ * 角落（right/bottom），拖动过就换成存档的 left/top（见 hudPositionStyleOf）。
+ * touchAction:none 让触控拖拽不被宿主的滚动手势抢走。
+ */
+const HUD_BASE_STYLE = {
     position: "fixed",
-    right: OVERLAY_CORNER_OFFSET,
-    bottom: OVERLAY_CORNER_OFFSET,
     zIndex: OVERLAY_Z_INDEX,
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 10px",
+    minWidth: "190px",
+    borderRadius: "8px",
+    backgroundColor: "rgba(24, 24, 27, 0.88)",
+    color: "#f4f4f5",
+    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.35)",
+    cursor: "move",
+    userSelect: "none",
+    touchAction: "none",
+};
+
+/** 状态点：颜色表示压力档位（绿/黄/橙/灰），形状固定。 */
+const HUD_DOT_STYLE = {
+    flex: "0 0 auto",
+    width: "8px",
+    height: "8px",
+    borderRadius: "50%",
+};
+
+/** HUD 里的状态文本比全尺寸入口更小，避免占宽。 */
+const HUD_STATUS_STYLE = { fontSize: "11px", opacity: "0.8", whiteSpace: "nowrap" };
+
+/** 关闭按钮：贴右，无边框，保持 HUD 的紧凑观感。 */
+const HUD_CLOSE_STYLE = {
+    flex: "0 0 auto",
+    marginLeft: "auto",
+    padding: "0 2px",
+    border: "none",
+    background: "transparent",
+    color: "inherit",
+    cursor: "pointer",
+    fontSize: "13px",
+    lineHeight: "1",
 };
 
 window.__ModuleLoader__.load({
@@ -233,10 +299,247 @@ window.__ModuleLoader__.load({
             return `状态 ${snapshot.status}`;
         }
 
-        /** overlay 才有定位；settings/sidebar 占位期不预设样式。 */
-        function styleForSurface(surface) {
-            if (surface === SURFACE_OVERLAY) return OVERLAY_STYLE;
-            return undefined;
+        /* ------------------------------------------------------------------ *
+         * #4 悬浮 HUD 的状态源：localStorage（关闭状态 + 拖动位置）
+         * ------------------------------------------------------------------ */
+
+        /** 默认 HUD 状态：未关闭、无存档位置（走角落）。每次返回新对象，避免共享可变值。 */
+        function defaultHudState() {
+            return { closed: false, left: null, top: null };
+        }
+
+        /**
+         * 取存储对象。为什么整个访问都包 try/catch：Safari 隐私模式、站点数据
+         * 被禁时连 `window.localStorage` 这个属性读取本身就会抛 SecurityError。
+         * 取不到就返回 null——上层据此降级为「不记住」，而不是崩掉整个 overlay。
+         * @returns {Storage|null} 可用的存储，或 null
+         */
+        function hudStorage() {
+            try {
+                const storage = window.localStorage;
+                return storage && typeof storage.getItem === "function" ? storage : null;
+            } catch {
+                return null;
+            }
+        }
+
+        /**
+         * 存档 → HUD 状态（外部数据不可信：逐字段校验，坏值一律退回默认）。
+         * @param {unknown} raw 已 JSON.parse 的对象，或任意值
+         * @returns {{closed: boolean, left: number|null, top: number|null}}
+         */
+        function normalizeHudState(raw) {
+            if (raw === null || typeof raw !== "object") return defaultHudState();
+            const left = Number.isFinite(raw.left) ? raw.left : null;
+            const top = Number.isFinite(raw.top) ? raw.top : null;
+            return { closed: raw.closed === true, left, top };
+        }
+
+        /**
+         * 读存档（组件的惰性初值）。JSON 坏掉/写坏/被别的插件占用都按「没存过」
+         * 处理：宁可回到角落显示，也不要因为一段脏字符串白屏。
+         * @returns {{closed: boolean, left: number|null, top: number|null}}
+         */
+        function readHudState() {
+            const storage = hudStorage();
+            if (storage === null) return defaultHudState();
+            try {
+                const raw = storage.getItem(HUD_STATE_KEY);
+                if (typeof raw !== "string" || raw === "") return defaultHudState();
+                return normalizeHudState(JSON.parse(raw));
+            } catch {
+                return defaultHudState();
+            }
+        }
+
+        /**
+         * 写存档。写失败（配额满/隐私模式）只失去「记住」能力，渲染照常——
+         * 这正是验收要求的降级方向：宁可这次不记，也不能让 overlay 崩掉。
+         * @param {{closed: boolean, left: number|null, top: number|null}} state 待存状态
+         */
+        function persistHudState(state) {
+            const storage = hudStorage();
+            if (storage === null) return;
+            try {
+                storage.setItem(
+                    HUD_STATE_KEY,
+                    JSON.stringify({
+                        closed: state.closed === true,
+                        left: Number.isFinite(state.left) ? Math.round(state.left) : null,
+                        top: Number.isFinite(state.top) ? Math.round(state.top) : null,
+                    }),
+                );
+            } catch {
+                /* 见 JSDoc：失败即放弃记忆，不往上抛 */
+            }
+        }
+
+        /* ------------------------------------------------------------------ *
+         * #4 压力配色（只做视觉提示，数值仍来自 API）
+         * ------------------------------------------------------------------ */
+
+        /**
+         * 快照 → 0~1 压力比例（配色分档的输入）。从 pressureWidth 反解而不给快照
+         * 加字段：宽度是 buildReadySnapshot 的唯一定型点，反解保证配色、条宽、
+         * 数值文本永远说的是同一个数；非 ready 相位没有比例（配色走未知档）。
+         * @param {{phase: string, pressureWidth: string|null}} snapshot 渲染快照
+         * @returns {number|null} 0~1 比例，无数据为 null
+         */
+        function pressureRatioOf(snapshot) {
+            if (snapshot.phase !== PHASE_READY || typeof snapshot.pressureWidth !== "string") return null;
+            const percent = Number.parseFloat(snapshot.pressureWidth);
+            if (!Number.isFinite(percent)) return null;
+            return percent / PERCENT_SCALE;
+        }
+
+        /**
+         * 压力 → 档位名（切点即 70%/80% 两条镜像阈值，与刻度线同源）。
+         * @param {{phase: string, pressureWidth: string|null}} snapshot 渲染快照
+         * @returns {string} PRESSURE_TONE_* 之一
+         */
+        function pressureToneOf(snapshot) {
+            const ratio = pressureRatioOf(snapshot);
+            if (ratio === null) return PRESSURE_TONE_UNKNOWN;
+            if (ratio >= PRESSURE_EVICT_RATIO) return PRESSURE_TONE_EVICT;
+            if (ratio >= PRESSURE_REMIND_RATIO) return PRESSURE_TONE_REMIND;
+            return PRESSURE_TONE_CALM;
+        }
+
+        /* ------------------------------------------------------------------ *
+         * #4 拖动：按下 → 移动 → 松开，位置落 localStorage
+         * ------------------------------------------------------------------ */
+
+        /**
+         * 事件族：有 PointerEvent 就用 pointer 一套（鼠标/触控/笔统一），
+         * 否则退回 mouse 一套（老浏览器不认 pointerdown，拖不动）。
+         * @returns {{down: string, move: string, up: string, cancel: string|null}} 事件名
+         */
+        function dragChannel() {
+            if (typeof window !== "undefined" && typeof window.PointerEvent === "function") {
+                return { down: "onPointerDown", move: "pointermove", up: "pointerup", cancel: "pointercancel" };
+            }
+            return { down: "onMouseDown", move: "mousemove", up: "mouseup", cancel: null };
+        }
+
+        /**
+         * 事件 → 指针坐标。pointer/mouse 直接给 clientX/Y；touch 事件坐标在
+         * touches[0] 上。取不到有限数就当没有这个事件（不猜坐标）。
+         * @param {object|null} event 宿主事件
+         * @returns {{x: number, y: number}|null} 坐标
+         */
+        function pointerPointOf(event) {
+            if (event === null || typeof event !== "object") return null;
+            const touch = Array.isArray(event.touches) ? event.touches[0] : null;
+            const source = touch ?? event;
+            const x = Number(source.clientX);
+            const y = Number(source.clientY);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return { x, y };
+        }
+
+        /**
+         * 拖动起点：已拖动过（有存档 left/top）就接着那里拖；首次拖动取元素
+         * 实际屏幕位置（角落定位下 left/top 并不在 state 里）；都取不到退回 0。
+         * @param {{left: number|null, top: number|null}} state 当前 HUD 状态
+         * @param {object|null} event 按下事件
+         * @returns {{left: number, top: number}} 起点（像素，相对视口）
+         */
+        function dragOriginOf(state, event) {
+            if (Number.isFinite(state.left) && Number.isFinite(state.top)) {
+                return { left: state.left, top: state.top };
+            }
+            const target = event?.currentTarget;
+            if (target && typeof target.getBoundingClientRect === "function") {
+                const rect = target.getBoundingClientRect();
+                if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
+                    return { left: rect.left, top: rect.top };
+                }
+            }
+            return { left: 0, top: 0 };
+        }
+
+        /** 像素渲染文本：取整，避免 subpixel 让 left 值抖成 12.000001px。 */
+        function pixelOf(value) {
+            return `${Math.round(value)}px`;
+        }
+
+        /**
+         * HUD 定位样式：拖动过用 left/top（同时清掉 right/bottom，否则 fixed
+         * 下两者会互相拉扯宽度），没拖过回到角落。
+         * @param {{left: number|null, top: number|null}} state HUD 状态
+         * @returns {object} 内联样式
+         */
+        function hudPositionStyleOf(state) {
+            if (Number.isFinite(state.left) && Number.isFinite(state.top)) {
+                return {
+                    ...HUD_BASE_STYLE,
+                    left: pixelOf(state.left),
+                    top: pixelOf(state.top),
+                    right: "auto",
+                    bottom: "auto",
+                };
+            }
+            return { ...HUD_BASE_STYLE, right: OVERLAY_CORNER_OFFSET, bottom: OVERLAY_CORNER_OFFSET };
+        }
+
+        /**
+         * 当前拖动会话。同一时刻只可能有一个（单指针），拖完即清空。
+         * 为什么放在组件外：move/up 必须挂在 document 上（指针拖出盒子后仍在
+         * 元素外），跨事件回调需要同一份会话数据；且组件内不能用 useRef——
+         * 宿主注入的 react 版本未必带它，不赌。
+         * @type {null|{startX: number, startY: number, originLeft: number, originTop: number, left: number, top: number, moved: boolean, apply: Function, commit: Function}}
+         */
+        let dragSession = null;
+
+        /** 监听是否已挂：按会话去重，避免 pointerdown 与 mousedown 双触发时重复挂。 */
+        let dragListenersAttached = false;
+
+        /** 拖动中：只更新渲染，不落盘（每帧写 localStorage 会卡）。 */
+        function moveDrag(event) {
+            if (dragSession === null) return;
+            const point = pointerPointOf(event);
+            if (point === null) return;
+            dragSession.left = dragSession.originLeft + (point.x - dragSession.startX);
+            dragSession.top = dragSession.originTop + (point.y - dragSession.startY);
+            dragSession.moved = true;
+            dragSession.apply({ closed: false, left: dragSession.left, top: dragSession.top });
+        }
+
+        /** 拖动结束：只在真拖动过时落盘（单纯点一下不改变存档）。 */
+        function endDrag() {
+            if (dragSession === null) return;
+            const finished = dragSession;
+            dragSession = null;
+            detachDragListeners();
+            if (!finished.moved) return;
+            finished.commit({ closed: false, left: Math.round(finished.left), top: Math.round(finished.top) });
+        }
+
+        /** 挂 document 监听（拖出盒子仍能收到 move/up，解决「拖到一半丢失」）。 */
+        function attachDragListeners() {
+            if (dragListenersAttached) return;
+            if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+            const channel = dragChannel();
+            document.addEventListener(channel.move, moveDrag);
+            document.addEventListener(channel.up, endDrag);
+            if (channel.cancel !== null) document.addEventListener(channel.cancel, endDrag);
+            dragListenersAttached = true;
+        }
+
+        /** 卸载 document 监听：拖完必须摘掉，否则每次拖动都多积一对监听。 */
+        function detachDragListeners() {
+            if (!dragListenersAttached) return;
+            if (typeof document === "undefined" || typeof document.removeEventListener !== "function") return;
+            const channel = dragChannel();
+            document.removeEventListener(channel.move, moveDrag);
+            document.removeEventListener(channel.up, endDrag);
+            if (channel.cancel !== null) document.removeEventListener(channel.cancel, endDrag);
+            dragListenersAttached = false;
+        }
+
+        /** 阻止事件冒泡：关闭按钮的按下不能顺带把 HUD 拖起来。 */
+        function stopPropagationOf(event) {
+            if (event && typeof event.stopPropagation === "function") event.stopPropagation();
         }
 
         /**
@@ -279,9 +582,11 @@ window.__ModuleLoader__.load({
          * 压力条区块（任务 #3 注入点）：条 + 三刻度线 + 数值文本（三入口共用），
          * 通过 options 控制紧凑程度——overlay 设 compact 隐藏图例并把数值并入
          * 条下行的尾部（方案 §3.3 可视空间小，但条与三线必须保留）。
+         * overlay 再传 valueColor 让数值文字跟着压力档位变色（#4 颜色随压力），
+         * 数值本身仍来自 API，颜色只是同一份数据的视觉表达。
          * 非数据相位不渲染假数字：宽度为 0（无空条误导），数值文本走占位文案。
          * @param {{phase: string, pressureWidth: string|null}} snapshot 渲染快照
-         * @param {{compact: boolean}} options 紧凑开关
+         * @param {{compact: boolean, valueColor?: string}} options 紧凑开关 + 数值色
          * @returns {object} 区块 vnode
          */
         function pressureBarBlockOf(snapshot, options) {
@@ -294,7 +599,10 @@ window.__ModuleLoader__.load({
             const markNodes = PRESSURE_MARKS.map(renderPressureMark);
             const valueNode = h(
                 "span",
-                { key: "pressure-value", style: { marginLeft: options.compact ? "auto" : undefined } },
+                {
+                    key: "pressure-value",
+                    style: { marginLeft: options.compact ? "auto" : undefined, color: options.valueColor },
+                },
                 valueText,
             );
 
@@ -318,29 +626,134 @@ window.__ModuleLoader__.load({
         }
 
         /**
-         * 三入口共用组件：接收 surface prop 分支渲染。
+         * 状态文本 + 压力条（三入口共用）：入口之间只差外围（标题/图例/HUD 壳），
+         * 数据区永远同一份实现，避免三个入口各写一遍渲染分支。
+         * @param {{phase: string}} snapshot 渲染快照
+         * @param {{compact: boolean, valueColor?: string}} options 紧凑开关 + 数值色
+         * @returns {object[]} 状态行与压力条 vnodes
+         */
+        function panelBodyOf(snapshot, options) {
+            const isCompact = options.compact === true;
+            return [
+                h(
+                    "div",
+                    { key: "status-line", style: isCompact ? HUD_STATUS_STYLE : undefined },
+                    statusLineOf(snapshot),
+                ),
+                pressureBarBlockOf(snapshot, options),
+            ];
+        }
+
+        /**
+         * 全尺寸面板（settings / sidebar）：标题 + 状态文本 + 带图例的压力条。
          * 注意：不透传 ownerProps——合成链末尾 ownerProps 会覆盖同名键
          * （close/size 等宿主常用名），干脆不接任何宿主 prop。
-         * overlay 走紧凑分支（隐藏标题/图例，条+三线保留，方案 §3.3），
-         * settings/sidebar 全尺寸；非 ready 相位不出假数字（数值文本各自降级）。
+         * 非 ready 相位不出假数字（数值文本各自降级）。
          */
         function StatusPanel(props) {
             const snapshot = useStatusSnapshot();
-            const isCompact = props.surface === SURFACE_OVERLAY;
             return h(
                 "div",
-                {
-                    "data-surface": props.surface,
-                    style: styleForSurface(props.surface),
-                },
-                ...(isCompact ? [] : [h("div", { key: "panel-title" }, PANEL_TITLE)]),
-                h("div", { key: "status-line" }, statusLineOf(snapshot)),
-                pressureBarBlockOf(snapshot, { compact: isCompact }),
+                { "data-surface": props.surface },
+                h("div", { key: "panel-title" }, PANEL_TITLE),
+                ...panelBodyOf(snapshot, { compact: false }),
             );
         }
 
-        /** 生成绑定到某个 surface 的组件（包装层不透传 ownerProps，见 StatusPanel 注释）。 */
+        /**
+         * 悬浮 HUD（任务 #4，方案 §3.3）：角落常驻 + 可拖动 + 颜色随压力 + 可关闭。
+         * 关闭状态与拖动位置都存在 localStorage（HUD_STATE_KEY）：
+         *   - 启动时按存档决定「渲不渲染」「从哪开始」，这就是「关闭后重启不再出现」
+         *     的渲染侧全部逻辑（宿主重启=重新加载本模块=重读存档）；
+         *   - 读写失败一律降级为「不记住」，绝不让 overlay 崩掉。
+         * 关闭后返回 null：槽位仍注册着，但不出任何 DOM。
+         */
+        function OverlayHud() {
+            const snapshot = useStatusSnapshot();
+            const [hudState, setHudState] = React.useState(readHudState);
+            const state = normalizeHudState(hudState);
+            if (state.closed) return null;
+
+            const toneKey = pressureToneOf(snapshot);
+            const tone = PRESSURE_TONES[toneKey];
+
+            /** 关闭：落盘 + 重渲（写入放在前面，重渲出错也不影响「下次不出现」）。 */
+            function closeHud() {
+                const next = { closed: true, left: state.left, top: state.top };
+                persistHudState(next);
+                setHudState(next);
+            }
+
+            /** 按下：只记起点并挂 document 监听，位置变化交给 moveDrag。 */
+            function beginDrag(event) {
+                const point = pointerPointOf(event);
+                if (point === null) return;
+                const origin = dragOriginOf(state, event);
+                dragSession = {
+                    startX: point.x,
+                    startY: point.y,
+                    originLeft: origin.left,
+                    originTop: origin.top,
+                    left: origin.left,
+                    top: origin.top,
+                    moved: false,
+                    apply: setHudState,
+                    commit(next) {
+                        persistHudState(next);
+                        setHudState(next);
+                    },
+                };
+                attachDragListeners();
+                // 阻止拖拽时选中文本 / 触发浏览器原生拖影
+                if (typeof event.preventDefault === "function") event.preventDefault();
+            }
+
+            return h(
+                "div",
+                {
+                    "data-surface": SURFACE_OVERLAY,
+                    "data-testid": "overlay-hud",
+                    "data-tone": toneKey,
+                    style: hudPositionStyleOf(state),
+                    [dragChannel().down]: beginDrag,
+                },
+                h("span", {
+                    key: "tone-dot",
+                    "data-testid": "overlay-status-dot",
+                    "data-tone": toneKey,
+                    title: `压力${tone.label}`,
+                    style: { ...HUD_DOT_STYLE, backgroundColor: tone.color },
+                }),
+                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color }),
+                h(
+                    "button",
+                    {
+                        key: "close",
+                        type: "button",
+                        "data-testid": "overlay-close",
+                        title: "关闭悬浮窗",
+                        style: HUD_CLOSE_STYLE,
+                        onClick: closeHud,
+                        // 按下若冒泡到 HUD 就会开始拖动，这里截断
+                        onMouseDown: stopPropagationOf,
+                        onPointerDown: stopPropagationOf,
+                    },
+                    "×",
+                ),
+            );
+        }
+
+        /**
+         * 生成绑定到某个 surface 的组件（包装层不透传 ownerProps，见 StatusPanel 注释）。
+         * overlay 单独走 HUD 壳：它要自己的关闭/拖动状态，塞进全尺寸面板会把两套
+         * 状态搅在一起；数据源仍是同一个 useStatusSnapshot（一个组件三入口）。
+         */
         function makeSurfaceComponent(surface) {
+            if (surface === SURFACE_OVERLAY) {
+                return function SurfacePanel() {
+                    return h(OverlayHud);
+                };
+            }
             return function SurfacePanel() {
                 return h(StatusPanel, { surface });
             };
