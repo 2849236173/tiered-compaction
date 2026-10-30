@@ -189,6 +189,8 @@ const FALLBACK_CONTEXT_WINDOW = 128_000;
  * 为什么独立于 collectHealth：纯函数收不到「零值」读数时会把窗口 0
  * 记成 problems（那是给日志看的），而 API 的 idle 态是合法状态，
  * 不该被渲染成「数据可疑」。
+ * l4Summaries（任务 #6）：有损摘要次数；idle 恒为 0，与 ready 形状
+ * 字段对齐——有会话/无会话两种载荷形状必须一致。
  */
 const IDLE_LAYERS = Object.freeze({
     l12Processed: 0,
@@ -199,6 +201,7 @@ const IDLE_LAYERS = Object.freeze({
     l3Evicted: 0,
     spillCount: 0,
     lineageEntries: 0,
+    l4Summaries: 0,
 });
 
 /**
@@ -622,6 +625,9 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 全部内存计数，重启自然归零——API 的 since 字段就来自这里。
         this.startedAt = Date.now();
         this.lastCompaction = null;
+        // 任务 #6：本次运行的有损摘要次数。与 lastCompaction 同点自增，
+        // 只有真正提交的摘要事务才计数；纯内存值，重启随进程归零。
+        this.summaryCount = 0;
         this.latestSession = null;
         if (config.auto ?? true) this._registerAutomaticCompaction();
 
@@ -783,10 +789,13 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 currentTokens: current,
                 config: this.config,
             });
-            // 只补 API 独有的三个字段：archiveDir/since/lastCompaction（与
-            // 方案 §五 任务 #1 的字段清单对齐），其余全用健康快照原值
+            // 只补 API 独有的字段：archiveDir/since/lastCompaction（与
+            // 方案 §五 任务 #1 的字段清单对齐），其余全用健康快照原值。
+            // l4Summaries（任务 #6）：健康快照不产摘要数，它记在服务自身，
+            // 与 lastCompaction 同属「单点记账」——所以只能在这里补。
             return {
                 ...health,
+                layers: { ...health.layers, l4Summaries: this.summaryCount ?? 0 },
                 lastCompaction: this.lastCompaction,
                 archiveDir: this.config?.archiveDir ?? null,
                 since: this.startedAt,
@@ -1445,6 +1454,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 startSeq: startEvent.seq,
                 endSeq: endEvent.seq,
             };
+            // 任务 #6：摘要事务走到提交才算一次——失败/中途取消不虚增计数
+            this.summaryCount = (this.summaryCount ?? 0) + 1;
             return {
                 compactionId,
                 startSeq: startEvent.seq,
