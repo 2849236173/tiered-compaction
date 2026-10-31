@@ -142,8 +142,12 @@ if ($Apply) {
         } else {
             $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?(\r?\n(?=- id: (?!preset-standard\b))|\r?\n?\z)'
         }
+        # 「是否命中」看正则本身，不看替换前后是否相同：内容已是最新时替换结果等于原文，属正常幂等
+        if (-not [System.Text.RegularExpressions.Regex]::IsMatch($patchText, $pattern)) {
+            Write-Error "替换未命中：D17 开始标记存在但边界匹配失败，中止写回（profile 未被改动）。"
+        }
         $replaced = [System.Text.RegularExpressions.Regex]::Replace($patchText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $newBlock }, 1)
-        if ($replaced -eq $patchText) {
+        if ($false) {
             Write-Error "替换未命中：D17 开始标记存在但边界匹配失败，中止写回（profile 未被改动）。"
         }
         $patchText = $replaced
