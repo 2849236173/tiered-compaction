@@ -82,3 +82,38 @@ const { restoreReleasedV4Artifact } = await import(
 - **先备份**。脚本只做加法（补字段），不改已有内容，但仍建议留备份。
 - 这个脚本只修 `turn` 缺失这一种损坏。如果会话是别的原因损坏（例如多帧结构被破坏），它不会修，会在自校验阶段报错退出。
 - 修复期间请关闭 DSH，避免写入冲突。
+
+---
+
+# 另外两种损坏（0.4.0-beta.4 起提供脚本）
+
+先用宿主自己的校验器确认是哪一种：
+
+```powershell
+node docs\修复\host-validate.mjs "<会话目录>\session.v4.jsonl.zstd"
+```
+
+输出 `HOST_VALIDATE OK` 表示宿主能正常加载；输出 `FAIL` 时看后面的错误信息。
+
+## `compaction/prune shadowedSeqs do not name an exact current surface span`
+
+- **原因**：0.4.0-beta.3 之前多个 preset 挂载时 observer 会重复处理同一条工具结果，写出「prune(X) → 替换 X → 又一次 prune(X)」。第二条 prune 指向已经不在表面上的 X。
+- **修法**：`fix-duplicate-prune.mjs` 删掉第二条重复 prune，后面事件的 seq 重新压实，并改写所有 seq 引用。它只认这一种模式，遇到不认识的情况会直接退出、不写文件。
+
+```powershell
+node docs\修复\fix-duplicate-prune.mjs "<会话目录>\session.v4.jsonl.zstd" "$env:TEMP\fixed.zstd"           # 演练
+node docs\修复\fix-duplicate-prune.mjs "<会话目录>\session.v4.jsonl.zstd" "$env:TEMP\fixed.zstd" --apply   # 写出
+node docs\修复\host-validate.mjs "$env:TEMP\fixed.zstd"                                                   # 必须 OK 再覆盖
+```
+
+## `compaction/summary has no matching compaction/start`
+
+- **原因**：0.4.0-beta.3 及之前手动 `/compact` 写的 `compaction/summary` 漏了 `sourceCommandId`。
+- **修法**：`fix-summary-cmd.mjs` 从配对的 `compaction/start` 把它补回来，其余行逐字不动。
+
+```powershell
+node docs\修复\fix-summary-cmd.mjs "<会话目录>\session.v4.jsonl.zstd" "$env:TEMP\fixed.zstd"
+node docs\修复\host-validate.mjs "$env:TEMP\fixed.zstd"
+```
+
+两种都一样：**先备份、关掉 DSH、校验 OK 后再覆盖**。

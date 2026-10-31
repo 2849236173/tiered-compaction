@@ -196,6 +196,8 @@ test("A12① /compact 路径：compactNow 走真实事务，事件序列与返�
     const endEv = session.events.find((e) => e.type === "compaction/end");
     assert.equal(startEv.data.sourceCommandId, "cmd-1");
     assert.equal(endEv.data.sourceCommandId, "cmd-1");
+    // 宿主 compactionOwner 校验：summary 也必须带同一个 sourceCommandId，否则重开会话报 corrupt
+    assert.equal(summaryEv.data.sourceCommandId, "cmd-1");
     assert.equal(replaceEv.data.source.sourceCommandId, "cmd-1");
 });
 

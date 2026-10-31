@@ -6,7 +6,29 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.4] - 2026-10-31
+
+**Release tier: beta / preview (not fully tested yet)** — automated tests pass; the automatic compaction hook fix has a regression test against real cordis proxies, but the real desktop environment and the new UI are not yet verified. **beta.3 users should upgrade.**
+
+### Fixed (critical)
+
+- **Automatic compaction was completely broken in beta.3**: the new multi-realm ownership check compared the result of the host's `agentPresets.serviceFor` with `this` using `===`, but calling through the cordis service proxy wraps the result in another proxy, so the comparison never matched. Every instance decided the session was not its own, so layer 3/4 pressure compaction and overflow recovery never ran; pressure reached 98% without compaction and the turn eventually failed with `CONTEXT_WINDOW_EXCEEDED`. Proxies are now unwrapped before comparison. Added a regression test using a real cordis Service registry (fails before the fix, passes after). Layers 1-2 and manual `/compact` were not affected.
+- **Sessions failed to reopen after a manual `/compact`**: the `compaction/summary` event omitted `sourceCommandId`; host restore validation requires it to match `compaction/start`, otherwise it reports `compaction/summary has no matching compaction/start`. Only manual compactions carrying a command ID were affected. Existing sessions need the repair script to backfill the field.
+
+### Changed (UI data semantics)
+
+- Summary count, last summary and the "since HH:mm" mark are now **per session**; process totals are reported separately.
+- Savings are reported per layer in UTF-8 bytes (fold and spill separately), with estimated token savings for eviction and summaries. The number previously shown under the spill row was actually the combined L1+L2 character count; corrected.
+- The status API adds `autoCheckedAt`, so the UI can tell whether automatic compaction is actually running and suggest a manual `/compact` when pressure is high but no check has run recently.
+
+### Added (UI)
+
+- Floating HUD: recoverable after closing (corner pill or settings page), actual usage (used / window tokens), four-layer activity row, collapsible capsule, drop toast and animation after a compaction (respects reduced-motion).
+- Settings page: total savings, last summary details, a "show HUD" control.
+
 ## [0.4.0-beta.3] - 2026-10-31
+
+> ⚠️ **Known critical issue: automatic compaction does not trigger. Upgrade to 0.4.0-beta.4.**
 
 **Release tier: beta / preview (not fully tested yet)** — automated tests pass, but the real desktop environment and real LLM summarization path have not been fully verified. Intended for users willing to try it and report issues; choose a stable release if you need maximum confidence.
 

@@ -18,8 +18,22 @@ const SHARED_KEY = Symbol.for("dsh-tiered-compaction.shared-stats");
 /** 会话表上限：超出时淘汰最久未触碰的会话条目。 */
 export const MAX_TRACKED_SESSIONS = 256;
 
+/**
+ * 每会话计数。beta4 口径：
+ * - bytesSaved：第 1-2 层合计节省的**字符数**（旧字段，保留兼容）；
+ * - foldBytesSaved / spillBytesSaved：按层拆开、按 UTF-8 **字节**计；
+ * - l12TokensSaved / evictTokensSaved：按观察者 estimateTokens 估算的 token 差；
+ * - summaries / summaryTokensSaved：本会话已提交的第 4 层摘要次数与其遮蔽 token；
+ * - firstSeenAt：本会话在本进程里第一次被看到的时刻（界面「自 HH:mm 起」）。
+ */
 function zeroCounts() {
-    return { processed: 0, bytesSaved: 0, skipped: 0, failed: 0, evicted: 0, spilled: 0 };
+    return {
+        processed: 0, bytesSaved: 0, skipped: 0, failed: 0, evicted: 0, spilled: 0,
+        folded: 0, foldBytesSaved: 0, spillBytesSaved: 0,
+        l12TokensSaved: 0, evictTokensSaved: 0,
+        summaries: 0, summaryTokensSaved: 0,
+        firstSeenAt: Date.now(),
+    };
 }
 
 function freshTable() {
@@ -140,10 +154,49 @@ export function sessionById(id) {
  * 口径与旧实例字段一致：l4Summaries 是「本次运行」全进程的摘要次数。
  * @param {object} record lastCompaction 形状
  */
-export function recordCompaction(record) {
+export function recordCompaction(record, session) {
     const t = table();
     t.lastCompaction = record;
     t.summaryCount += 1;
+    // beta4：同时记到会话条目，界面「本会话摘要次数 / 摘要节省」按会话口径显示
+    const entry = session === undefined ? undefined : entryFor(session);
+    if (entry !== undefined) {
+        entry.counts.summaries += 1;
+        entry.counts.summaryTokensSaved += Math.max(0, Number(record?.shadowedTokenCount) || 0);
+        entry.lastCompaction = record;
+    }
+}
+
+/**
+ * 记下自动压缩检查（pre-step / overflow）进入了本会话。
+ * @param {object} session
+ * @param {string} trigger
+ */
+export function markAutoCheck(session, trigger) {
+    if (trigger !== "pressure" && trigger !== "context-overflow") return;
+    const entry = entryFor(session);
+    if (entry !== undefined) entry.autoCheck = { at: Date.now(), trigger };
+}
+
+/**
+ * @param {object} session
+ * @returns {{at: number, trigger: string}|null}
+ */
+export function autoCheckOf(session) {
+    const id = session?.id;
+    const entry = typeof id === "string" ? table().sessions.get(id) : undefined;
+    return entry !== undefined && entry.ref.deref() === session ? entry.autoCheck ?? null : null;
+}
+
+/**
+ * 某会话最近一次已提交的摘要（beta4：界面按会话显示，不再串到别的会话）。
+ * @param {object} session
+ * @returns {object|null}
+ */
+export function lastCompactionFor(session) {
+    const id = session?.id;
+    const entry = typeof id === "string" ? table().sessions.get(id) : undefined;
+    return entry !== undefined && entry.ref.deref() === session ? entry.lastCompaction ?? null : null;
 }
 
 /** @returns {number} 全进程本次运行的第 4 层摘要总数 */

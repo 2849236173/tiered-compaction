@@ -212,6 +212,75 @@ test("D31-4b agentPresets.serviceFor 给出的实现优先于 isolate 键", asyn
     assert.equal(s._ownsAgent(agent), true);
 });
 
+/**
+ * beta4 回归（98.3% 不压缩）：宿主的 agentPresets 是真正的 cordis Service，
+ * `this.ctx.get("agentPresets")` 拿到的是追踪代理，经代理调用 serviceFor 的返回值
+ * 会被再包一层代理。D31-4b 用的是普通对象注册表，绕开了这条路径，没拦住回归。
+ * 这里用真实 Service + 真实 ctx.get，并按宿主 serviceForMount 的口径返回 store 原值。
+ */
+test("D31-4c 真实 agentPresets Service（经 cordis 代理）：所属 realm 实例判定为本实例", async (t) => {
+    const { root, archiveDir } = await makeRoot(t);
+    const standard = root.isolate("compaction");
+    const ptc = root.isolate("compaction");
+    await root.plugin(tieredPlugin, { archiveDir });
+    await standard.plugin(tieredPlugin, { archiveDir, scopeId: "standard" });
+    await ptc.plugin(tieredPlugin, { archiveDir, scopeId: "ptc-tc" });
+    const rawOf = (c) => root.reflect.store[c[Context.isolate].compaction].value;
+    const owner = rawOf(standard);
+
+    // 真实 preset：agent ctx 不在 compaction 组内，isolate 键与 root 相同
+    const agent = { ctx: root.extend({}), session: { id: "real-preset-session" } };
+    class AgentPresetsStub extends Service {
+        constructor(ctx) { super(ctx, "agentPresets"); }
+        serviceFor(a, name) { return a === agent && name === "compaction" ? owner : undefined; }
+    }
+    await root.plugin(AgentPresetsStub);
+    await tick();
+
+    const calls = [];
+    const proto = TieredCompactionEngineService.prototype;
+    const original = proto.compactIfNeeded;
+    proto.compactIfNeeded = async function (a) {
+        calls.push({ who: this.config.scopeId ?? "root", session: a.session.id });
+        return null;
+    };
+    t.after(() => { proto.compactIfNeeded = original; });
+
+    const signal = new AbortController().signal;
+    await root.emit("agent/pre-step", { agent, signal, step: 1, messages: [] }, () => {});
+    await tick();
+    assert.deepEqual(calls, [{ who: "standard", session: "real-preset-session" }],
+        "恰好所属 realm（standard）的实例进入压缩；修复前四个实例全部跳过");
+    assert.equal(standard.get("compaction")._ownsAgent(agent), true);
+    assert.equal(root.get("compaction")._ownsAgent(agent), false);
+    assert.equal(ptc.get("compaction")._ownsAgent(agent), false);
+});
+
+test("D31-4d beta4 口径：摘要按会话记账，状态载荷带自动检查时间", async (t) => {
+    const { root, archiveDir } = await makeRoot(t);
+    await root.plugin(tieredPlugin, { archiveDir });
+    const svc = root.get("compaction");
+    const { recordCompaction, markAutoCheck, touchSession } = await import("../src/shared-stats.js");
+    const a = { id: "sess-a", surface: { nodes: [] }, eventAt: () => undefined };
+    const b = { id: "sess-b", surface: { nodes: [] }, eventAt: () => undefined };
+    touchSession(a);
+    touchSession(b);
+    recordCompaction({ compactionId: "x", at: 1, shadowedTokenCount: 5000 }, a);
+    markAutoCheck(a, "pressure");
+    markAutoCheck(b, "manual");
+    const pa = svc._statusPayload("sess-a");
+    const pb = svc._statusPayload("sess-b");
+    assert.equal(pa.layers.l4Summaries, 1, "A 本会话 1 次");
+    assert.equal(pa.layers.l4TokensSaved, 5000);
+    assert.equal(pa.lastCompaction.compactionId, "x");
+    assert.equal(typeof pa.autoCheckedAt, "number", "进过自动检查的会话带时间");
+    assert.equal(pb.layers.l4Summaries, 0, "B 不被 A 的摘要串号");
+    assert.equal(pb.layers.l4ProcessSummaries, 1, "进程总数另给");
+    assert.equal(pb.lastCompaction, null);
+    assert.equal(pb.autoCheckedAt, null, "非自动触发不算自动检查");
+    assert.ok(pa.since >= pa.processSince, "since 是会话首次被看到的时刻");
+});
+
 test("D31-5 只有 preset 实例（无 root）：仍只有一份观察者", async (t) => {
     const { root, archiveDir } = await makeRoot(t);
     const standard = root.isolate("compaction");

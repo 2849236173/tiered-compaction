@@ -48,7 +48,10 @@ import { mountStatusRoute } from "./status-route.js";
 // 观察者与状态路由全进程各一份，持有者未必是产生这些数的那个实例。
 import {
     activeObserver,
+    autoCheckOf,
     lastCompaction as sharedLastCompaction,
+    lastCompactionFor,
+    markAutoCheck,
     latestSession as sharedLatestSession,
     layerStatsSnapshot,
     recordCompaction,
@@ -58,6 +61,26 @@ import {
     summaryCount as sharedSummaryCount,
     touchSession,
 } from "./shared-stats.js";
+
+/** cordis 追踪代理的原始对象键（cordis createTraceable：get(symbols.original) 返回 target）。 */
+const CORDIS_ORIGINAL = Symbol.for("cordis.original");
+
+/**
+ * 剥掉 cordis 追踪代理，取回服务原始实例；非代理原样返回。
+ * 代理可能套多层（经代理调用的方法返回值会再包一层），循环剥到底。
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+export function unwrapTraceable(value) {
+    let current = value;
+    for (let depth = 0; depth < 8; depth += 1) {
+        if (current === null || (typeof current !== "object" && typeof current !== "function")) return current;
+        const inner = current[CORDIS_ORIGINAL];
+        if (inner === undefined || inner === current) return current;
+        current = inner;
+    }
+    return current;
+}
 
 /** 不持观察者的实例读第 1-3 层计数用：与观察者同源（共享表），形状同 statsFor。 */
 const SHARED_LAYER_STATS = Object.freeze({ statsFor: layerStatsSnapshot });
@@ -227,6 +250,14 @@ const IDLE_LAYERS = Object.freeze({
     spillCount: 0,
     lineageEntries: 0,
     l4Summaries: 0,
+    l1Folded: 0,
+    l1BytesSaved: 0,
+    l2BytesSaved: 0,
+    l12TokensSaved: 0,
+    l3TokensSaved: 0,
+    l4SessionSummaries: 0,
+    l4TokensSaved: 0,
+    l4ProcessSummaries: 0,
 });
 
 /**
@@ -903,13 +934,28 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 方案 §五 任务 #1 的字段清单对齐），其余全用健康快照原值。
         // l4Summaries（任务 #6）：健康快照不产摘要数，它记在服务自身，
         // 与 lastCompaction 同属「单点记账」——所以只能在这里补。
+        // beta4 口径：l4Summaries / lastCompaction / since 都按**本会话**；
+        // 全进程摘要数另给 l4ProcessSummaries，进程启动时刻另给 processSince。
+        const { sessionSince, ...rest } = health;
+        const autoCheck = autoCheckOf(session);
+        // 无字符串 id 的会话（单测桩）不入会话表：退回进程级口径
+        const tracked = typeof session.id === "string" && session.id.length > 0;
         return {
-            ...health,
-            layers: { ...health.layers, l4Summaries: this.summaryCount },
-            lastCompaction: this.lastCompaction,
+            ...rest,
+            layers: {
+                ...health.layers,
+                l4Summaries: tracked ? health.layers.l4SessionSummaries : this.summaryCount,
+                l4ProcessSummaries: this.summaryCount,
+            },
+            lastCompaction: tracked ? lastCompactionFor(session) : this.lastCompaction,
             // S8（beta3 审计）：状态 API 不回传绝对路径（泄露本机用户名/目录结构），只给布尔
             hasArchiveDir: typeof this.config?.archiveDir === "string" && this.config.archiveDir.length > 0,
-            since: this.startedAt,
+            since: sessionSince ?? this.startedAt,
+            processSince: this.startedAt,
+            // 自动压缩是否真的在本会话跑过：pre-step 钩子进入 compactIfNeeded 的最近时刻。
+            // beta3 回归就是这里长期为 null 而界面照常显示，加上它界面才能说真话。
+            autoCheckedAt: autoCheck?.at ?? null,
+            autoEnabled: this.config?.auto ?? true,
         };
     }
 
@@ -1027,6 +1073,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
         if (!session) return null;
         // 任务 #1：自动路径（pressure/overflow）记录活跃会话，状态 API 据此取读数
         this._touchSession(session);
+        // beta4：自动检查留痕，界面据此显示「自动压缩在工作」，而不是靠假设
+        markAutoCheck(session, trigger);
         // C6：窗口未知时 pressure 路径整体跳过（含 70%/80% 层），每会话只告警一次。
         // overflow 是 provider 已确认的溢出，不依赖窗口读数，照常处理。
         if (trigger !== "context-overflow" && !hasKnownContextWindow(session)) {
@@ -1338,7 +1386,13 @@ export class TieredCompactionEngineService extends CompactionEngine {
             } catch {
                 presetCompaction = undefined;
             }
-            if (presetCompaction !== undefined && presetCompaction !== null) return presetCompaction === this;
+            // beta4 修复：registry 是 ctx.get 取到的追踪代理，经它调用 serviceFor 时
+            // 返回值会被 getTraceable 再包一层代理（cordis createShadowMethod），
+            // 直接 `=== this` 恒为 false → 四个实例全判「不归我」，自动压缩与溢出恢复全灭。
+            // 比较前两边都剥回原始对象。
+            if (presetCompaction !== undefined && presetCompaction !== null) {
+                return unwrapTraceable(presetCompaction) === unwrapTraceable(this);
+            }
         }
         const theirs = agentCtx[Context.isolate];
         const mine = this.ctx?.[Context.isolate];
@@ -1700,6 +1754,9 @@ export class TieredCompactionEngineService extends CompactionEngine {
             }
             const summaryEvent = session.append("compaction/summary", {
                 compactionId,
+                // 宿主恢复校验（compactionOwner）要求 summary 与 start 的 sourceCommandId 一致；
+                // 漏掉会让 /compact 后的会话重开时报 "has no matching compaction/start"（对齐 basic）
+                ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
                 summary,
                 shadowedRange: { start, end },
                 shadowedSeqs: [...shadowedSeqs],
@@ -1723,13 +1780,17 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // 只在这里写 lastCompaction，状态 API 直接读，无需二次聚合）
             // 任务 #6：摘要事务走到提交才算一次——失败/中途取消不虚增计数。
             // lastCompaction 与 summaryCount 同点记账，写进程级共享表。
+            // beta4：summaryTokens 让界面算净节省（遮蔽 − 摘要本身）
             recordCompaction({
                 compactionId,
                 at: Date.now(),
                 shadowedTokenCount: estimate,
+                summaryTokenCount: framedEstimate,
+                shadowedNodes: shadowedSeqs.length,
+                trigger: sourceCommandId === undefined ? "auto" : "manual",
                 startSeq: startEvent.seq,
                 endSeq: endEvent.seq,
-            });
+            }, session);
             return {
                 compactionId,
                 startSeq: startEvent.seq,

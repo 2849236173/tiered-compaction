@@ -37,7 +37,7 @@ const STRINGS = Object.freeze({
         unavailable: "数据不可用",
         compacting: "压缩中",
         windowPrefix: "窗口",
-        sinceMark: "自 {time} 起",
+        sinceMark: "本会话自 {time} 起统计",
         sessionPrefix: "本次会话：",
         sessionPrefixWithSince: "本次会话（{since}）：",
         missingValue: "—",
@@ -62,6 +62,27 @@ const STRINGS = Object.freeze({
         toneUnknown: "未知",
         pressurePrefix: "压力",
         hudCloseTitle: "关闭悬浮窗",
+        combinedCharsSaved: "L1+L2 合计（字符）省 ~{value}",
+        tokensApprox: "≈ {value} tokens",
+        processSummaries: "全进程 {count}",
+        sessionScope: "本会话",
+        autoNotRunningShort: "自动压缩未运行 · /compact",
+        totalSavedTitle: "总节省",
+        totalSavedValue: "≈ {value} tokens",
+        totalSavedOfWindow: "相当于窗口的 {percent}",
+        autoNotRunning: "自动压缩未运行，可手动执行 /compact",
+        autoCheckedAgo: "自动压缩：{seconds} 秒前检查",
+        lastCompaction: "最近一次摘要：{time}，{trigger}，遮蔽 {nodes} 个节点 ≈ {shadowed} tokens → {summary} tokens",
+        triggerAuto: "自动",
+        triggerManual: "手动",
+        usageTokens: "{current} / {window} tokens",
+        hudShow: "显示悬浮窗",
+        hudHide: "隐藏悬浮窗",
+        hudRestoreTitle: "恢复悬浮窗",
+        hudCollapseTitle: "收起悬浮窗",
+        hudExpandTitle: "展开悬浮窗",
+        compactedToast: "已压缩：{from} → {to}",
+        compactedToastSaved: "已压缩：{from} → {to}，节省 ≈ {saved} tokens",
     }),
     en: Object.freeze({
         panelTitle: "tiered-compaction",
@@ -70,7 +91,7 @@ const STRINGS = Object.freeze({
         unavailable: "Data unavailable",
         compacting: "Compacting",
         windowPrefix: "Window",
-        sinceMark: "since {time}",
+        sinceMark: "this session, counted since {time}",
         sessionPrefix: "This session:",
         sessionPrefixWithSince: "This session (since {since}):",
         missingValue: "—",
@@ -95,6 +116,27 @@ const STRINGS = Object.freeze({
         toneUnknown: "Unknown",
         pressurePrefix: "Pressure",
         hudCloseTitle: "Close HUD",
+        combinedCharsSaved: "L1+L2 combined (chars) ~{value} saved",
+        tokensApprox: "≈ {value} tokens",
+        processSummaries: "process total {count}",
+        sessionScope: "This session",
+        autoNotRunningShort: "Auto compaction idle · /compact",
+        totalSavedTitle: "Total saved",
+        totalSavedValue: "≈ {value} tokens",
+        totalSavedOfWindow: "{percent} of the window",
+        autoNotRunning: "Auto compaction is not running; run /compact manually",
+        autoCheckedAgo: "Auto compaction: checked {seconds}s ago",
+        lastCompaction: "Last summary: {time}, {trigger}, shadowed {nodes} nodes ≈ {shadowed} tokens → {summary} tokens",
+        triggerAuto: "auto",
+        triggerManual: "manual",
+        usageTokens: "{current} / {window} tokens",
+        hudShow: "Show HUD",
+        hudHide: "Hide HUD",
+        hudRestoreTitle: "Restore HUD",
+        hudCollapseTitle: "Collapse HUD",
+        hudExpandTitle: "Expand HUD",
+        compactedToast: "Compacted: {from} → {to}",
+        compactedToastSaved: "Compacted: {from} → {to}, saved ≈ {saved} tokens",
     }),
 });
 
@@ -300,8 +342,13 @@ const LOADING_SNAPSHOT = Object.freeze({
     pressure: null,
     pressureWidth: null,
     window: null,
+    currentTokens: null,
     layers: null,
     sinceText: null,
+    autoCheckKnown: false,
+    autoCheckedAt: null,
+    autoEnabled: null,
+    lastCompaction: null,
 });
 const UNAVAILABLE_SNAPSHOT = Object.freeze({
     phase: PHASE_UNAVAILABLE,
@@ -309,8 +356,13 @@ const UNAVAILABLE_SNAPSHOT = Object.freeze({
     pressure: null,
     pressureWidth: null,
     window: null,
+    currentTokens: null,
     layers: null,
     sinceText: null,
+    autoCheckKnown: false,
+    autoCheckedAt: null,
+    autoEnabled: null,
+    lastCompaction: null,
 });
 
 /**
@@ -353,6 +405,44 @@ const HUD_STATUS_STYLE = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
 };
+
+/**
+ * 关闭后的恢复胶囊：固定在默认角落（不跟拖动位置走——HUD 已关，存档位置留给
+ * 恢复后的 HUD 用；胶囊永远在同一个可预期的地方出现）。
+ */
+const HUD_PILL_STYLE = {
+    position: "fixed",
+    zIndex: OVERLAY_Z_INDEX,
+    right: OVERLAY_CORNER_OFFSET,
+    bottom: OVERLAY_SAFE_BOTTOM,
+};
+
+/** 收起态胶囊：沿用 HUD 定位，只把盒子缩成一颗胶囊。 */
+const HUD_CAPSULE_OVERRIDE_STYLE = {
+    width: "auto",
+    padding: "0",
+    borderRadius: "999px",
+    cursor: "default",
+};
+
+/**
+ * beta4 时序参数：
+ *   - 自动压缩检查超过 120 秒没跑、且压力 ≥ 驱逐线 → 判「自动压缩未运行」；
+ *   - 相邻两次同会话快照压力下降 ≥ 10 个百分点 → 判「刚压缩过」，提示 4 秒；
+ *   - 四层计数上涨时芯片高亮 1.2 秒（CSS 动画时长同值）。
+ */
+const AUTO_CHECK_STALE_MS = 120000;
+const PRESSURE_DROP_TRIGGER_BP = 1000;
+const COMPACTED_TOAST_MS = 4000;
+const CHIP_BUMP_MS = 1200;
+
+/** HUD 四层芯片：key → 显示名 + 悬停全称（STRINGS key）。数组顺序即 DOM 顺序。 */
+const HUD_CHIPS = [
+    { key: "l1", label: "L1", titleKey: "foldShort" },
+    { key: "l2", label: "L2", titleKey: "spillShort" },
+    { key: "l3", label: "L3", titleKey: "evictShort" },
+    { key: "l4", label: "L4", titleKey: "summaryShort" },
+];
 
 /** HUD 拖动边距和估算尺寸：实际宽度由 CSS 限制，足以做安全边界校正。 */
 const HUD_EDGE_GAP = 12;
@@ -438,6 +528,28 @@ const UI_CSS = `
 .dsh-tiered-compaction__hud:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 2px; }
 .dsh-tiered-compaction__hud button:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 1px; }
 .dsh-tiered-compaction__hud .dsh-tiered-compaction__legend { margin-top: 3px; }
+.dsh-tiered-compaction__hud-btn { flex: 0 0 auto; padding: 2px 5px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
+.dsh-tiered-compaction__hud-btn:hover { background: var(--dsw-alias-fill-tertiary, rgba(31, 35, 40, .08)); }
+.dsh-tiered-compaction__hud-usage { margin-top: 4px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; font-variant-numeric: tabular-nums; }
+.dsh-tiered-compaction__chips { display: flex; gap: 4px; margin-top: 7px; }
+.dsh-tiered-compaction__chip { flex: 1 1 0; min-width: 0; padding: 2px 4px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 6px; color: var(--dsw-alias-label-secondary, #58636e); font-size: 10px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.dsh-tiered-compaction__chip b { color: var(--dsw-alias-label-tertiary, #7a8591); font-weight: 600; margin-right: 3px; }
+.dsh-tiered-compaction__chip--bump { animation: dsh-tiered-compaction-bump 1.2s ease-out; }
+@keyframes dsh-tiered-compaction-bump { 0% { background: color-mix(in srgb, var(--dsh-tiered-tone, #2f9e44) 35%, transparent); border-color: var(--dsh-tiered-tone, #2f9e44); } 100% { background: transparent; } }
+.dsh-tiered-compaction__alert { margin-top: 7px; padding: 5px 7px; border-radius: 7px; color: var(--dsw-alias-state-warning-primary, #b35c00); background: var(--dsw-alias-state-warning-tertiary, color-mix(in srgb, #f0a020 14%, transparent)); font-size: 11px; line-height: 1.4; }
+.dsh-tiered-compaction__auto-hint { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; }
+.dsh-tiered-compaction__toast { margin-top: 7px; padding: 5px 7px; border-radius: 7px; color: var(--dsw-alias-state-success-primary, #2b7a3d); background: var(--dsw-alias-state-success-tertiary, color-mix(in srgb, #2f9e44 14%, transparent)); font-size: 11px; line-height: 1.4; animation: dsh-tiered-compaction-fade 4s ease forwards; }
+@keyframes dsh-tiered-compaction-fade { 0%, 80% { opacity: 1; } 100% { opacity: .35; } }
+.dsh-tiered-compaction__bar-fill--pulse { animation: dsh-tiered-compaction-pulse 1.2s ease-out 2; }
+@keyframes dsh-tiered-compaction-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dsh-tiered-tone, #2f9e44) 60%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+.dsh-tiered-compaction__pill, .dsh-tiered-compaction__capsule { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 999px; color: var(--dsw-alias-label-primary, #1f2328); background: var(--dsw-alias-bg-module-platform, rgba(255,255,255,.96)); box-shadow: 0 4px 14px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 14%, transparent); cursor: pointer; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
+.dsh-tiered-compaction__capsule-pct { color: var(--dsh-tiered-tone, inherit); font-weight: 600; }
+.dsh-tiered-compaction__total { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 9px; padding: 11px 14px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 11px; background: var(--dsw-alias-bg-module-platform, #fff); font-size: 12px; }
+.dsh-tiered-compaction__total strong { color: var(--dsw-alias-label-primary, #1f2328); font-size: 16px; font-weight: 650; }
+.dsh-tiered-compaction__total span { color: var(--dsw-alias-label-tertiary, #7a8591); }
+.dsh-tiered-compaction__last { margin-top: 8px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; overflow-wrap: anywhere; }
+.dsh-tiered-compaction__hud-toggle { margin-top: 12px; padding: 5px 10px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 8px; color: var(--dsw-alias-label-secondary, #58636e); background: transparent; cursor: pointer; font: inherit; font-size: 12px; }
+.dsh-tiered-compaction__hud-toggle:focus-visible, .dsh-tiered-compaction__pill:focus-visible, .dsh-tiered-compaction__capsule:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 2px; }
 @media (max-width: 560px) {
     .dsh-tiered-compaction { padding: 18px 14px; }
     .dsh-tiered-compaction__header { gap: 10px; }
@@ -458,6 +570,7 @@ const UI_CSS = `
 }
 @media (prefers-reduced-motion: reduce) {
     .dsh-tiered-compaction__bar-fill { transition: none; }
+    .dsh-tiered-compaction__bar-fill--pulse, .dsh-tiered-compaction__chip--bump, .dsh-tiered-compaction__toast { animation: none; }
 }
 `;
 
@@ -657,7 +770,44 @@ window.__ModuleLoader__.load({
                 sinceText: sinceTextOf(payload.since),
                 // 保留快照所属会话：入口据此判断「是不是当前会话的数据」
                 sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
+                // beta4：实际用量（与 window 同口径，缺了只是不显示用量）
+                currentTokens: windowNumberOf(payload.currentTokens),
+                // 自动压缩健康：旧服务端根本没有这个字段 → autoCheckKnown=false，界面
+                // 一个字都不说；有字段但为 null → 「从没跑过」，这正是要报警的情形
+                autoCheckKnown: Object.prototype.hasOwnProperty.call(payload, "autoCheckedAt"),
+                autoCheckedAt: epochMsOf(payload.autoCheckedAt),
+                autoEnabled: typeof payload.autoEnabled === "boolean" ? payload.autoEnabled : null,
+                lastCompaction: lastCompactionOf(payload.lastCompaction),
             };
+        }
+
+        /** 外部 epoch ms → 有限正数或 null。 */
+        function epochMsOf(raw) {
+            return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
+        }
+
+        /**
+         * 路由里的 lastCompaction → 可显示的最近一次摘要（本会话）。
+         * 只收窄展示要用的字段；at 不可读就整条不显示（时间是这一行的主语）。
+         * @param {unknown} raw
+         * @returns {{at: number, trigger: string|null, shadowedNodes: number|null, shadowedTokenCount: number|null, summaryTokenCount: number|null}|null}
+         */
+        function lastCompactionOf(raw) {
+            if (raw === null || typeof raw !== "object") return null;
+            const at = epochMsOf(raw.at);
+            if (at === null) return null;
+            return {
+                at,
+                trigger: raw.trigger === "auto" || raw.trigger === "manual" ? raw.trigger : null,
+                shadowedNodes: countOf(raw.shadowedNodes),
+                shadowedTokenCount: countOf(raw.shadowedTokenCount),
+                summaryTokenCount: countOf(raw.summaryTokenCount),
+            };
+        }
+
+        /** 外部计数 → 有限非负数或 null（layersOf 与 lastCompactionOf 共用一条规则）。 */
+        function countOf(value) {
+            return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
         }
 
         /**
@@ -670,15 +820,92 @@ window.__ModuleLoader__.load({
          */
         function layersOf(raw) {
             if (raw === null || typeof raw !== "object") return null;
-            const pick = (value) =>
-                typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+            const pick = countOf;
             return {
                 l12Processed: pick(raw.l12Processed),
                 spillCount: pick(raw.spillCount),
                 l3Evicted: pick(raw.l3Evicted),
                 l4Summaries: pick(raw.l4Summaries),
+                // 旧口径：L1+L2 合计省下的**字符**数，仅在新字段缺失时兜底显示
                 bytesSaved: pick(raw.l12BytesSaved),
+                // beta4 新字段：分层 UTF-8 字节 + 估算 token
+                l4ProcessSummaries: pick(raw.l4ProcessSummaries),
+                l1Folded: pick(raw.l1Folded),
+                l1BytesSaved: pick(raw.l1BytesSaved),
+                l2BytesSaved: pick(raw.l2BytesSaved),
+                l12TokensSaved: pick(raw.l12TokensSaved),
+                l3TokensSaved: pick(raw.l3TokensSaved),
+                l4TokensSaved: pick(raw.l4TokensSaved),
             };
+        }
+
+        /**
+         * token 数 → 紧凑文本：<1000 原样，≥1000 用 k（一位小数），≥1e6 用 M。
+         * 只做展示换算，不改数值来源。
+         * @param {number} value 非负 token 数
+         * @returns {string}
+         */
+        function formatTokens(value) {
+            // 整数位够多时去掉 ".0"：245000 → "245k"，66100 → "66.1k"
+            // ≥100k 取整（262144 → "262k"），更小的保留一位（66100 → "66.1k"）
+            const trim = (text) => text.replace(/\.0$/, "");
+            if (value >= 1e6) return `${trim((value / 1e6).toFixed(1))}M`;
+            if (value >= 100000) return `${Math.round(value / 1000)}k`;
+            if (value >= 1000) return `${trim((value / 1000).toFixed(1))}k`;
+            return String(Math.round(value));
+        }
+
+        /**
+         * 总节省（A.5）：三项估算 token 求和；三项全缺时 null（不拿 0 冒充）。
+         * @param {object|null} layers 收窄后的 layers
+         * @returns {number|null}
+         */
+        function totalTokensSavedOf(layers) {
+            if (layers === null) return null;
+            const parts = [layers.l12TokensSaved, layers.l3TokensSaved, layers.l4TokensSaved].filter(
+                (value) => value !== null,
+            );
+            if (parts.length === 0) return null;
+            return parts.reduce((sum, value) => sum + value, 0);
+        }
+
+        /**
+         * 自动压缩健康（A.6）：
+         *   - 旧服务端（无 autoCheckedAt 字段）或自动压缩被关 → null（什么都不显示）；
+         *   - 压力 ≥ 驱逐线且从没检查过/上次检查超过 120 秒 → {kind:"stale"} 报警；
+         *   - 最近检查过 → {kind:"recent", seconds}；
+         *   - 其余（低压力且从没检查过）→ null。
+         * @param {object} snapshot 渲染快照
+         * @param {number} now Date.now()
+         * @returns {{kind: "stale"}|{kind: "recent", seconds: number}|null}
+         */
+        function autoHealthOf(snapshot, now) {
+            if (snapshot.phase !== PHASE_READY || snapshot.autoCheckKnown !== true) return null;
+            if (snapshot.autoEnabled === false) return null;
+            const ratio = pressureRatioOf(snapshot);
+            const at = snapshot.autoCheckedAt;
+            const stale = at === null || now - at > AUTO_CHECK_STALE_MS;
+            if (ratio !== null && ratio >= PRESSURE_EVICT_RATIO && stale) return { kind: "stale" };
+            if (at !== null && !stale) return { kind: "recent", seconds: Math.max(0, Math.round((now - at) / 1000)) };
+            return null;
+        }
+
+        /** 自动压缩健康 → vnode（设置页与 HUD 共用；compact 只影响 key/样式不影响文案）。 */
+        function autoHealthNodeOf(snapshot, t, keyPrefix) {
+            const health = autoHealthOf(snapshot, Date.now());
+            if (health === null) return null;
+            if (health.kind === "stale") {
+                return h(
+                    "div",
+                    { key: `${keyPrefix}-auto`, className: "dsh-tiered-compaction__alert", role: "alert", "data-testid": "auto-warning" },
+                    tOf(t, "autoNotRunning"),
+                );
+            }
+            return h(
+                "div",
+                { key: `${keyPrefix}-auto`, className: "dsh-tiered-compaction__auto-hint", "data-testid": "auto-checked" },
+                tOf(t, "autoCheckedAgo", { seconds: health.seconds }),
+            );
         }
 
         /**
@@ -761,7 +988,55 @@ window.__ModuleLoader__.load({
             requestSeq: 0,
             timer: null,
             onVisibility: null,
+            // beta4：相邻两次同会话快照之间的变化（HUD 的「已压缩」提示与芯片高亮）
+            lastDrop: null,
+            chipBumps: {},
         };
+
+        /**
+         * HUD 四层芯片计数：L1 用 l1Folded（旧服务端回落 l12Processed），其余直取。
+         * @param {object|null} layers 收窄后的 layers
+         * @returns {{l1: number|null, l2: number|null, l3: number|null, l4: number|null}}
+         */
+        function chipCountsOf(layers) {
+            if (layers === null || layers === undefined) return { l1: null, l2: null, l3: null, l4: null };
+            return {
+                l1: layers.l1Folded ?? layers.l12Processed,
+                l2: layers.spillCount,
+                l3: layers.l3Evicted,
+                l4: layers.l4Summaries,
+            };
+        }
+
+        /**
+         * 比较相邻两次快照（只认同一个字符串会话 id 的 ready 快照：换会话的压力
+         * 落差不是压缩，无 id 的旧服务端无法判定「同一会话」，宁可不提示）。
+         *   - 压力降 ≥ 10 个百分点 → lastDrop（节省 = 降幅 × 窗口，窗口未知时 null）；
+         *   - 某层计数上涨 → chipBumps[key]。
+         */
+        function noteTransition(prev, next) {
+            if (prev.phase !== PHASE_READY || next.phase !== PHASE_READY) return;
+            if (typeof next.sessionId !== "string" || prev.sessionId !== next.sessionId) return;
+            const now = Date.now();
+            const from = pressureRatioOf(prev);
+            const to = pressureRatioOf(next);
+            if (from !== null && to !== null && Math.round((from - to) * 10000) >= PRESSURE_DROP_TRIGGER_BP) {
+                statusStore.lastDrop = {
+                    sessionId: next.sessionId,
+                    from,
+                    to,
+                    saved: next.window !== null && next.window > 0 ? Math.round((from - to) * next.window) : null,
+                    at: now,
+                };
+            }
+            const before = chipCountsOf(prev.layers);
+            const after = chipCountsOf(next.layers);
+            for (const chip of HUD_CHIPS) {
+                if (before[chip.key] !== null && after[chip.key] !== null && after[chip.key] > before[chip.key]) {
+                    statusStore.chipBumps[chip.key] = { sessionId: next.sessionId, at: now };
+                }
+            }
+        }
 
         /** 页面是否不可见（没有 document 的环境按可见处理）。 */
         function isPageHidden() {
@@ -770,6 +1045,7 @@ window.__ModuleLoader__.load({
 
         /** 写入新快照并通知所有订阅者。 */
         function publishStatus(snapshot) {
+            noteTransition(statusStore.snapshot, snapshot);
             statusStore.snapshot = snapshot;
             for (const listener of [...statusStore.listeners]) listener(snapshot);
         }
@@ -944,11 +1220,10 @@ window.__ModuleLoader__.load({
             const layers = snapshot.layers;
 
             const rowOf = (key) => {
-                const value = layers[key] ?? tOf(t, "missingValue");
-                const note =
-                    key === "spillCount" && layers.spillCount !== null && layers.spillCount > 0
-                        ? bytesSavedTextOf(layers.bytesSaved, t)
-                        : null;
+                // 折叠行：新服务端给 L1 自己的折叠数，旧服务端回落 L1+L2 处理数
+                const raw = key === "l12Processed" ? layers.l1Folded ?? layers.l12Processed : layers[key];
+                const value = raw ?? tOf(t, "missingValue");
+                const note = layerNoteOf(layers, key, t);
                 return h(
                     "div",
                     { key: `layer-${key}`, className: "dsh-tiered-compaction__stat", "data-layer": key },
@@ -978,6 +1253,84 @@ window.__ModuleLoader__.load({
                     rowOf("l3Evicted"),
                     rowOf("l4Summaries"),
                 ),
+                totalSavedNodeOf(snapshot, t),
+                lastCompactionNodeOf(snapshot, t),
+            );
+        }
+
+        /** 新服务端是否给了分层字节（任一存在即按新口径显示，不再回落合计字符）。 */
+        function hasPerLayerBytes(layers) {
+            return layers.l1BytesSaved !== null || layers.l2BytesSaved !== null;
+        }
+
+        /**
+         * 四层卡片的附注行（A.1/A.2）：
+         *   - 折叠：l1BytesSaved（字节）；
+         *   - 落盘：l2BytesSaved（字节）；新字段都缺时回落旧 l12BytesSaved，
+         *     明确标「L1+L2 合计（字符）」——它从来不是字节，也不只属于落盘；
+         *   - 驱逐 / 摘要：估算 token（l3TokensSaved / l4TokensSaved）；
+         *     摘要另附全进程摘要数作淡色提示。
+         * 0 或缺失都不出附注（0 字节没有信息量，缺失不编数）。
+         * @returns {string|null}
+         */
+        function layerNoteOf(layers, key, t) {
+            if (key === "l12Processed") return bytesSavedTextOf(layers.l1BytesSaved, t);
+            if (key === "spillCount") {
+                if (hasPerLayerBytes(layers)) return bytesSavedTextOf(layers.l2BytesSaved, t);
+                if (layers.bytesSaved === null || layers.bytesSaved <= 0) return null;
+                return tOf(t, "combinedCharsSaved", { value: formatTokens(layers.bytesSaved) });
+            }
+            const tokensNote = (value) =>
+                value === null || value <= 0 ? null : tOf(t, "tokensApprox", { value: formatTokens(value) });
+            if (key === "l3Evicted") return tokensNote(layers.l3TokensSaved);
+            if (key === "l4Summaries") {
+                // l4Summaries 是本会话口径（beta4 服务端），标明范围；全进程数作淡色补充
+                const parts = [tOf(t, "sessionScope"), tokensNote(layers.l4TokensSaved)];
+                if (layers.l4ProcessSummaries !== null) {
+                    parts.push(tOf(t, "processSummaries", { count: layers.l4ProcessSummaries }));
+                }
+                const text = parts.filter((part) => part !== null).join(" · ");
+                return text === "" ? null : text;
+            }
+            return null;
+        }
+
+        /** 总节省（A.5）卡：三项估算 token 全缺时不渲染。 */
+        function totalSavedNodeOf(snapshot, t) {
+            const total = totalTokensSavedOf(snapshot.layers);
+            if (total === null) return null;
+            const windowSize = snapshot.window;
+            const ofWindow =
+                windowSize !== null && windowSize > 0
+                    ? tOf(t, "totalSavedOfWindow", { percent: `${((total / windowSize) * PERCENT_SCALE).toFixed(1)}%` })
+                    : null;
+            return h(
+                "div",
+                { key: "total-saved", className: "dsh-tiered-compaction__total", "data-testid": "total-saved" },
+                h("span", null, tOf(t, "totalSavedTitle")),
+                h("strong", null, tOf(t, "totalSavedValue", { value: formatTokens(total) })),
+                ofWindow === null ? null : h("span", null, ofWindow),
+            );
+        }
+
+        /** 最近一次摘要行（C）：本会话没有提交过摘要时不渲染。 */
+        function lastCompactionNodeOf(snapshot, t) {
+            const last = snapshot.lastCompaction;
+            if (last === null || last === undefined) return null;
+            const dash = tOf(t, "missingValue");
+            const tokenText = (value) => (value === null ? dash : formatTokens(value));
+            const trigger =
+                last.trigger === "auto" ? tOf(t, "triggerAuto") : last.trigger === "manual" ? tOf(t, "triggerManual") : dash;
+            return h(
+                "div",
+                { key: "last-compaction", className: "dsh-tiered-compaction__last", "data-testid": "last-compaction" },
+                tOf(t, "lastCompaction", {
+                    time: sinceTextOf(last.at) ?? dash,
+                    trigger,
+                    nodes: last.shadowedNodes ?? dash,
+                    shadowed: tokenText(last.shadowedTokenCount),
+                    summary: tokenText(last.summaryTokenCount),
+                }),
             );
         }
 
@@ -987,7 +1340,7 @@ window.__ModuleLoader__.load({
 
         /** 默认 HUD 状态：未关闭、无存档位置（走角落）。每次返回新对象，避免共享可变值。 */
         function defaultHudState() {
-            return { closed: false, left: null, top: null };
+            return { closed: false, collapsed: false, left: null, top: null };
         }
 
         /**
@@ -1008,13 +1361,14 @@ window.__ModuleLoader__.load({
         /**
          * 存档 → HUD 状态（外部数据不可信：逐字段校验，坏值一律退回默认）。
          * @param {unknown} raw 已 JSON.parse 的对象，或任意值
-         * @returns {{closed: boolean, left: number|null, top: number|null}}
+         * beta4 加了 collapsed：旧存档没有这个键 → false（展开），旧用户升级后外观不变。
+         * @returns {{closed: boolean, collapsed: boolean, left: number|null, top: number|null}}
          */
         function normalizeHudState(raw) {
             if (raw === null || typeof raw !== "object") return defaultHudState();
             const left = Number.isFinite(raw.left) ? raw.left : null;
             const top = Number.isFinite(raw.top) ? raw.top : null;
-            return { closed: raw.closed === true, left, top };
+            return { closed: raw.closed === true, collapsed: raw.collapsed === true, left, top };
         }
 
         /**
@@ -1047,6 +1401,7 @@ window.__ModuleLoader__.load({
                     HUD_STATE_KEY,
                     JSON.stringify({
                         closed: state.closed === true,
+                        collapsed: state.collapsed === true,
                         left: Number.isFinite(state.left) ? Math.round(state.left) : null,
                         top: Number.isFinite(state.top) ? Math.round(state.top) : null,
                     }),
@@ -1054,6 +1409,55 @@ window.__ModuleLoader__.load({
             } catch {
                 /* 见 JSDoc：失败即放弃记忆，不往上抛 */
             }
+        }
+
+        /**
+         * HUD 状态的模块级订阅表（beta4 B.1）：设置页的「显示悬浮窗」开关与 HUD
+         * 自己的关闭/恢复/收起都写同一个存档，靠这张表让两处同帧同步；另挂
+         * window 的 storage 事件，其他标签页改了存档也能跟上。
+         */
+        const hudStateListeners = new Set();
+
+        /** 写存档并通知所有订阅者（存档写失败也照常通知：本页仍要切换）。 */
+        function writeHudState(next) {
+            const normalized = normalizeHudState(next);
+            persistHudState(normalized);
+            for (const listener of [...hudStateListeners]) listener(normalized);
+            return normalized;
+        }
+
+        /**
+         * 订阅 HUD 状态变化。
+         * @param {(state: object) => void} listener
+         * @returns {() => void} 退订
+         */
+        function attachHudState(listener) {
+            hudStateListeners.add(listener);
+            let onStorage = null;
+            if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+                onStorage = (event) => {
+                    if (event?.key === HUD_STATE_KEY) listener(readHudState());
+                };
+                window.addEventListener("storage", onStorage);
+            }
+            return () => {
+                hudStateListeners.delete(listener);
+                if (onStorage !== null && typeof window.removeEventListener === "function") {
+                    window.removeEventListener("storage", onStorage);
+                }
+            };
+        }
+
+        /**
+         * 组件读 HUD 状态（惰性读存档 + 订阅同步）。
+         * 注意调用顺序：必须排在 useStatusSnapshot 之前——d23/d25 的 mock react
+         * 只保留最后一个 effect 去驱动取数，状态订阅必须是最后一个 effect。
+         * @returns {[object, (state: object) => void]} [规范化状态, 本地 setter]
+         */
+        function useHudState() {
+            const [raw, setRaw] = React.useState(readHudState);
+            React.useEffect(() => attachHudState(setRaw), []);
+            return [normalizeHudState(raw), setRaw];
         }
 
         /* ------------------------------------------------------------------ *
@@ -1189,7 +1593,7 @@ window.__ModuleLoader__.load({
             dragSession.left = position.left;
             dragSession.top = position.top;
             dragSession.moved = true;
-            dragSession.apply({ closed: false, left: dragSession.left, top: dragSession.top });
+            dragSession.apply({ closed: false, collapsed: dragSession.collapsed === true, left: dragSession.left, top: dragSession.top });
         }
 
         /** 拖动结束：只在真拖动过时落盘（单纯点一下不改变存档）。 */
@@ -1199,7 +1603,12 @@ window.__ModuleLoader__.load({
             dragSession = null;
             detachDragListeners();
             if (!finished.moved) return;
-            finished.commit({ closed: false, left: Math.round(finished.left), top: Math.round(finished.top) });
+            finished.commit({
+                closed: false,
+                collapsed: finished.collapsed === true,
+                left: Math.round(finished.left),
+                top: Math.round(finished.top),
+            });
         }
 
         /** 挂 document 监听（拖出盒子仍能收到 move/up，解决「拖到一半丢失」）。 */
@@ -1294,7 +1703,13 @@ window.__ModuleLoader__.load({
                     "div",
                     { className: "dsh-tiered-compaction__bar-track", style: BAR_STYLE },
                     h("div", { className: "dsh-tiered-compaction__bar-track-fill", style: BAR_TRACK_STYLE }),
-                    h("div", { className: "dsh-tiered-compaction__bar-fill", style: fillStyle }),
+                    h("div", {
+                        className: options.pulse === true
+                            ? "dsh-tiered-compaction__bar-fill dsh-tiered-compaction__bar-fill--pulse"
+                            : "dsh-tiered-compaction__bar-fill",
+                        "data-testid": "pressure-fill",
+                        style: fillStyle,
+                    }),
                     markNodes,
                 ),
                 h(
@@ -1356,7 +1771,23 @@ window.__ModuleLoader__.load({
          */
         function StatusPanel(props) {
             const t = typeof props.t === "function" ? props.t : null;
+            // useHudState 必须在 useStatusSnapshot 之前（见 useHudState 注释）
+            const [hudState, setHudState] = useHudState();
             const snapshot = useStatusSnapshot(useCurrentSessionId(props?.useSessions));
+            const hudShown = !hudState.closed;
+            const hudToggle = h(
+                "button",
+                {
+                    key: "hud-toggle",
+                    type: "button",
+                    role: "switch",
+                    "aria-checked": hudShown ? "true" : "false",
+                    "data-testid": "settings-hud-toggle",
+                    className: "dsh-tiered-compaction__hud-toggle",
+                    onClick: () => setHudState(writeHudState({ ...hudState, closed: hudShown })),
+                },
+                `${hudShown ? "☑" : "☐"} ${tOf(t, "hudShow")}`,
+            );
             const layersBlock = layersBlockOf(snapshot, t);
             const toneKey = pressureToneOf(snapshot);
             const tone = PRESSURE_TONES[toneKey];
@@ -1407,10 +1838,21 @@ window.__ModuleLoader__.load({
                               "div",
                               { className: "dsh-tiered-compaction__window" },
                               h("span", null, tOf(t, "windowPrefix")),
-                              h("strong", null, String(snapshot.window)),
+                              h(
+                                  "strong",
+                                  null,
+                                  snapshot.currentTokens === null
+                                      ? String(snapshot.window)
+                                      : tOf(t, "usageTokens", {
+                                            current: formatTokens(snapshot.currentTokens),
+                                            window: formatTokens(snapshot.window),
+                                        }),
+                              ),
                           ),
+                    autoHealthNodeOf(snapshot, t, "settings"),
                 ),
                 layersBlock,
+                hudToggle,
             );
         }
 
@@ -1424,19 +1866,42 @@ window.__ModuleLoader__.load({
          */
         function OverlayHud(props) {
             const t = typeof props?.t === "function" ? props.t : null;
+            // useHudState 必须在 useStatusSnapshot 之前（见 useHudState 注释）
+            const [state, setHudState] = useHudState();
             const snapshot = useStatusSnapshot(useCurrentSessionId(props?.useSessions));
-            const [hudState, setHudState] = React.useState(readHudState);
-            const state = normalizeHudState(hudState);
-            if (state.closed) return null;
 
             const toneKey = pressureToneOf(snapshot);
             const tone = PRESSURE_TONES[toneKey];
+            const pressureText = pressureValueTextOf(snapshot, t);
+
+            /** 写存档 + 本地重渲 + 通知设置页开关（写失败也照常切换）。 */
+            function updateHud(patch) {
+                setHudState(writeHudState({ ...state, ...patch }));
+            }
+
+            // B.1 关闭后不消失：角落留一颗恢复胶囊（图标 + 压力），点一下恢复
+            if (state.closed) {
+                return h(
+                    "button",
+                    {
+                        type: "button",
+                        "data-surface": SURFACE_OVERLAY,
+                        "data-testid": "overlay-restore",
+                        "data-tone": toneKey,
+                        className: "dsh-tiered-compaction__pill",
+                        "aria-label": tOf(t, "hudRestoreTitle"),
+                        title: tOf(t, "hudRestoreTitle"),
+                        style: { ...HUD_PILL_STYLE, "--dsh-tiered-tone": tone.color },
+                        onClick: () => updateHud({ closed: false }),
+                    },
+                    h("span", { "aria-hidden": "true" }, PANEL_ICON),
+                    h("span", { className: "dsh-tiered-compaction__capsule-pct" }, pressureText),
+                );
+            }
 
             /** 关闭：落盘 + 重渲（写入放在前面，重渲出错也不影响「下次不出现」）。 */
             function closeHud() {
-                const next = { closed: true, left: state.left, top: state.top };
-                persistHudState(next);
-                setHudState(next);
+                updateHud({ closed: true });
             }
 
             /** 按下：只记起点并挂 document 监听，位置变化交给 moveDrag。 */
@@ -1452,10 +1917,10 @@ window.__ModuleLoader__.load({
                     left: origin.left,
                     top: origin.top,
                     moved: false,
+                    collapsed: state.collapsed,
                     apply: setHudState,
                     commit(next) {
-                        persistHudState(next);
-                        setHudState(next);
+                        setHudState(writeHudState(next));
                     },
                 };
                 attachDragListeners();
@@ -1463,6 +1928,41 @@ window.__ModuleLoader__.load({
                 if (typeof event.preventDefault === "function") event.preventDefault();
             }
 
+            // B.4 收起态：一颗可拖动的胶囊（状态点 + 压力），点一下展开
+            if (state.collapsed) {
+                return h(
+                    "div",
+                    {
+                        "data-surface": SURFACE_OVERLAY,
+                        "data-testid": "overlay-capsule",
+                        "data-tone": toneKey,
+                        className: "dsh-tiered-compaction__hud",
+                        style: { ...hudPositionStyleOf(state), ...HUD_CAPSULE_OVERRIDE_STYLE, "--dsh-tiered-tone": tone.color },
+                        [dragChannel().down]: beginDrag,
+                    },
+                    h(
+                        "button",
+                        {
+                            type: "button",
+                            "data-testid": "overlay-expand",
+                            className: "dsh-tiered-compaction__capsule",
+                            "aria-label": tOf(t, "hudExpandTitle"),
+                            title: tOf(t, "hudExpandTitle"),
+                            onClick: () => updateHud({ collapsed: false }),
+                            onMouseDown: stopPropagationOf,
+                            onPointerDown: stopPropagationOf,
+                        },
+                        h("span", { "aria-hidden": "true", style: { ...HUD_DOT_STYLE, backgroundColor: tone.color } }),
+                        h("span", { className: "dsh-tiered-compaction__capsule-pct" }, pressureText),
+                    ),
+                );
+            }
+
+            const now = Date.now();
+            const sessionId = snapshot.phase === PHASE_READY ? snapshot.sessionId : null;
+            const drop = statusStore.lastDrop;
+            const showDrop =
+                drop !== null && sessionId !== null && drop.sessionId === sessionId && now - drop.at < COMPACTED_TOAST_MS;
             const statusText = statusLineOf(snapshot, t);
             return h(
                 "div",
@@ -1487,8 +1987,24 @@ window.__ModuleLoader__.load({
                         title: tOf(t, tone.key),
                         style: { ...HUD_DOT_STYLE, backgroundColor: tone.color },
                     }),
-                    h("span", { className: "dsh-tiered-compaction__hud-title" }, "tiered-compaction"),
+                    h("span", { className: "dsh-tiered-compaction__hud-title" }, tOf(t, PANEL_TITLE_KEY)),
                     h("span", { className: "dsh-tiered-compaction__hud-status" }, statusText),
+                    h(
+                        "button",
+                        {
+                            key: "collapse",
+                            type: "button",
+                            "data-testid": "overlay-collapse",
+                            className: "dsh-tiered-compaction__hud-btn",
+                            "aria-label": tOf(t, "hudCollapseTitle"),
+                            title: tOf(t, "hudCollapseTitle"),
+                            style: { ...HUD_CLOSE_STYLE, marginLeft: "auto", fontSize: "13px" },
+                            onClick: () => updateHud({ collapsed: true }),
+                            onMouseDown: stopPropagationOf,
+                            onPointerDown: stopPropagationOf,
+                        },
+                        "–",
+                    ),
                     h(
                         "button",
                         {
@@ -1497,7 +2013,7 @@ window.__ModuleLoader__.load({
                             "data-testid": "overlay-close",
                             "aria-label": tOf(t, "hudCloseTitle"),
                             title: tOf(t, "hudCloseTitle"),
-                            style: HUD_CLOSE_STYLE,
+                            style: { ...HUD_CLOSE_STYLE, marginLeft: "0" },
                             onClick: closeHud,
                             // 按下若冒泡到 HUD 就会开始拖动，这里截断
                             onMouseDown: stopPropagationOf,
@@ -1506,7 +2022,82 @@ window.__ModuleLoader__.load({
                         "×",
                     ),
                 ),
-                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false }),
+                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false, pulse: showDrop }),
+                hudUsageNodeOf(snapshot, t),
+                hudChipsNodeOf(snapshot, now),
+                hudAutoWarningNodeOf(snapshot, t, now),
+                showDrop ? compactedToastNodeOf(drop, t) : null,
+            );
+        }
+
+        /** B.2 实际用量「245k / 262k tokens」：currentTokens 与 window 都可读才显示。 */
+        function hudUsageNodeOf(snapshot, t) {
+            if (snapshot.phase !== PHASE_READY || snapshot.currentTokens === null || snapshot.window === null) return null;
+            return h(
+                "div",
+                { key: "usage", className: "dsh-tiered-compaction__hud-usage", "data-testid": "overlay-usage" },
+                tOf(t, "usageTokens", { current: formatTokens(snapshot.currentTokens), window: formatTokens(snapshot.window) }),
+            );
+        }
+
+        /**
+         * B.3 四层迷你芯片：L1~L4 计数，缺失显示「—」；计数刚上涨的芯片带高亮类。
+         * 为什么用 aria-label 不用 title：title 里的「驱逐/摘要」会被当成刻度线
+         * 语义标签（d25 按 title 数刻度线），芯片不该混进去。
+         */
+        function hudChipsNodeOf(snapshot, now) {
+            if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
+            const counts = chipCountsOf(snapshot.layers);
+            return h(
+                "div",
+                { key: "chips", className: "dsh-tiered-compaction__chips", "data-testid": "overlay-chips" },
+                HUD_CHIPS.map((chip) => {
+                    const bump = statusStore.chipBumps[chip.key];
+                    const bumped =
+                        bump !== undefined && bump.sessionId === snapshot.sessionId && now - bump.at < CHIP_BUMP_MS;
+                    return h(
+                        "span",
+                        {
+                            key: chip.key,
+                            "data-chip": chip.key,
+                            className: bumped
+                                ? "dsh-tiered-compaction__chip dsh-tiered-compaction__chip--bump"
+                                : "dsh-tiered-compaction__chip",
+                        },
+                        h("b", null, chip.label),
+                        counts[chip.key] === null ? STRINGS.zh.missingValue : String(counts[chip.key]),
+                    );
+                }),
+            );
+        }
+
+        /** B.7 HUD 里的自动压缩告警（只出告警，不出「N 秒前检查」，保持迷你）。 */
+        function hudAutoWarningNodeOf(snapshot, t, now) {
+            const health = autoHealthOf(snapshot, now);
+            if (health === null || health.kind !== "stale") return null;
+            return h(
+                "div",
+                { key: "auto", className: "dsh-tiered-compaction__alert", role: "alert", "data-testid": "overlay-auto-warning" },
+                tOf(t, "autoNotRunningShort"),
+            );
+        }
+
+        /** 压力 0~1 → 整数百分比文本（提示用，例：0.962 → "96%"）。 */
+        function wholePercentOf(ratio) {
+            return `${Math.round(percentNumberOf(ratio))}%`;
+        }
+
+        /** B.6 「已压缩：96% → 40%，节省 ≈ 141k tokens」；窗口未知时不报节省量。 */
+        function compactedToastNodeOf(drop, t) {
+            const params = { from: wholePercentOf(drop.from), to: wholePercentOf(drop.to) };
+            const text =
+                drop.saved === null
+                    ? tOf(t, "compactedToast", params)
+                    : tOf(t, "compactedToastSaved", { ...params, saved: formatTokens(drop.saved) });
+            return h(
+                "div",
+                { key: "toast", className: "dsh-tiered-compaction__toast", role: "status", "data-testid": "overlay-toast" },
+                text,
             );
         }
 

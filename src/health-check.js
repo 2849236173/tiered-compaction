@@ -133,7 +133,16 @@ export function collectHealth(deps = {}) {
             l3Evicted: layer3Evicted,
             spillCount,
             lineageEntries: lineageSize,
+            // beta4：按层节省量（字节 / 估算 token），均为本会话口径
+            l1Folded: counts.folded ?? 0,
+            l1BytesSaved: counts.foldBytesSaved ?? 0,
+            l2BytesSaved: counts.spillBytesSaved ?? 0,
+            l12TokensSaved: counts.l12TokensSaved ?? 0,
+            l3TokensSaved: counts.evictTokensSaved ?? 0,
+            l4SessionSummaries: counts.summaries ?? 0,
+            l4TokensSaved: counts.summaryTokensSaved ?? 0,
         },
+        sessionSince: typeof counts.firstSeenAt === "number" ? counts.firstSeenAt : undefined,
         config: {
             hasArchiveDir: typeof config?.archiveDir === "string" && config.archiveDir.length > 0,
             auto: config?.auto ?? true,

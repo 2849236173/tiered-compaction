@@ -21,7 +21,7 @@
  */
 import { nodeLocation } from "./lineage.js";
 // beta3 多 realm：计数存进进程级共享表，状态路由持有者（可能是别的实例）也读得到。
-import { layerCountsFor } from "./shared-stats.js";
+import { layerCountsFor, layerStatsSnapshot } from "./shared-stats.js";
 
 /** 替换内容的标记：一眼能看出这是被压缩过的，并给出存档路径。 */
 export const PRUNE_MARKER = "[tiered-compaction";
@@ -149,9 +149,8 @@ export class ToolResultObserver {
      */
     statsFor(session) {
         const counts = session == null ? undefined : this.perSession.get(session)?.counts;
-        return counts === undefined
-            ? { processed: 0, bytesSaved: 0, skipped: 0, failed: 0, evicted: 0, spilled: 0 }
-            : { ...counts };
+        // 观察者没见过的会话退回共享表（可能已有第 4 层摘要计数），都没有则全零
+        return counts === undefined ? layerStatsSnapshot(session) : { ...counts };
     }
 
     /** 把会话登记为最近活跃（回调异常不得影响会话）。 */
@@ -309,7 +308,18 @@ export class ToolResultObserver {
         this.stats.bytesSaved += Math.max(0, text.length - processed.length);
         state.counts.processed += 1;
         state.counts.bytesSaved += Math.max(0, text.length - processed.length);
-        if (layers.includes("spill-to-disk")) state.counts.spilled += 1;
+        // beta4：按层、按 UTF-8 字节记账。仲裁器一份内容只归一层：
+        // 带 spill-to-disk 的算落盘，否则算折叠。
+        const savedBytes = Math.max(0, Buffer.byteLength(text, "utf8") - Buffer.byteLength(processed, "utf8"));
+        const spilled = layers.includes("spill-to-disk");
+        if (spilled) {
+            state.counts.spilled += 1;
+            state.counts.spillBytesSaved += savedBytes;
+        } else {
+            state.counts.folded += 1;
+            state.counts.foldBytesSaved += savedBytes;
+        }
+        state.counts.l12TokensSaved += Math.max(0, Math.ceil(text.length / 4) - Math.ceil(processed.length / 4));
         // P2-6：日志不在 try 内会外抛，导致 stats 已计数但实际未完成。
         try {
             this.ctx.logger.info(
@@ -448,6 +458,8 @@ export class ToolResultObserver {
             );
             evicted += 1;
             state.counts.evicted += 1;
+            // beta4：驱逐节省 = 原文 token − 提示 token（同 estimateTokens 口径）
+            state.counts.evictTokensSaved += Math.max(0, Math.ceil(text.length / 4) - Math.ceil(notice.length / 4));
         }
         if (evicted > 0) {
             this.ctx.logger.warn(`tiered-compaction: 80% 压力驱逐 ${evicted} 个可重放工具结果`);

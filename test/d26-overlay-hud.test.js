@@ -327,14 +327,18 @@ test("D26-2 点关闭后不渲染，且 closed:true 落 localStorage", async () 
     assert.equal(countTestId(tree, OVERLAY_HUD_TESTID), 0, "关闭后 HUD 不得再渲染");
     assert.equal(countTestId(tree, PRESSURE_BAR_TESTID), 0, "关闭后连压力条也不该留");
 
-    assert.deepEqual(storedHudStateOf(storage), { closed: true, left: null, top: null }, "关闭状态必须落盘");
+    assert.deepEqual(storedHudStateOf(storage), { closed: true, collapsed: false, left: null, top: null }, "关闭状态必须落盘");
+    // beta4：关闭可恢复——HUD 本体不在，但角落留一颗恢复胶囊
+    assert.ok(nodeWithTestId(tree, "overlay-restore"), "关闭后必须留恢复入口");
 });
 
 test("D26-3 预置 closed:true → 启动即不渲染（重启宿主后不再出现）", async () => {
     const storage = createStorageMock({ [HUD_STATE_KEY]: JSON.stringify({ closed: true, left: null, top: null }) });
     const harness = await mountOverlay({ storage });
-    assert.equal(countTestId(harness.tree, OVERLAY_HUD_TESTID), 0, "存档说关了就一个节点都不出");
-    assert.equal(harness.tree, null, "关闭状态下组件返回 null");
+    assert.equal(countTestId(harness.tree, OVERLAY_HUD_TESTID), 0, "存档说关了 HUD 本体就不出");
+    // beta4 语义修正：关闭不再是「不可恢复的 null」，只剩恢复胶囊（不含压力条）
+    assert.equal(harness.tree.props["data-testid"], "overlay-restore", "关闭状态下只渲染恢复胶囊");
+    assert.equal(countTestId(harness.tree, PRESSURE_BAR_TESTID), 0, "恢复胶囊不含压力条");
 });
 
 test("D26-4 拖动：位置写 localStorage，下次启动按存档恢复", async () => {
@@ -346,7 +350,7 @@ test("D26-4 拖动：位置写 localStorage，下次启动按存档恢复", asyn
 
     assert.deepEqual(
         storedHudStateOf(storage),
-        { closed: false, left: 360, top: 240 },
+        { closed: false, collapsed: false, left: 360, top: 240 },
         "松开时把位置（像素）写进 localStorage",
     );
 
@@ -376,7 +380,7 @@ test("D26-5 拖动过程不落盘（每帧写存储会卡），松开后监听�
     assert.equal(storage.getItem(HUD_STATE_KEY), null, "拖动中只更新渲染，不写存储");
 
     harness.documentMock.dispatch(names.up, {});
-    assert.deepEqual(storedHudStateOf(storage), { closed: false, left: 50, top: 20 }, "松开才落盘");
+    assert.deepEqual(storedHudStateOf(storage), { closed: false, collapsed: false, left: 50, top: 20 }, "松开才落盘");
     assert.equal(harness.documentMock.listenerCount(names.move), 0, "拖完必须摘掉 document 监听");
     assert.equal(harness.documentMock.listenerCount(names.up), 0);
 });
@@ -448,7 +452,7 @@ test("D26-8 有 PointerEvent 时走 pointer 事件族（鼠标/触控/笔一套�
     assert.equal(hud.props.onMouseDown, undefined, "pointer 环境下不重复挂 mouse 按下（避免双触发）");
 
     dragTo(harness, { from: { x: 100, y: 100 }, to: { x: 130, y: 150 }, pointer: true });
-    assert.deepEqual(storedHudStateOf(storage), { closed: false, left: 430, top: 350 }, "pointer 拖动同样落盘");
+    assert.deepEqual(storedHudStateOf(storage), { closed: false, collapsed: false, left: 430, top: 350 }, "pointer 拖动同样落盘");
 });
 
 test("D26-9 关闭只关 overlay：settings 入口照常渲染", async () => {

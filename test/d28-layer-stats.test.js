@@ -233,7 +233,8 @@ test("D28-1 设置页分区四层数字块：四个数字 + 省字节数，数�
     assert.match(text, /落盘存档\s*29/, "落盘数=spillCount");
     assert.match(text, /软压力驱逐\s*0/, "驱逐数=l3Evicted（0 也显示）");
     assert.match(text, /有损摘要\s*3/, "摘要数=l4Summaries");
-    assert.match(text, /省 ~2\.1 MB/, "2200000 字节换算成 MB 可读格式");
+    // beta4 口径修正：旧载荷只有 l12BytesSaved（L1+L2 合计**字符**数），不再冒充「落盘省字节」
+    assert.match(text, /L1\+L2 合计（字符）省 ~2\.2M/, "旧载荷回落合计字符，并明确标注口径");
 
     // 换一组 payload：数字跟着变，证明来自 API 而非写死
     const treeB = (await mountSlot(SETTINGS_SLOT, { payload: PAYLOAD_B })).tree;
