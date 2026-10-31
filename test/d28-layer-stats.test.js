@@ -268,22 +268,18 @@ test("D28-2 「自 HH:mm 起」标注：since → 本地 HH:mm；缺失/非法�
     assert.doesNotMatch(textBad, /NaN/, "since 非数字不得出现 NaN");
 });
 
-test("D28-3 侧栏精简行：折叠 N · 落盘 N · 驱逐 N · 摘要 N + since 标注", async () => {
-    const tree = (await mountSlot(MAIN_SLOT, { payload: PAYLOAD_A })).tree;
-    const panel = nodeWithTestId(tree, SIDEBAR_PANEL_TESTID);
-    assert.ok(panel, "main 槽位仍是侧栏面板");
-    const text = collectTextOf(panel);
-    assert.match(text, /折叠\s*107\s*·\s*落盘\s*29\s*·\s*驱逐\s*0\s*·\s*摘要\s*3/, "一行式四层数字（方案 §3.2 口径）");
+test("D28-3 四层数字随 API 换值，设置页与同一 payload 的口径一致", async () => {
+    const tree = (await mountSlot(SETTINGS_SLOT, { payload: PAYLOAD_A })).tree;
+    const text = collectTextOf(nodeWithTestId(tree, LAYERS_BLOCK_TESTID));
+    assert.match(text, /无损折叠\s*107/, "折叠数字来自 API（107）");
+    assert.match(text, /软压力驱逐\s*0/, "驱逐数字来自 API（0）");
+    assert.match(text, /有损摘要\s*3/, "摘要数字来自 API（3）");
 
-    // since 标注与设置页同源（同一 sinceTextOf）
-    const d = new Date(SINCE_A);
-    const pad2 = (v) => String(v).padStart(2, "0");
-    assert.match(text, new RegExp(`自 ${pad2(d.getHours())}:${pad2(d.getMinutes())} 起`), "侧栏行同样带「自 HH:mm 起」");
-
-    // 数值来自 API：换 payload 断言跟随
-    const textB = collectTextOf((await mountSlot(MAIN_SLOT, { payload: PAYLOAD_B })).tree);
-    assert.match(textB, /折叠\s*0\s*·\s*落盘\s*0\s*·\s*驱逐\s*0\s*·\s*摘要\s*0/, "零值也如实显示");
-    assert.doesNotMatch(textB, /107|29/, "旧值不得残留");
+    // 数值来自 API：换 payload 断言跟随（零值也如实显示）
+    const textB = collectTextOf((await mountSlot(SETTINGS_SLOT, { payload: PAYLOAD_B })).tree);
+    assert.match(textB, /无损折叠\s*0/, "零值也如实显示");
+    assert.match(textB, /有损摘要\s*0/, "摘要零值也如实显示");
+    assert.doesNotMatch(textB, /107|摘要\s*3/, "旧值不得残留");
 });
 
 test("D28-4 overlay 不含四层数字（保持迷你，方案 §3.3 定案）", async () => {

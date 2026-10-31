@@ -22,6 +22,94 @@
 const MODULE_ID = "dsh-tiered-compaction";
 
 /**
+ * i18n 字典命名空间（任务 #7）。plugin-market 同款：宿主 locale 服务的
+ * register/bind 都要求一个 ns，字符串只要全仓库唯一即可；条目注册处引用同名。
+ */
+const I18N_NS = "tieredCompaction";
+
+/**
+ * 双语字典（任务 #7）：key 是抽象文案名，zh/en 两表 key 集合必须一致
+ * （d29 双向 diff 防漏译）。Object.freeze 防运行时误改——字典是三入口共享
+ * 的模块级数据，坏一处坏三处。取词规则见 tOf()；zh 与现有硬编码逐字节一致
+ * （d23-d28 断言的中文是回归红线，不许顺手改词）。
+ */
+const STRINGS = Object.freeze({
+    zh: Object.freeze({
+        panelTitle: "tiered-compaction 分层压缩",
+        statusPrefix: "状态",
+        loading: "读取中…",
+        unavailable: "数据不可用",
+        compacting: "压缩中",
+        windowPrefix: "窗口",
+        sinceMark: "自 {time} 起",
+        sessionPrefix: "本次会话：",
+        sessionPrefixWithSince: "本次会话（{since}）：",
+        missingValue: "—",
+        l12Processed: "无损折叠",
+        spillCount: "落盘存档",
+        l3Evicted: "软压力驱逐",
+        l4Summaries: "有损摘要",
+        foldShort: "折叠",
+        spillShort: "落盘",
+        evictShort: "驱逐",
+        summaryShort: "摘要",
+        bytesSavedMB: "省 ~{value} MB",
+        bytesSavedKB: "省 ~{value} KB",
+        bytesSavedBytes: "省 ~{value} 字节",
+        markRemind: "{percent} 提醒线",
+        markEvict: "{percent} 驱逐线",
+        markSummary: "{percent} 摘要线",
+        toneCalm: "正常",
+        toneRemind: "偏高",
+        toneEvict: "危险",
+        toneUnknown: "未知",
+        pressurePrefix: "压力",
+        hudCloseTitle: "关闭悬浮窗",
+    }),
+    en: Object.freeze({
+        panelTitle: "tiered-compaction",
+        statusPrefix: "Status",
+        loading: "Loading…",
+        unavailable: "Data unavailable",
+        compacting: "Compacting",
+        windowPrefix: "Window",
+        sinceMark: "since {time}",
+        sessionPrefix: "This session:",
+        sessionPrefixWithSince: "This session (since {since}):",
+        missingValue: "—",
+        l12Processed: "Lossless fold",
+        spillCount: "Spill to disk",
+        l3Evicted: "Soft-pressure eviction",
+        l4Summaries: "Lossy summary",
+        foldShort: "Fold",
+        spillShort: "Spill",
+        evictShort: "Evict",
+        summaryShort: "Summary",
+        bytesSavedMB: "~{value} MB saved",
+        bytesSavedKB: "~{value} KB saved",
+        bytesSavedBytes: "~{value} bytes saved",
+        markRemind: "{percent} remind line",
+        markEvict: "{percent} evict line",
+        markSummary: "{percent} summary line",
+        toneCalm: "OK",
+        toneRemind: "High",
+        toneEvict: "Critical",
+        toneUnknown: "Unknown",
+        pressurePrefix: "Pressure",
+        hudCloseTitle: "Close HUD",
+    }),
+});
+
+/** 取词回落语言：en 表缺 key 时回落 zh（与宿主 FALLBACK_LOCALE=en 不同向——本表 zh 是原文，绝无缺词）。 */
+const I18N_FALLBACK = "zh";
+
+/** 本插件的 localStorage 语言记忆键（探测链第 2 级；v1 后缀同 HUD_STATE_KEY 的理由）。 */
+const LOCALE_STORAGE_KEY = "tiered-compaction-locale";
+
+/** 支持的语言集合（字典只有这两张表；探测出别的值一律回落 zh）。 */
+const SUPPORTED_LOCALES = ["zh", "en"];
+
+/**
  * 状态路由路径。为什么复制而不 import src/status-route.js：client 半是
  * 浏览器脚本，与 host 半不共享模块系统；两处必须保持同字符串，改动时成对改。
  */
@@ -32,16 +120,11 @@ const SETTINGS_SECTION_SLOT = "settings.section";
 const SETTINGS_SECTION_ID = "tiered-compaction";
 const SETTINGS_SECTION_ORDER = 45;
 
-/** 侧栏双注册：main（keyed，主面板）+ sidebar.panellist（list，图标行）。 */
-const MAIN_SLOT = "main";
-const SIDEBAR_PANELLIST_SLOT = "sidebar.panellist";
-/** main 的 key 与 panellist 的 id 必须同字符串（DesktopLayoutState 按 key 匹配面板）。 */
-const PANEL_KEY = "tiered-compaction";
-const SIDEBAR_PANELLIST_ORDER = 1;
 
 /** 悬浮 overlay 槽位（宿主 root children 声明，kind=list，必须自带 id）。 */
 const OVERLAY_SLOT = "shell.overlay";
 const OVERLAY_ID = "tiered-compaction-hud";
+/** overlay 条目 label：id 性质字符串（宿主 ledger 用），不是展示文案，不参与翻译。 */
 const OVERLAY_LABEL = "tiered-compaction";
 /** overlay 悬浮层级：高于宿主常规内容即可。 */
 const OVERLAY_Z_INDEX = 1000;
@@ -66,13 +149,16 @@ const PRESSURE_TONE_REMIND = "remind";
 const PRESSURE_TONE_EVICT = "evict";
 const PRESSURE_TONE_UNKNOWN = "unknown";
 
-/** 档位 → 颜色 + 中文短名。tone 名进 data-tone、颜色进 style，两者同源于此表。 */
-const PRESSURE_TONES = {
-    [PRESSURE_TONE_CALM]: { color: "#2f9e44", label: "正常" },
-    [PRESSURE_TONE_REMIND]: { color: "#f0a020", label: "偏高" },
-    [PRESSURE_TONE_EVICT]: { color: "#e8590c", label: "危险" },
-    [PRESSURE_TONE_UNKNOWN]: { color: "#868e96", label: "未知" },
-};
+/**
+ * 档位 → 颜色 + STRINGS 的档位名 key。tone 名进 data-tone、颜色进 style、
+ * 显示词按 locale 从 STRINGS 取（任务 #7），三者同源于此表。
+ */
+const PRESSURE_TONES = Object.freeze({
+    [PRESSURE_TONE_CALM]: { color: "#2f9e44", key: "toneCalm" },
+    [PRESSURE_TONE_REMIND]: { color: "#f0a020", key: "toneRemind" },
+    [PRESSURE_TONE_EVICT]: { color: "#e8590c", key: "toneEvict" },
+    [PRESSURE_TONE_UNKNOWN]: { color: "#868e96", key: "toneUnknown" },
+});
 
 /**
  * 压力刻度线镜像常量（任务 #3）。浏览器端不能 import src/，三处与 host 半
@@ -89,12 +175,13 @@ const PRESSURE_LOSSY_FLOOR_RATIO = 0.82;
 
 /**
  * 刻度线定义：label 对齐方案 §3.1（提醒线/驱逐线/摘要线），位置=比例×条宽
- * （percent 字符串）。数组顺序即 DOM 顺序，与阈值升序一致。
+ * （percent 字符串）。文案是 STRINGS 的 key（任务 #7），percent 前缀在
+ * 渲染处拼——数字是本文件的镜像常量，不该复制进字典。数组顺序即 DOM 顺序。
  */
 const PRESSURE_MARKS = [
-    { value: PRESSURE_REMIND_RATIO, percent: "70%", label: "70% 提醒线" },
-    { value: PRESSURE_EVICT_RATIO, percent: "80%", label: "80% 驱逐线" },
-    { value: PRESSURE_LOSSY_FLOOR_RATIO, percent: "82%", label: "82% 摘要线" },
+    { value: PRESSURE_REMIND_RATIO, percent: "70%", key: "markRemind" },
+    { value: PRESSURE_EVICT_RATIO, percent: "80%", key: "markEvict" },
+    { value: PRESSURE_LOSSY_FLOOR_RATIO, percent: "82%", key: "markSummary" },
 ];
 
 /**
@@ -152,66 +239,44 @@ const BAR_LEGEND_ROW_STYLE = {
  * 不能复 main 的侧栏面板（那会把标题与压力条挤进图标行）。
  */
 const SURFACE_SETTINGS = "settings";
-const SURFACE_SIDEBAR = "sidebar";
-const SURFACE_PANELLIST = "sidebar-panellist";
 const SURFACE_OVERLAY = "overlay";
 
-const PANEL_TITLE = "tiered-compaction 分层压缩";
+/** 面板标题走 STRINGS.panelTitle（任务 #7；zh 值与旧硬编码逐字节一致）。 */
+const PANEL_TITLE_KEY = "panelTitle";
 
 /** 侧栏图标（方案 §3.2 手绘图里的 🐋）：图标行没有标题位，靠它也认得出来。 */
 const PANEL_ICON = "🐋";
 
-/** 精简态的几个可点定位点：图标行、图标、状态点、摘要行（验收按图标 testid 断言）。 */
-const SIDEBAR_PANEL_TESTID = "sidebar-panel";
-const PANELLIST_TESTID = "sidebar-panellist";
-const PANELLIST_ICON_TESTID = "sidebar-panellist-icon";
-const PANELLIST_DOT_TESTID = "sidebar-panellist-dot";
-const PANELLIST_SUMMARY_TESTID = "sidebar-panellist-summary";
-
 /**
- * 状态字的中文短名表：只翻译「压缩进行中」这一类，其余状态原样透出。
- * 为什么单独一张表：状态字是 API 字段的展示，不是第二套状态机——宿主半
- * 当前只产出 ok/warn，`compacting` 是任务 #5 要求覆盖的「压缩中」态，日后
- * 事件源接入时这里不用再改渲染；表里没有的词（含 ok/warn）一律按原字面显示，
- * 既有断言（d23「/ok/」等）因此不受影响。
+ * 状态字表：只翻译「压缩进行中」这一类，其余状态原样透出。
+ * 值是 STRINGS 的 key（任务 #7）。为什么单独一张表：状态字是 API 字段的展示，
+ * 不是第二套状态机——宿主半当前只产出 ok/warn，`compacting` 是任务 #5 要求
+ * 覆盖的「压缩中」态，日后事件源接入时这里不用再改渲染；表里没有的词
+ * （含 ok/warn）一律按原字面显示，既有断言（d23「/ok/」等）因此不受影响。
  */
-const STATUS_LABELS = Object.freeze({ compacting: "压缩中" });
+const STATUS_LABELS = Object.freeze({ compacting: "compacting" });
 
 const PHASE_LOADING = "loading";
 const PHASE_READY = "ready";
 const PHASE_UNAVAILABLE = "unavailable";
-const LOADING_TEXT = "读取中…";
-const UNAVAILABLE_TEXT = "数据不可用";
+/** 占位文案 key（任务 #7）：zh 值与旧硬编码逐字节一致。 */
+const LOADING_TEXT_KEY = "loading";
+const UNAVAILABLE_TEXT_KEY = "unavailable";
 
 /**
- * 四层数字块的中文标签（任务 #6，方案 §3.1 顺序）。
+ * 四层数字块标签（任务 #6 顺序 + 任务 #7 双语）：值是 STRINGS 的 key。
  * 折叠用 l12Processed 口径（第 1-2 层处理数）；落盘附省字节数；
  * 摘要来自 host 半的 l4Summaries（提交过的摘要事务数）。
  */
 const LAYERS_LABELS = Object.freeze({
-    l12Processed: "无损折叠",
-    spillCount: "落盘存档",
-    l3Evicted: "软压力驱逐",
-    l4Summaries: "有损摘要",
+    l12Processed: "l12Processed",
+    spillCount: "spillCount",
+    l3Evicted: "l3Evicted",
+    l4Summaries: "l4Summaries",
 });
 
 /** 四层数字块的 testid（d28 按它定位断言；panellist 摘要行沿用既有 testid）。 */
 const LAYERS_BLOCK_TESTID = "layer-stats";
-
-/**
- * 侧栏精简态样式（方案 §3.2：图标 + 一行「● 正常 27.0%」）。
- * 只做行内排版，不预设任何定位——图标行的位置由宿主侧栏布局决定，
- * 与 d23「非 overlay 不预设定位」的约定一致。
- */
-const PANELLIST_ROW_STYLE = {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    whiteSpace: "nowrap",
-};
-const PANELLIST_ICON_STYLE = { flex: "0 0 auto", fontSize: "14px", lineHeight: "1" };
-const PANELLIST_DOT_STYLE = { flex: "0 0 auto", width: "6px", height: "6px", borderRadius: "50%" };
-const PANELLIST_SUMMARY_STYLE = { fontSize: "12px", opacity: "0.85" };
 
 /**
  * 初始快照：挂载后 fetch 完成前的诚实占位（不是「数据不可用」）。
@@ -290,6 +355,121 @@ window.__ModuleLoader__.load({
     factory(require) {
         const React = require("react");
         const h = React.createElement;
+
+        /* ================================================================== *
+         * 任务 #7 i18n：语言探测链 + 取词
+         * ================================================================== */
+
+        /**
+         * 模块级当前语言。为什么不是常量：宿主条目 t 是随渲染注入的（随语言
+         * 切换换引用），本地探测链只在「宿主没有 locale 服务」时兜底一次，
+         * 切换语言需要宿主重启/重载——探测结果持久化到 localStorage（读偏好
+         * 不是写敏感数据，方案 §6.2 已有 localStorage 先例）。
+         */
+        let activeLocale = I18N_FALLBACK;
+
+        /**
+         * navigator 语言 → 支持的 locale。只认 zh 开头（zh-TW 也没有繁体表，
+         * 归入 zh 的英文回落更诚实）——与宿主 detectBrowserLocale 的主子标签
+         * 匹配同向：zh-CN/zh-TW 都命中 zh。
+         * @param {string|undefined} language navigator.language（可能 undefined）
+         * @returns {string|null} 支持的 locale，或 null
+         */
+        function localeFromNavigator(language) {
+            if (typeof language !== "string") return null;
+            return language.startsWith("zh") ? "zh" : "en";
+        }
+
+        /**
+         * 探测链（宿主没有下发布局时的兜底，任务 #7 关键决策）：
+         *   1. localStorage 记忆（用户手动覆盖的唯一入口）；
+         *   2. navigator.language（zh 开头 → zh，否则 en）；
+         *   3. 默认 zh（插件文案原生于中文）。
+         * 为什么没有显式 config 一级：本插件不引入配置面（零写边界），且
+         * localStorage 已承担「用户显式选择」。宿主有 locale 服务时整条链
+         * 不生效（见 bindLocaleService）——宿主 preference 永远优先。
+         * @returns {string} "zh" | "en"
+         */
+        function detectLocale() {
+            const storage = hudStorage();
+            if (storage !== null) {
+                try {
+                    const raw = storage.getItem(LOCALE_STORAGE_KEY);
+                    if (typeof raw === "string" && SUPPORTED_LOCALES.includes(raw)) return raw;
+                } catch {
+                    /* 存储被禁：跳过这级探测，不崩 */
+                }
+            }
+            const fromNavigator = localeFromNavigator(
+                typeof navigator === "undefined" ? undefined : navigator.language,
+            );
+            if (fromNavigator !== null) return fromNavigator;
+            return I18N_FALLBACK;
+        }
+
+        /**
+         * 本地取词：STRINGS[activeLocale] 缺 key 回落 zh 再缺回落 key 本身。
+         * 「回落 key 本身」是缺译的诚实显示（渲染出 key 比渲染 undefined 或
+         * 抛错好排查）；d29 的「缺 key 回落 zh 不抛错」用它验证。
+         * @param {string} key STRINGS 里的 key
+         * @returns {string} 文案
+         */
+        function localString(key) {
+            const dict = STRINGS[activeLocale] ?? STRINGS[I18N_FALLBACK];
+            const value = dict[key] ?? STRINGS[I18N_FALLBACK][key];
+            return typeof value === "string" ? value : key;
+        }
+
+        /**
+         * 模板填充：{name} 占位符。与宿主 LocaleRuntime.translate 同款实现
+         * （replace 未知占位符原样保留），en 译文里的 {value}/{percent} 靠它。
+         * @param {string} template 含 {name} 占位符的模板
+         * @param {Record<string, unknown>|null} params 参数
+         * @returns {string}
+         */
+        function fillTemplate(template, params) {
+            if (params === null || typeof params !== "object") return template;
+            return template.replace(/\{(\w+)\}/g, (match, name) =>
+                name in params ? String(params[name]) : match,
+            );
+        }
+
+        /**
+         * 统一取词入口（三入口渲染全走它）。
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 宿主注入的 t，或 null（本地兜底）
+         * @param {string} key STRINGS key
+         * @param {Record<string, unknown>|null} [params] 模板参数
+         * @returns {string}
+         */
+        function tOf(t, key, params) {
+            const template = typeof t === "function" ? t(key, params) : localString(key);
+            const safeTemplate = typeof template === "string" ? template : localString(key);
+            return fillTemplate(safeTemplate, params);
+        }
+
+        /**
+         * 宿主 locale 服务接线（plugin-market 同款）：有 locale 服务就注册字典
+         * 并让宿主 preference 决定语言——我们的探测链整条让位；没有就跑本地
+         * 探测链。为什么用 `"locale" in ctx` 而不是声明 inject：d23 断言
+         * plugin.inject 恒为 ["slots"]（既有契约），且 "in" 探测在服务未提供时
+         * 不抛错（cordis has-trap 只查 props 注册表），能优雅降级。
+         * @param {object} ctx cordis 插件上下文
+         * @returns {((key: string, params?: Record<string, unknown>) => string)|null} t 函数，或 null
+         */
+        function bindLocaleService(ctx) {
+            if (typeof ctx !== "object" || ctx === null || !("locale" in ctx)) return null;
+            const locale = ctx.locale;
+            if (locale === null || typeof locale !== "object") return null;
+            if (typeof locale.register !== "function" || typeof locale.bind !== "function") return null;
+            locale.register(I18N_NS, { zh: STRINGS.zh, en: STRINGS.en });
+            return locale.bind(I18N_NS);
+        }
+
+        /** 本地探测链结果（宿主无 locale 服务时的一次性模块状态）。 */
+        function initLocalLocale() {
+            activeLocale = detectLocale();
+            return null;
+        }
 
         /**
          * 取一次状态快照（7+3 字段里本阶段只消费 status/pressure）。
@@ -378,15 +558,16 @@ window.__ModuleLoader__.load({
          * 显示口径：≥1MB 用 MB（一位小数），≥1KB 用 KB（整数），否则原样字节数；
          * 形状不对给 null，渲染层不显示省字节括号。
          * @param {unknown} raw 路由 JSON 的 layers.l12BytesSaved
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 取词函数
          * @returns {string|null}
          */
-        function bytesSavedTextOf(raw) {
+        function bytesSavedTextOf(raw, t) {
             if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
             const KB = 1024;
             const MB = KB * 1024;
-            if (raw >= MB) return `省 ~${(raw / MB).toFixed(1)} MB`;
-            if (raw >= KB) return `省 ~${Math.round(raw / KB)} KB`;
-            return `省 ~${raw} 字节`;
+            if (raw >= MB) return tOf(t, "bytesSavedMB", { value: (raw / MB).toFixed(1) });
+            if (raw >= KB) return tOf(t, "bytesSavedKB", { value: Math.round(raw / KB) });
+            return tOf(t, "bytesSavedBytes", { value: raw });
         }
 
         /**
@@ -442,11 +623,11 @@ window.__ModuleLoader__.load({
             return snapshot;
         }
 
-        /** 快照 → 状态文本（三入口共用）。压力数值不在这里：它是条旁数值文本的职责。 */
-        function statusLineOf(snapshot) {
-            if (snapshot.phase === PHASE_UNAVAILABLE) return UNAVAILABLE_TEXT;
-            if (snapshot.phase === PHASE_LOADING) return LOADING_TEXT;
-            return `状态 ${snapshot.status}`;
+        /** 快照 → 状态文本（三入口共用，t 随渲染注入）。压力数值不在这里：它是条旁数值文本的职责。 */
+        function statusLineOf(snapshot, t) {
+            if (snapshot.phase === PHASE_UNAVAILABLE) return tOf(t, UNAVAILABLE_TEXT_KEY);
+            if (snapshot.phase === PHASE_LOADING) return tOf(t, LOADING_TEXT_KEY);
+            return `${tOf(t, "statusPrefix")} ${snapshot.status}`;
         }
 
         /* ------------------------------------------------------------------ *
@@ -454,74 +635,36 @@ window.__ModuleLoader__.load({
          * ------------------------------------------------------------------ */
 
         /**
-         * 状态字：已知状态给中文短名，其余原样透出（见 STATUS_LABELS 的取舍）。
+         * 状态字：已知状态给 STRINGS 短名，其余原样透出（见 STATUS_LABELS 的取舍）。
          * ok/warn 不在表里，因此仍显示 API 原字面——既有断言与「数值可追溯到
          * API」的性质都不变。
          * 为什么用 hasOwnProperty 而不是直接下标：status 是外部数据，`toString`
          * 这类原型键会让下标命中原型上的函数，渲染出 `function toString()…`。
          * @param {string} status API 的 status 字段
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 取词函数
          * @returns {string}
          */
-        function statusWordOf(status) {
+        function statusWordOf(status, t) {
             if (!Object.prototype.hasOwnProperty.call(STATUS_LABELS, status)) return status;
-            return STATUS_LABELS[status];
-        }
-
-        /**
-         * 侧栏用的状态文本：非 ready 相位直接复用 statusLineOf（占位文案只说
-         * 一次），ready 相位才套状态字表。为什么不改 statusLineOf：settings 与
-         * overlay 的文案是 #2/#4 的既定行为，侧栏不该顺手改掉它们。
-         * @param {{phase: string, status: string|null}} snapshot 渲染快照
-         * @returns {string}
-         */
-        function sidebarStatusTextOf(snapshot) {
-            if (snapshot.phase !== PHASE_READY) return statusLineOf(snapshot);
-            return `状态 ${statusWordOf(snapshot.status)}`;
-        }
-
-        /**
-         * 窗口大小文案：只有 ready 且有可信窗口值时才出——
-         * loading/unavailable 说「读取中…」「数据不可用」，不编一个窗口数。
-         * @param {{phase: string, window: number|null}} snapshot 渲染快照
-         * @returns {string|null}
-         */
-        function windowTextOf(snapshot) {
-            if (snapshot.phase !== PHASE_READY) return null;
-            if (snapshot.window === null) return null;
-            return `窗口 ${snapshot.window}`;
-        }
-
-        /**
-         * 图标行摘要（一行）：状态字 + 压力百分比 + 窗口，三项全部取自同一
-         * 快照字段，不在这里二次换算（pressure 已在 buildReadySnapshot 定型）。
-         * 非 ready 相位只留占位文案，杜绝「读取中 0.0%」这种假读数。
-         * @param {{phase: string, pressure: string|null}} snapshot 渲染快照
-         * @returns {string} 单行摘要
-         */
-        function panellistSummaryOf(snapshot) {
-            const parts = [sidebarStatusTextOf(snapshot)];
-            if (snapshot.phase !== PHASE_READY) return parts.join(" · ");
-            parts.push(snapshot.pressure ?? "");
-            const windowText = windowTextOf(snapshot);
-            if (windowText !== null) parts.push(windowText);
-            return parts.join(" · ");
+            return tOf(t, STATUS_LABELS[status]);
         }
 
         /* ------------------------------------------------------------------ *
-         * #6 四层活动统计：设置页数字块 + 侧栏一行式（数据源同一份快照）
+         * #6 四层活动统计：设置页数字块（数据源同一份快照）
          * ------------------------------------------------------------------ */
 
         /**
          * 「自 HH:mm 起」标注：只有 ready 且 since 可读时才出。
          * sinceTextOf 已把非法值收窄成 null，这里 null 就整段省略，
-         * 绝不渲染 "自 NaN:NaN 起"。
+         * 绝不渲染 "自 NaN:NaN 起"（en 口径 "since HH:mm"，HH:mm 保持本地时间）。
          * @param {{phase: string, sinceText: string|null}} snapshot 渲染快照
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 取词函数
          * @returns {string|null}
          */
-        function sinceMarkOf(snapshot) {
+        function sinceMarkOf(snapshot, t) {
             if (snapshot.phase !== PHASE_READY) return null;
             if (snapshot.sinceText === null) return null;
-            return `自 ${snapshot.sinceText} 起`;
+            return tOf(t, "sinceMark", { time: snapshot.sinceText });
         }
 
         /**
@@ -530,9 +673,10 @@ window.__ModuleLoader__.load({
          * 某项缺失（null）显示「—」：与 0 有区别（0 是读到的，— 是没拿到），
          * 不用假零冒充读数。
          * @param {{phase: string, layers: object|null}} snapshot 渲染快照
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 取词函数
          * @returns {object|null} 区块 vnode；无数据（非 ready 或 layers 缺失）时不渲染
          */
-        function layersBlockOf(snapshot) {
+        function layersBlockOf(snapshot, t) {
             if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
             const layers = snapshot.layers;
 
@@ -540,39 +684,25 @@ window.__ModuleLoader__.load({
                 h(
                     "div",
                     { key: `layer-${key}` },
-                    `${LAYERS_LABELS[key]}　${layers[key] ?? "—"}${key === "spillCount" && layers.spillCount !== null && layers.spillCount > 0 ? `（${bytesSavedTextOf(layers.bytesSaved)}）` : ""}`,
+                    `${tOf(t, LAYERS_LABELS[key])}　${layers[key] ?? tOf(t, "missingValue")}${key === "spillCount" && layers.spillCount !== null && layers.spillCount > 0 ? `（${bytesSavedTextOf(layers.bytesSaved, t)}）` : ""}`,
                 );
 
-            const sinceMark = sinceMarkOf(snapshot);
+            const sinceMark = sinceMarkOf(snapshot, t);
             return h(
                 "div",
                 { key: "layer-stats", "data-testid": LAYERS_BLOCK_TESTID },
-                h("div", { key: "layer-stats-title" }, sinceMark === null ? "本次会话：" : `本次会话（${sinceMark}）：`),
+                h(
+                    "div",
+                    { key: "layer-stats-title" },
+                    sinceMark === null
+                        ? tOf(t, "sessionPrefix")
+                        : tOf(t, "sessionPrefixWithSince", { since: sinceMark }),
+                ),
                 rowOf("l12Processed"),
                 rowOf("spillCount"),
                 rowOf("l3Evicted"),
                 rowOf("l4Summaries"),
             );
-        }
-
-        /**
-         * 侧栏一行式四层数字（任务 #6，方案 §3.2「折叠 N · 落盘 N · 驱逐 N · 摘要 N」）。
-         * 同样带 since 标注；缺数据时整行不出现（同 window 行的取舍）。
-         * @param {{phase: string, layers: object|null}} snapshot 渲染快照
-         * @returns {string|null}
-         */
-        function layersLineOf(snapshot) {
-            if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
-            const l = snapshot.layers;
-            const parts = [
-                `折叠 ${l.l12Processed ?? "—"}`,
-                `落盘 ${l.spillCount ?? "—"}`,
-                `驱逐 ${l.l3Evicted ?? "—"}`,
-                `摘要 ${l.l4Summaries ?? "—"}`,
-            ];
-            const sinceMark = sinceMarkOf(snapshot);
-            if (sinceMark !== null) parts.push(sinceMark);
-            return parts.join(" · ");
         }
 
         /* ------------------------------------------------------------------ *
@@ -825,22 +955,23 @@ window.__ModuleLoader__.load({
          * @param {{phase: string, pressure: string|null}} snapshot 渲染快照
          * @returns {string} 数值文本或占位文本
          */
-        function pressureValueTextOf(snapshot) {
+        function pressureValueTextOf(snapshot, t) {
             if (snapshot.phase === PHASE_READY) return snapshot.pressure ?? "";
-            if (snapshot.phase === PHASE_UNAVAILABLE) return UNAVAILABLE_TEXT;
-            return LOADING_TEXT;
+            if (snapshot.phase === PHASE_UNAVAILABLE) return tOf(t, UNAVAILABLE_TEXT_KEY);
+            return tOf(t, LOADING_TEXT_KEY);
         }
 
         /**
          * 一条刻度线（竖线）：left 取自系内阈值（PRESSURE_MARKS），防止渲染
          * 分支里出现第二个 70/80/82 数字源；title 提供悬停可读的语义标签。
-         * @param {{value: number, label: string}} mark PRESSURE_MARKS 的条目
+         * @param {{value: number, percent: string, key: string}} mark PRESSURE_MARKS 的条目
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 取词函数
          * @returns {object} 刻度线 vnode
          */
-        function renderPressureMark(mark) {
+        function renderPressureMark(mark, t) {
             return h("div", {
-                key: mark.label,
-                title: mark.label,
+                key: mark.key,
+                title: tOf(t, mark.key, { percent: mark.percent }),
                 style: { ...BAR_MARK_BASE_STYLE, left: `${percentNumberOf(mark.value)}%` },
             });
         }
@@ -848,10 +979,11 @@ window.__ModuleLoader__.load({
         /**
          * 刻度线图例行：三个阈值的全称横排（「70% 提醒线 80% 驱逐线 …」），
          * 仅全尺寸入口渲染；overlay 空间小，靠条上的凸齿与 title 表达。
-         * @returns {object[]} 图例文本 vnodes
+         * @param {((key: string, params?: Record<string, unknown>) => string)|null} t 取词函数
+         * @returns {string} 图例文本
          */
-        function renderMarkLegend() {
-            return PRESSURE_MARKS.map((mark) => `${mark.percent} ${mark.label}`).join("　·　");
+        function renderMarkLegend(t) {
+            return PRESSURE_MARKS.map((mark) => tOf(t, mark.key, { percent: mark.percent })).join("　·　");
         }
 
         /**
@@ -862,17 +994,18 @@ window.__ModuleLoader__.load({
          * 数值本身仍来自 API，颜色只是同一份数据的视觉表达。
          * 非数据相位不渲染假数字：宽度为 0（无空条误导），数值文本走占位文案。
          * @param {{phase: string, pressureWidth: string|null}} snapshot 渲染快照
-         * @param {{compact: boolean, valueColor?: string}} options 紧凑开关 + 数值色
+         * @param {{compact: boolean, valueColor?: string, t?: ((key: string, params?: Record<string, unknown>) => string)|null}} options 紧凑开关 + 数值色 + 取词函数
          * @returns {object} 区块 vnode
          */
         function pressureBarBlockOf(snapshot, options) {
-            const valueText = pressureValueTextOf(snapshot);
+            const t = options.t ?? null;
+            const valueText = pressureValueTextOf(snapshot, t);
             const fillStyle =
                 snapshot.phase === PHASE_READY && snapshot.pressureWidth !== null
                     ? { ...BAR_FILL_STYLE, width: snapshot.pressureWidth }
                     : { ...BAR_FILL_STYLE, width: "0%" };
 
-            const markNodes = PRESSURE_MARKS.map(renderPressureMark);
+            const markNodes = PRESSURE_MARKS.map((mark) => renderPressureMark(mark, t));
             const valueNode = h(
                 "span",
                 {
@@ -895,7 +1028,7 @@ window.__ModuleLoader__.load({
                 h(
                     "div",
                     { style: BAR_LEGEND_ROW_STYLE },
-                    ...(options.compact ? [] : [h("span", { key: "marks-legend" }, renderMarkLegend())]),
+                    ...(options.compact ? [] : [h("span", { key: "marks-legend" }, renderMarkLegend(t))]),
                     valueNode,
                 ),
             );
@@ -907,16 +1040,17 @@ window.__ModuleLoader__.load({
          * options.statusText 供侧栏换成自己的状态字（状态字表只影响文案，
          * 数值仍来自同一快照）；不传就沿用三入口共用的 statusLineOf。
          * @param {{phase: string}} snapshot 渲染快照
-         * @param {{compact: boolean, valueColor?: string, statusText?: string}} options 紧凑开关 + 数值色 + 状态文案
+         * @param {{compact: boolean, valueColor?: string, statusText?: string, t?: ((key: string, params?: Record<string, unknown>) => string)|null}} options 紧凑开关 + 数值色 + 状态文案 + 取词函数
          * @returns {object[]} 状态行与压力条 vnodes
          */
         function panelBodyOf(snapshot, options) {
             const isCompact = options.compact === true;
+            const t = options.t ?? null;
             return [
                 h(
                     "div",
                     { key: "status-line", style: isCompact ? HUD_STATUS_STYLE : undefined },
-                    options.statusText ?? statusLineOf(snapshot),
+                    options.statusText ?? statusLineOf(snapshot, t),
                 ),
                 pressureBarBlockOf(snapshot, options),
             ];
@@ -929,99 +1063,16 @@ window.__ModuleLoader__.load({
          * 非 ready 相位不出假数字（数值文本各自降级）。
          */
         function StatusPanel(props) {
+            const t = typeof props.t === "function" ? props.t : null;
             const snapshot = useStatusSnapshot();
-            const layersBlock = layersBlockOf(snapshot);
+            const layersBlock = layersBlockOf(snapshot, t);
             return h(
                 "div",
                 { "data-surface": props.surface },
-                h("div", { key: "panel-title" }, PANEL_TITLE),
-                ...panelBodyOf(snapshot, { compact: false }),
+                h("div", { key: "panel-title" }, tOf(t, PANEL_TITLE_KEY)),
+                ...panelBodyOf(snapshot, { compact: false, t }),
                 // 无四层数据时整块不出现：宁可少一块，也不给假读数
                 ...(layersBlock === null ? [] : [layersBlock]),
-            );
-        }
-
-        /**
-         * 侧栏面板（main 槽位，任务 #5）：「点侧栏图标后看到的那一屏」。
-         * 与设置页的差别只有两处，都是为了「精简」（方案 §3.2）：
-         *   1. 压力条走 compact——刻度线保留（70/80/82 仍要看得见），刻度线
-         *      图例那行字是设置页专有，侧栏不重复；
-         *   2. 多一行「窗口 xxx」——侧栏用户最关心的是「窗口还够不够」，
-         *      数值直接来自 status API 的 window，不在这里换算。
-         * 状态文案用侧栏自己的状态字表（ok 仍是 ok，只是支持「压缩中」这类词）。
-         */
-        function SidebarPanel() {
-            const snapshot = useStatusSnapshot();
-            const windowText = windowTextOf(snapshot);
-            // 任务 #6：四层数字一行式（折叠 N · 落盘 N · 驱逐 N · 摘要 N + since 标注）
-            const layersLine = layersLineOf(snapshot);
-            return h(
-                "div",
-                { "data-surface": SURFACE_SIDEBAR, "data-testid": SIDEBAR_PANEL_TESTID },
-                h("div", { key: "panel-title" }, PANEL_TITLE),
-                ...panelBodyOf(snapshot, {
-                    compact: true,
-                    statusText: sidebarStatusTextOf(snapshot),
-                }),
-                // 无窗口数据时整行不出现：宁可少一行，也不给一个假窗口数
-                ...(windowText === null
-                    ? []
-                    : [h("div", { key: "sidebar-window", style: PANELLIST_SUMMARY_STYLE }, windowText)]),
-                // 四层数字行同样：缺数据整行不出现，不出假零
-                ...(layersLine === null
-                    ? []
-                    : [h("div", { key: "sidebar-layers", style: PANELLIST_SUMMARY_STYLE }, layersLine)]),
-            );
-        }
-
-        /**
-         * 侧栏图标行精简态（sidebar.panellist，任务 #5 验收「图标可见，点击显示
-         * 精简状态」）。
-         * 为什么必须与 SidebarPanel 分开：图标行只有一行的宽高，标题/压力条/四层
-         * 统计塞进去会把侧栏撑坏；这里只要「图标 + 一行摘要（状态 · 压力 · 窗口）」。
-         * 点它之后宿主按 id=key 把 main 槽位换成 SidebarPanel——两屏都精简，
-         * 详细内容留给设置页。
-         * 数据源完全相同：useStatusSnapshot + 同一份 buildReadySnapshot 换算。
-         */
-        function SidebarPanellist() {
-            const snapshot = useStatusSnapshot();
-            const toneKey = pressureToneOf(snapshot);
-            const tone = PRESSURE_TONES[toneKey];
-            return h(
-                "div",
-                {
-                    "data-surface": SURFACE_PANELLIST,
-                    "data-testid": PANELLIST_TESTID,
-                    "data-tone": toneKey,
-                    title: PANEL_TITLE,
-                    style: PANELLIST_ROW_STYLE,
-                },
-                h(
-                    "span",
-                    {
-                        key: "icon",
-                        "data-testid": PANELLIST_ICON_TESTID,
-                        "aria-hidden": "true",
-                        style: PANELLIST_ICON_STYLE,
-                    },
-                    PANEL_ICON,
-                ),
-                h("span", {
-                    key: "tone-dot",
-                    "data-testid": PANELLIST_DOT_TESTID,
-                    "data-tone": toneKey,
-                    title: `压力${tone.label}`,
-                    style: { ...PANELLIST_DOT_STYLE, backgroundColor: tone.color },
-                }),
-                h(
-                    "span",
-                    {
-                        key: "summary",
-                        "data-testid": PANELLIST_SUMMARY_TESTID,
-                        style: PANELLIST_SUMMARY_STYLE,
-                    },
-                    panellistSummaryOf(snapshot),
-                ),
             );
         }
 
@@ -1112,8 +1163,7 @@ window.__ModuleLoader__.load({
          * 生成绑定到某个 surface 的组件（包装层不透传 ownerProps，见 StatusPanel 注释）。
          * 两个入口各自有自己的壳，不能合并：
          *   - overlay 走 HUD 壳（#4 的关闭/拖动状态，塞进面板会把两套状态搅在一起）；
-         *   - sidebar 走 SidebarPanel（精简版：无图例、多窗口行，#5）；
-         *   - settings 才用 StatusPanel（全量视图）。
+         *   - settings 用 StatusPanel（全量视图）。
          * 数据源始终是同一个 useStatusSnapshot。
          */
         function makeSurfaceComponent(surface) {
@@ -1122,30 +1172,13 @@ window.__ModuleLoader__.load({
                     return h(OverlayHud);
                 };
             }
-            if (surface === SURFACE_SIDEBAR) {
-                return function SidebarPanelEntry() {
-                    return h(SidebarPanel);
-                };
-            }
             return function SurfacePanel() {
                 return h(StatusPanel, { surface });
             };
         }
 
-        /**
-         * 侧栏图标行（sidebar.panellist）的精简态组件。
-         * 为什么单独一个工厂而不是 makeSurfaceComponent(SURFACE_SIDEBAR)：注册处
-         * 一眼就能看出「图标行≠主面板」——两者是不同组件，#5 的核心改动就是
-         * 这条注册不再指向主面板。
-         */
-        function makePanellistComponent() {
-            return function SidebarPanellistEntry() {
-                return h(SidebarPanellist);
-            };
-        }
-
         /** 注册设置页分区。order=45：跟在宿主与市场分区之后（方案 §2.2 实测口径）。label 用 thunk（dshmarket 同款）。 */
-        function injectSettingsSection(ctx) {
+        function injectSettingsSection(ctx, t) {
             // 惯例外包装：slot 声明晚到/抖动时由宿主 reconcile 自动重装
             ctx.slots.inject(SETTINGS_SECTION_SLOT, () =>
                 ctx.slots.register(
@@ -1153,41 +1186,26 @@ window.__ModuleLoader__.load({
                         name: SETTINGS_SECTION_SLOT,
                         id: SETTINGS_SECTION_ID,
                         order: SETTINGS_SECTION_ORDER,
-                        label: () => PANEL_TITLE,
+                        // locale 选项：宿主 renderer 给组件注入随语言刷新的 t prop
+                        // （renderer:745）；label thunk 同样随 active locale 重解析
+                        locale: I18N_NS,
+                        label: () => tOf(t, PANEL_TITLE_KEY),
                     },
                     makeSurfaceComponent(SURFACE_SETTINGS),
                 ),
             );
         }
 
-        /**
-         * 侧栏双注册：main 面板（keyed，点图标后展开的那一屏）+ panellist 图标行
-         * （list，图标 + 一行摘要）。label 用 thunk（dshmarket 同款）。
-         * 两处 id/key 必须同字符串：DesktopLayoutState 按 key 匹配面板，否则点了
-         * 图标主区找不到面板（方案 §2.2）。组件则必须是两个——图标行只有一行宽高。
-         */
-        function injectSidebarPanel(ctx) {
-            ctx.slots.inject(MAIN_SLOT, () =>
-                ctx.slots.register({ name: MAIN_SLOT, key: PANEL_KEY }, makeSurfaceComponent(SURFACE_SIDEBAR)),
-            );
-            ctx.slots.inject(SIDEBAR_PANELLIST_SLOT, () =>
-                ctx.slots.register(
-                    {
-                        name: SIDEBAR_PANELLIST_SLOT,
-                        id: PANEL_KEY,
-                        order: SIDEBAR_PANELLIST_ORDER,
-                        label: () => PANEL_TITLE,
-                    },
-                    makePanellistComponent(),
-                ),
-            );
-        }
-
         /** overlay 槽位是 list：条目必须自带 id/label（宿主不注入，dshmarket 同款）。 */
-        function injectShellOverlay(ctx) {
+        function injectShellOverlay(ctx, t) {
             ctx.slots.inject(OVERLAY_SLOT, () =>
                 ctx.slots.register(
-                    { name: OVERLAY_SLOT, id: OVERLAY_ID, label: () => OVERLAY_LABEL },
+                    {
+                        name: OVERLAY_SLOT,
+                        id: OVERLAY_ID,
+                        locale: I18N_NS,
+                        label: () => OVERLAY_LABEL,
+                    },
                     makeSurfaceComponent(SURFACE_OVERLAY),
                 ),
             );
@@ -1197,9 +1215,11 @@ window.__ModuleLoader__.load({
             name: MODULE_ID,
             inject: ["slots"],
             apply(ctx) {
-                injectSettingsSection(ctx);
-                injectSidebarPanel(ctx);
-                injectShellOverlay(ctx);
+                // 宿主有 locale 服务 → 字典注册进宿主、语言跟宿主 preference；
+                // 没有 → 本地探测链兜底（任务 #7 探测决策，见 bindLocaleService）
+                const t = bindLocaleService(ctx) ?? initLocalLocale();
+                injectSettingsSection(ctx, t);
+                injectShellOverlay(ctx, t);
             },
         };
     },

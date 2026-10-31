@@ -160,20 +160,19 @@ test("D23C-1 load 以包名注册，factory 返回插件形状（inject/apply）
     assert.equal(typeof plugin.apply, "function");
 });
 
-test("D23C-2 apply 经 slots.inject 外包装挂三入口（共 4 次声明依赖）", () => {
+test("D23C-2 apply 只挂设置页和低干扰悬浮入口", () => {
     const react = createMockReact();
     const { plugin } = loadClientModule(react);
     const slots = applyModule(plugin);
 
-    // settings + main + panellist + overlay；侧栏是 main/panellist 双注册
     assert.deepEqual(
         [...slots.injections].sort(),
-        ["main", "settings.section", "shell.overlay", "sidebar.panellist"].sort(),
+        ["settings.section", "shell.overlay"].sort(),
     );
-    assert.equal(slots.registrations.length, 4);
+    assert.equal(slots.registrations.length, 2);
 });
 
-test("D23C-3 注册 props 契约：list 带 id、keyed 带 key、panellist id=main key、label 是 thunk", () => {
+test("D23C-3 注册 props 契约：list 带 id、label 是 thunk，不再注册侧栏", () => {
     const react = createMockReact();
     const { plugin } = loadClientModule(react);
     const slots = applyModule(plugin);
@@ -184,12 +183,8 @@ test("D23C-3 注册 props 契约：list 带 id、keyed 带 key、panellist id=ma
     assert.equal(typeof settings.options.label, "function");
     assert.equal(typeof settings.options.label(), "string", "label thunk 必须可求值");
 
-    const main = slots.registrationOf("main");
-    const panellist = slots.registrationOf("sidebar.panellist");
-    // 方案 §2.2：DesktopLayoutState 按 key 匹配面板，两处必须同字符串
-    assert.equal(main.options.key, "tiered-compaction");
-    assert.equal(panellist.options.id, main.options.key, "panellist id 必须与 main key 同字符串");
-    assert.equal(typeof panellist.options.order, "number");
+    assert.equal(slots.registrationOf("main"), undefined, "两入口收敛：不再注册 main");
+    assert.equal(slots.registrationOf("sidebar.panellist"), undefined, "两入口收敛：不再注册 panellist");
 
     const overlay = slots.registrationOf("shell.overlay");
     assert.equal(overlay.options.id, "tiered-compaction-hud");
@@ -197,22 +192,18 @@ test("D23C-3 注册 props 契约：list 带 id、keyed 带 key、panellist id=ma
     assert.equal(typeof overlay.options.label(), "string");
 });
 
-test("D23C-4 组件按 surface 分支：overlay 固定角落定位，settings/sidebar 无预设定位", () => {
+test("D23C-4 组件按 surface 分支：overlay 固定角落定位，设置页不预设定位", () => {
     const react = createMockReact();
     const { plugin } = loadClientModule(react);
     const slots = applyModule(plugin);
 
     const settingsTree = surfaceTreeOf(slots, "settings.section");
     assert.equal(settingsTree.props["data-surface"], "settings");
-    assert.equal(settingsTree.props.style, undefined, "占位期非 overlay 不预设定位样式");
-
-    const sidebarTree = surfaceTreeOf(slots, "main");
-    assert.equal(sidebarTree.props["data-surface"], "sidebar");
-    assert.equal(sidebarTree.props.style, undefined);
+    assert.equal(settingsTree.props.style, undefined, "非 overlay 不预设定位样式");
 
     const overlayTree = surfaceTreeOf(slots, "shell.overlay");
     assert.equal(overlayTree.props["data-surface"], "overlay");
-    assert.equal(overlayTree.props.style.position, "fixed", "骨架期给固定角落占位渲染");
+    assert.equal(overlayTree.props.style.position, "fixed", "overlay 使用固定定位");
 });
 
 test("D23C-5 初始态渲染标题 + 状态文本，不是空白", () => {
@@ -227,7 +218,7 @@ test("D23C-5 初始态渲染标题 + 状态文本，不是空白", () => {
 
 test("D23C-6 fetch 只请求 pathname（不带 origin/query），成功后显示 status/pressure", async () => {
     const { text, requested } = await renderedTextWithFetch({
-        slotName: "main",
+        slotName: "settings.section",
         fetchMock: () => ({ ok: true, json: async () => FAKE_SNAPSHOT }),
     });
     assert.deepEqual(requested, [STATUS_ROUTE_PATH], "必须只取 pathname，不带 baseURI 的 origin/query");
@@ -255,7 +246,7 @@ test("D23C-8 fetch 网络失败 → 「数据不可用」占位", async () => {
 
 test("D23C-9 响应形状不对（缺 status/pressure）→ 「数据不可用」占位", async () => {
     const { text } = await renderedTextWithFetch({
-        slotName: "main",
+        slotName: "settings.section",
         fetchMock: () => ({ ok: true, json: async () => ({ status: "ok" }) }),
     });
     assert.match(text, /数据不可用/);

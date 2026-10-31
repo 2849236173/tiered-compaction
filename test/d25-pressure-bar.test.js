@@ -178,8 +178,8 @@ function pressureValueTextOf(tree) {
     return valueText;
 }
 
-test("D25-1 压力条区块在三入口都有渲染（settings/main/overlay）", async () => {
-    for (const slotName of ["settings.section", "main", "shell.overlay"]) {
+test("D25-1 压力条区块在两入口都有渲染（settings/overlay）", async () => {
+    for (const slotName of ["settings.section", "shell.overlay"]) {
         const tree = await renderedTreeOf({ slotName });
         assert.ok(nodeWithTestId(tree, PRESSURE_BAR_TESTID), `${slotName} 必须渲染压力条区块`);
     }
@@ -199,12 +199,12 @@ test("D25-2 ready 态三条刻度线：left=70%/80%/82% 位置互异，title 带
 });
 
 test("D25-3 数值文本=API 值：换一组 mock pressure，文本随之变化且填充宽度同源", async () => {
-    const treeA = await renderedTreeOf({ slotName: "main" });
+    const treeA = await renderedTreeOf({ slotName: "settings.section" });
     assert.match(collectTextOf(treeA), /27\.0%/, "PAYLOAD_A(0.27) 的数值文本必须是 27.0%");
     const widthsA = allNodesOf(treeA, (node) => typeof node.props?.style?.width === "string").map((node) => node.props.style.width);
     assert.ok(widthsA.includes("27%"), "填充宽度必须来自 API 的 pressure（27%）");
 
-    const treeB = await renderedTreeOf({ slotName: "main", fetchMock: () => ({ ok: true, json: async () => PAYLOAD_B }) });
+    const treeB = await renderedTreeOf({ slotName: "settings.section", fetchMock: () => ({ ok: true, json: async () => PAYLOAD_B }) });
     assert.match(collectTextOf(treeB), /12\.3%/, "PAYLOAD_B(0.1234) 的数值文本必须是 12.3%");
     const widthsB = allNodesOf(treeB, (node) => typeof node.props?.style?.width === "string").map((node) => node.props.style.width);
     assert.ok(widthsB.includes("12.34%"), "填充宽度跟着 API 值变（12.34%），证明不是写死的常数");
@@ -231,7 +231,7 @@ test("D25-4 loading 态：不出 x.x% 假数字，显「读取中…」，填充
 
 test("D25-5 unavailable 态：不出 x.x% 假数字，显「数据不可用」", async () => {
     const tree = await renderedTreeOf({
-        slotName: "main",
+        slotName: "settings.section",
         fetchMock: () => { throw new Error("network down"); },
     });
     const barText = collectTextOf(nodeWithTestId(tree, PRESSURE_BAR_TESTID));

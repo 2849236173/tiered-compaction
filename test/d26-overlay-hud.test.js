@@ -451,21 +451,19 @@ test("D26-8 有 PointerEvent 时走 pointer 事件族（鼠标/触控/笔一套�
     assert.deepEqual(storedHudStateOf(storage), { closed: false, left: 430, top: 350 }, "pointer 拖动同样落盘");
 });
 
-test("D26-9 关闭只关 overlay：settings/main 两个入口照常渲染", async () => {
+test("D26-9 关闭只关 overlay：settings 入口照常渲染", async () => {
     const storage = createStorageMock({ [HUD_STATE_KEY]: JSON.stringify({ closed: true, left: null, top: null }) });
     const react = createMockReact();
     const { plugin, sandbox } = loadClientModule(react, { storage });
     const slots = applyModule(plugin);
     sandbox.fetch = async () => ({ ok: true, json: async () => PAYLOAD_OK });
 
-    for (const slotName of ["settings.section", "main"]) {
-        const entry = slots.registrationOf(slotName);
-        react.render(entry.component, {});
-        await react.runEffects();
-        await new Promise((resolve) => setImmediate(resolve));
-        const tree = react.render(entry.component, {});
-        assert.ok(nodeWithTestId(tree, PRESSURE_BAR_TESTID), `${slotName} 的压力条不能被 overlay 的关闭状态影响`);
-    }
+    const entry = slots.registrationOf("settings.section");
+    react.render(entry.component, {});
+    await react.runEffects();
+    await new Promise((resolve) => setImmediate(resolve));
+    const tree = react.render(entry.component, {});
+    assert.ok(nodeWithTestId(tree, PRESSURE_BAR_TESTID), "settings 的压力条不能被 overlay 的关闭状态影响");
 
     // overlay 侧确实不渲染——同一次会话里两件事同时成立
     const overlayEntry = slots.registrationOf(OVERLAY_SLOT);
