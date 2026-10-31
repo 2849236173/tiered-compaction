@@ -11,6 +11,7 @@
  *
  * 运行：node --test test/m45-wiring.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";

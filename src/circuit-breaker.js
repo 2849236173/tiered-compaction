@@ -9,7 +9,8 @@
  * 软压力最后」的顺序短路：折叠后已 ≤ 阈值的内容不再落盘。
  */
 import { foldRepeatedLines } from "./lossless-fold.js";
-import { spillIfNeeded, DEFAULT_SPILL_THRESHOLD, byteLength } from "./spill-to-disk.js";
+import { nodeLocation } from "./lineage.js";
+import { spillIfNeeded, headTailPreview, DEFAULT_SPILL_THRESHOLD, byteLength } from "./spill-to-disk.js";
 
 /**
  * 单层熔断器。
@@ -62,14 +63,23 @@ export class CircuitBreaker {
  * 仲裁器：对一段工具输出决定唯一处理层并执行（含谱系登记）。
  * 顺序：先无损折叠；折叠后仍 >8k 才落盘；都不需要则原样返回。
  *
+ * S2/S6（beta3 审计）：直接返回**本次**产出的存档 `archive`（折叠存档或落盘存档），
+ * 调用方不再按 `node#seq` 反查进程级谱系表——那个键不带会话维度，
+ * 跨会话同 seq 会拿到别人的路径；只折叠时也必须给出存档入口。
+ * S5：折叠与落盘同时命中时只写一份存档，落盘直接复用折叠存档（内容都是原文）。
+ *
  * @param {string} text 工具输出
- * @param {{seq: number|string, sessionId?: string}} at 内容在会话中的位置（sessionId 可选，用于文件名去重）
+ * @param {{seq: number|string, sessionId?: string}} at 内容在会话中的位置（sessionId 可选，用于文件名去重与谱系键）
  * @param {{archiveDir: string, lineage: import('./lineage.js').Lineage, spillBreaker?: CircuitBreaker}} deps
- * @returns {Promise<{text: string, layers: string[]}>} 处理后文本与实际命中的层清单
+ * @returns {Promise<{text: string, layers: string[], archive: null | {path: string, sha256: string, size: number}}>}
+ *   处理后文本、实际命中的层清单、本次产出的存档（无存档为 null）
  */
 export async function arbitrate(text, at, deps) {
     const lineage = deps.lineage;
+    const location = nodeLocation(at.seq, at.sessionId);
     const layers = [];
+    /** @type {null | {path: string, sha256: string, size: number}} */
+    let archive = null;
     // 第 1 层：无损折叠（纯内存变换，但**原文必须落盘**——见下方 P0 修复说明）
     const { folded, record } = foldRepeatedLines(text);
     let current = folded;
@@ -94,44 +104,51 @@ export async function arbitrate(text, at, deps) {
             deps.logger?.warn?.(
                 `tiered-compaction: 折叠存档失败，放弃本次折叠以保原文可恢复：${error?.message ?? error}`,
             );
-            return { text, layers: [] };
+            return { text, layers: [], archive: null };
         }
-        if (foldArchive !== null) {
-            lineage.record(`node#${at.seq}`, foldArchive.path, "lossless-fold", foldArchive.sha256);
-            layers.push("fold-archive");
-        } else {
+        if (foldArchive === null) {
             // threshold:1 下不该出现 null；真出现就视为存档失败，同样放弃折叠
-            return { text, layers: [] };
+            return { text, layers: [], archive: null };
         }
+        lineage.record(location, foldArchive.path, "lossless-fold", foldArchive.sha256);
+        layers.push("fold-archive");
+        archive = archiveOf(foldArchive);
     }
     // 第 2 层：落盘（带熔断；>8k 字节才触发，仲裁器保证不与其它层重复处理）
     // P3-1：阈值口径统一为 UTF-8 字节数，与 spillIfNeeded 内部判断一致
     if (byteLength(current) > DEFAULT_SPILL_THRESHOLD) {
+        // P0 审计（2026-10-27）：落盘必须写**原始文本**，不能写折叠产物——
+        // 存档本身必须是能独立还原的原文，折叠只作用于回填表面的预览。
+        if (archive !== null) {
+            // S5：折叠存档已经是原文全文，复用它，不再写第二份
+            layers.push("spill-to-disk");
+            lineage.record(location, archive.path, "spill-to-disk", archive.sha256);
+            current = headTailPreview(text);
+            return { text: current, layers, archive };
+        }
         const name = spillBaseName(at);
-        // P0 审计（2026-10-27）：落盘必须写**原始文本**，不能写折叠产物。
-        //
-        // 缺陷：旧实现把 `current`（折叠后内容）传给 spillIfNeeded，而
-        // `foldRepeatedLines` 返回的 `record`（含完整原文）被直接丢弃、
-        // 从未持久化。实测：
-        //   原文 17589 字节 → 磁盘 16429 字节，且磁盘内容含 `…[folded` 标记
-        // → 「落盘 = 完整存档、可逐字节还原」这条安全底线是假的；
-        //   要还原还得依赖当次进程内存里的折叠记录，进程重启后原文永久丢失。
-        //
-        // 修法：落盘传原始 `text`。折叠只作用于**回填表面的预览**，
-        // 存档本身必须是能独立还原的原文。
         const spill = deps.spillBreaker
             ? await deps.spillBreaker.exec(() => spillIfNeeded(text, deps.archiveDir, name))
             : await spillIfNeeded(text, deps.archiveDir, name);
         if (spill) {
             layers.push("spill-to-disk");
-            lineage.record(`node#${at.seq}`, spill.path, "spill-to-disk", spill.sha256);
-            // 回填表面的仍是折叠后的预览（体积小，且够模型判断要不要回读）
+            lineage.record(location, spill.path, "spill-to-disk", spill.sha256);
             current = spill.preview;
+            archive = archiveOf(spill);
         } else {
             layers.push("spill-to-disk:bypassed(circuit-open)");
         }
     }
-    return { text: current, layers };
+    return { text: current, layers, archive };
+}
+
+/**
+ * 从 spillIfNeeded 的结果里取存档入口三元组。
+ * @param {{path: string, sha256: string, size: number}} spill
+ * @returns {{path: string, sha256: string, size: number}}
+ */
+function archiveOf(spill) {
+    return { path: spill.path, sha256: spill.sha256, size: spill.size };
 }
 
 /**

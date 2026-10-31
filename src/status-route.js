@@ -32,11 +32,27 @@ function sendJson(res, statusCode, payload) {
 }
 
 /**
+ * 从请求 URL 取 `session` 查询参数；没有或为空返回 undefined。
+ * @param {{url?: string}} req
+ * @returns {string|undefined}
+ */
+export function sessionIdOf(req) {
+    if (typeof req?.url !== "string") return undefined;
+    let value;
+    try {
+        value = new URL(req.url, "http://x").searchParams.get("session");
+    } catch {
+        return undefined;
+    }
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
  * 注册状态路由。
  *
  * @param {object} deps
  * @param {object} deps.ctx 服务上下文（用 ctx.get 探针取 webServer，见头部说明）
- * @param {() => object} deps.buildPayload 状态载荷工厂（由 contract 提供，
+ * @param {(sessionId?: string) => object} deps.buildPayload 状态载荷工厂（由 contract 提供，
  *   本模块不感知数据来源，只负责协议：方法校验、编码、降级）
  * @returns {() => void} 注销器；未注册或注册失败时返回空函数，调用方无需分支
  */
@@ -60,7 +76,10 @@ export function registerStatusRoute({ ctx, buildPayload }) {
                     return;
                 }
                 try {
-                    sendJson(res, 200, buildPayload());
+                    // `?session=<id>`：client 按当前主视图会话取数；缺省时由
+                    // buildPayload 退回最近活跃会话。exact 路由按 pathname 匹配，
+                    // query 原样留在 req.url 里。
+                    sendJson(res, 200, buildPayload(sessionIdOf(req)));
                 } catch (error) {
                     // 载荷拼装失败也必须给 client 一个可渲染的降级信号
                     //（#9 反向验证就靠这个 error 字段触发「数据不可用」态）
@@ -77,4 +96,88 @@ export function registerStatusRoute({ ctx, buildPayload }) {
         );
         return () => {};
     }
+}
+
+/**
+ * 进程级路由席位表（beta3 W3/W4）：`Symbol.for` 挂 globalThis，抗模块多副本。
+ * candidates 按 apply 先后排队；只有队首（active）真正挂路由。
+ */
+const ROUTE_SEAT = Symbol.for("dsh-tiered-compaction.status-route.seat");
+
+function routeSeat() {
+    let seat = globalThis[ROUTE_SEAT];
+    if (!seat || typeof seat !== "object" || !Array.isArray(seat.candidates)) {
+        seat = { candidates: [], active: null };
+        globalThis[ROUTE_SEAT] = seat;
+    }
+    return seat;
+}
+
+function promote(seat) {
+    while (seat.active === null && seat.candidates.length > 0) {
+        const next = seat.candidates[0];
+        seat.active = next;
+        try {
+            next.start();
+        } catch {
+            // 候选的 fiber 已在卸载途中（inject 抛 inactive）：跳过它，试下一个
+            seat.active = null;
+            seat.candidates.shift();
+        }
+    }
+}
+
+/**
+ * 挂状态路由：全进程恰好一条（W3/W4）。
+ *
+ * - 多个实例都调用时只有第一个真正挂；它卸载后由下一个候选补位，
+ *   所以「root + 若干 preset realm」任意卸载顺序下都始终恰好一条。
+ * - 注册包在 `ctx.effect` 里：fiber 回收时自动注销路由并让出席位。
+ * - webServer 晚到（root apply 时尚未 provide，宿主日志实测）：用
+ *   `ctx.inject(["webServer"], ...)` 声明式等待，webServer 出现才挂、
+ *   消失即随之注销、再出现再挂。
+ * - ctx 不是 cordis Context（无 effect / inject，单测桩）时退回一次性
+ *   registerStatusRoute。
+ *
+ * @param {{ctx: object, buildPayload: (sessionId?: string) => object}} deps
+ */
+export function mountStatusRoute({ ctx, buildPayload }) {
+    if (typeof ctx?.effect !== "function" || typeof ctx?.inject !== "function") {
+        registerStatusRoute({ ctx, buildPayload });
+        return;
+    }
+    ctx.effect(() => {
+        const seat = routeSeat();
+        const candidate = {
+            fiber: null,
+            start() {
+                this.fiber = ctx.inject(["webServer"], (webCtx) => {
+                    webCtx.effect(
+                        () => registerStatusRoute({ ctx: webCtx, buildPayload }),
+                        "tiered-compaction status route",
+                    );
+                });
+            },
+        };
+        seat.candidates.push(candidate);
+        promote(seat);
+        return () => {
+            const current = globalThis[ROUTE_SEAT];
+            if (!current) return;
+            current.candidates = current.candidates.filter((c) => c !== candidate);
+            if (current.active === candidate) {
+                current.active = null;
+                const fiber = candidate.fiber;
+                candidate.fiber = null;
+                // 先等本候选的路由注销完再补位：同一 exact 路径不能有两条并存
+                const disposing = Promise.resolve(fiber?.dispose?.()).catch(() => {});
+                return disposing.then(() => promote(current));
+            }
+        };
+    }, "tiered-compaction status route seat");
+}
+
+/** 仅测试用：清空路由席位表（理由同 __resetSingleWriterForTests）。 */
+export function __resetStatusRouteForTests() {
+    delete globalThis[ROUTE_SEAT];
 }

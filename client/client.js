@@ -595,13 +595,30 @@ window.__ModuleLoader__.load({
         }
 
         /**
-         * 取一次状态快照（7+3 字段里本阶段只消费 status/pressure）。
-         * 为什么用 new URL(...).pathname 而非整 URL：宿主页面可能挂在带
-         * query/hash 的地址上，只取同源路径部分，避免把这些带进请求。
+         * 拼状态请求地址：同源路径 + 可选 `?session=<id>`。
+         * 为什么不用整 URL：宿主页面可能挂在带 query/hash 的地址上，只取同源
+         * 路径部分，避免把页面自己的参数带进请求；但我们**自己的** session 参数
+         * 必须保留——旧实现取 `.pathname` 会把它一起丢掉。
+         * @param {string|null} sessionId 当前主视图会话；null 时不带参数（退回最近活跃会话）
+         * @returns {string}
+         */
+        function statusUrlOf(sessionId) {
+            const url = new URL(STATUS_PATH, document.baseURI);
+            url.search = "";
+            url.hash = "";
+            if (typeof sessionId === "string" && sessionId.length > 0) {
+                url.searchParams.set("session", sessionId);
+            }
+            return `${url.pathname}${url.search}`;
+        }
+
+        /**
+         * 取一次状态快照。
+         * @param {string|null} sessionId 见 statusUrlOf
          * @returns {Promise<object>} 路由 JSON
          */
-        function fetchStatusSnapshot() {
-            const url = new URL(STATUS_PATH, document.baseURI).pathname;
+        function fetchStatusSnapshot(sessionId) {
+            const url = statusUrlOf(sessionId);
             return fetch(url).then((response) => {
                 // 非 200 一律当失败：#9 反向验证摘除路由后必须落到「数据不可用」
                 if (!response.ok) throw new Error(`status route responded ${response.status}`);
@@ -638,6 +655,8 @@ window.__ModuleLoader__.load({
                 // 不把整条快照打成不可用
                 layers: layersOf(payload.layers),
                 sinceText: sinceTextOf(payload.since),
+                // 保留快照所属会话：入口据此判断「是不是当前会话的数据」
+                sessionId: typeof payload.sessionId === "string" ? payload.sessionId : null,
             };
         }
 
@@ -723,26 +742,147 @@ window.__ModuleLoader__.load({
             return `${percentNumberOf(pressure).toFixed(1)}%`;
         }
 
+        /** 轮询间隔：5 秒。状态读数是只读内存计数，取一次很便宜。 */
+        const STATUS_POLL_MS = 5000;
+
         /**
-         * 挂载即取数一次（轮询/按需刷新属 #3~#6）。
-         * 失败分支必须显式落到 UNAVAILABLE，不允许空 catch。
+         * 模块级共享状态源：两个入口（设置分区、悬浮 HUD）读同一份快照。
+         *
+         * 旧实现每个入口各自 `useEffect(..., [])` 挂载时 fetch 一次，之后永不刷新：
+         * 数据从 0 变成非零也看不到，两个入口还可能显示不同时刻的数。
+         *   - target：当前请求的会话 id（undefined=还没请求过，null=不带参数）；
+         *   - requestSeq：只认最后一次发出的请求，避免 A 的迟到响应盖掉 B；
+         *   - 有订阅者时每 5 秒轮询，页面不可见时跳过，订阅清零时停表。
          */
-        function useStatusSnapshot() {
-            const [snapshot, setSnapshot] = React.useState(LOADING_SNAPSHOT);
-            React.useEffect(() => {
-                let isActive = true;
-                fetchStatusSnapshot().then(
-                    (payload) => {
-                        if (isActive) setSnapshot(buildReadySnapshot(payload));
-                    },
-                    () => {
-                        if (isActive) setSnapshot(UNAVAILABLE_SNAPSHOT);
-                    },
-                );
-                return () => {
-                    isActive = false;
+        const statusStore = {
+            snapshot: LOADING_SNAPSHOT,
+            target: undefined,
+            listeners: new Set(),
+            requestSeq: 0,
+            timer: null,
+            onVisibility: null,
+        };
+
+        /** 页面是否不可见（没有 document 的环境按可见处理）。 */
+        function isPageHidden() {
+            return typeof document !== "undefined" && document.visibilityState === "hidden";
+        }
+
+        /** 写入新快照并通知所有订阅者。 */
+        function publishStatus(snapshot) {
+            statusStore.snapshot = snapshot;
+            for (const listener of [...statusStore.listeners]) listener(snapshot);
+        }
+
+        /**
+         * 按当前 target 取一次数。失败分支必须显式落到 UNAVAILABLE，不允许空 catch。
+         * @returns {Promise<void>}
+         */
+        function refreshStatus() {
+            statusStore.requestSeq += 1;
+            const seq = statusStore.requestSeq;
+            const target = statusStore.target ?? null;
+            return fetchStatusSnapshot(target).then(
+                (payload) => {
+                    if (seq === statusStore.requestSeq) publishStatus(buildReadySnapshot(payload));
+                },
+                () => {
+                    if (seq === statusStore.requestSeq) publishStatus(UNAVAILABLE_SNAPSHOT);
+                },
+            );
+        }
+
+        /** 启动轮询与可见性监听（幂等）。宿主环境缺定时器时只保留「切会话即刷新」。 */
+        function startStatusPolling() {
+            if (statusStore.timer === null && typeof setInterval === "function") {
+                statusStore.timer = setInterval(() => {
+                    if (!isPageHidden()) refreshStatus();
+                }, STATUS_POLL_MS);
+            }
+            if (
+                statusStore.onVisibility === null &&
+                typeof document !== "undefined" &&
+                typeof document.addEventListener === "function"
+            ) {
+                // 页面重新可见时立刻补一次，不等下一个 5 秒
+                statusStore.onVisibility = () => {
+                    if (!isPageHidden()) refreshStatus();
                 };
-            }, []);
+                document.addEventListener("visibilitychange", statusStore.onVisibility);
+            }
+        }
+
+        /** 最后一个订阅者离开时停表、摘监听。 */
+        function stopStatusPolling() {
+            if (statusStore.timer !== null && typeof clearInterval === "function") {
+                clearInterval(statusStore.timer);
+            }
+            statusStore.timer = null;
+            if (statusStore.onVisibility !== null && typeof document?.removeEventListener === "function") {
+                document.removeEventListener("visibilitychange", statusStore.onVisibility);
+            }
+            statusStore.onVisibility = null;
+        }
+
+        /**
+         * 订阅共享快照并声明当前会话。
+         * 会话变了、或这是第一个订阅者（之前的快照可能已过期）时立即刷新；
+         * 同一会话的第二个入口直接复用现有快照，不重复请求。
+         * @param {(snapshot: object) => void} listener
+         * @param {string|null} sessionId
+         * @returns {() => void} 退订
+         */
+        function attachStatus(listener, sessionId) {
+            const wasIdle = statusStore.listeners.size === 0;
+            statusStore.listeners.add(listener);
+            listener(statusStore.snapshot);
+            const changed = statusStore.target !== sessionId;
+            statusStore.target = sessionId;
+            if (wasIdle) startStatusPolling();
+            if (changed || wasIdle) refreshStatus();
+            return () => {
+                statusStore.listeners.delete(listener);
+                if (statusStore.listeners.size === 0) stopStatusPolling();
+            };
+        }
+
+        /**
+         * 当前主视图会话 id。
+         * 依据：shell.overlay / settings.section 两个槽位的 standardProps 都带
+         * `useSessions`；会话摘要的 `retainedBy.mainView > 0` 表示它正显示在主视图
+         * （宿主 dsh-client-ui-cordis 的 CordisPanel 用同一判据取当前会话）。
+         * 拿不到 useSessions 时返回 null，请求退回无参数（host 用最近活跃会话）。
+         * @param {Function|undefined} useSessions 宿主注入的 hook
+         * @returns {string|null}
+         */
+        function useCurrentSessionId(useSessions) {
+            if (typeof useSessions !== "function") return null;
+            const id = useSessions((state) => {
+                const byId = state?.byId;
+                if (byId === null || typeof byId !== "object") return null;
+                for (const session of Object.values(byId)) {
+                    if ((session?.retainedBy?.mainView ?? 0) > 0) return session.id ?? null;
+                }
+                return null;
+            });
+            return typeof id === "string" && id.length > 0 ? id : null;
+        }
+
+        /**
+         * 读共享快照（两入口同源）。快照属于别的会话时按「加载中」处理，
+         * 不把上一个会话的数字显示在当前会话下。
+         * @param {string|null} sessionId 当前会话；null=不区分会话
+         */
+        function useStatusSnapshot(sessionId = null) {
+            const [snapshot, setSnapshot] = React.useState(statusStore.snapshot);
+            React.useEffect(() => attachStatus(setSnapshot, sessionId), [sessionId]);
+            if (
+                sessionId !== null &&
+                snapshot.phase === PHASE_READY &&
+                snapshot.sessionId !== sessionId
+            ) {
+                return LOADING_SNAPSHOT;
+            }
             return snapshot;
         }
 
@@ -1216,7 +1356,7 @@ window.__ModuleLoader__.load({
          */
         function StatusPanel(props) {
             const t = typeof props.t === "function" ? props.t : null;
-            const snapshot = useStatusSnapshot();
+            const snapshot = useStatusSnapshot(useCurrentSessionId(props?.useSessions));
             const layersBlock = layersBlockOf(snapshot, t);
             const toneKey = pressureToneOf(snapshot);
             const tone = PRESSURE_TONES[toneKey];
@@ -1284,7 +1424,7 @@ window.__ModuleLoader__.load({
          */
         function OverlayHud(props) {
             const t = typeof props?.t === "function" ? props.t : null;
-            const snapshot = useStatusSnapshot();
+            const snapshot = useStatusSnapshot(useCurrentSessionId(props?.useSessions));
             const [hudState, setHudState] = React.useState(readHudState);
             const state = normalizeHudState(hudState);
             if (state.closed) return null;
@@ -1375,16 +1515,17 @@ window.__ModuleLoader__.load({
          * 两个入口各自有自己的壳，不能合并：
          *   - overlay 走 HUD 壳（#4 的关闭/拖动状态，塞进面板会把两套状态搅在一起）；
          *   - settings 用 StatusPanel（全量视图）。
-         * 数据源始终是同一个 useStatusSnapshot。
+         * 数据源始终是同一个 useStatusSnapshot（模块级 statusStore）。
+         * 只透传宿主 standardProps 里的 `useSessions`：两个入口靠它取当前主视图会话。
          */
         function makeSurfaceComponent(surface, t) {
             if (surface === SURFACE_OVERLAY) {
-                return function SurfacePanel() {
-                    return h(OverlayHud, { t });
+                return function SurfacePanel(props) {
+                    return h(OverlayHud, { t, useSessions: props?.useSessions });
                 };
             }
-            return function SurfacePanel() {
-                return h(StatusPanel, { surface, t });
+            return function SurfacePanel(props) {
+                return h(StatusPanel, { surface, t, useSessions: props?.useSessions });
             };
         }
 

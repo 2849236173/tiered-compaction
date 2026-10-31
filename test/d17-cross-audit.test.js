@@ -11,6 +11,7 @@
  *
  * 运行：node --test test/d17-cross-audit.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readdir } from "node:fs/promises";

@@ -22,6 +22,7 @@
  *
  * 运行：node --test test/d17-span-positional.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";

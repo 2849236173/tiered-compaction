@@ -20,6 +20,7 @@
  *
  * 运行：node --test test/d28-layer-stats.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

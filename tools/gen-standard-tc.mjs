@@ -24,7 +24,10 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import yaml from "js-yaml";
-import { assertNoStaleScopeNames, optionValue, resolvePluginName } from "./lib/plugin-name.mjs";
+import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "./lib/plugin-name.mjs";
+
+/** D2：本 preset 的 realm 标识，写进引擎 config.scopeId（单写者守卫按它分座）。 */
+const SCOPE_ID = "standard";
 
 /** `!!js` 自定义标量：构造成 { __js: 源码 }，与现有 gen-ptc-tc 保持一致。 */
 const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
@@ -90,7 +93,7 @@ function buildStandardTc(standard, pluginName) {
     const target = {
         id: "tiered-compaction",
         name: pluginName,
-        config: { enabled: true, archiveDir },
+        config: { enabled: true, archiveDir, scopeId: SCOPE_ID },
     };
 
     const basicIdx = group.config.findIndex((p) => p.id === "compaction-basic");
@@ -104,8 +107,14 @@ function buildStandardTc(standard, pluginName) {
     if (tcIdx < 0) {
         throw new Error("compaction 组里既无 compaction-basic 也无 tiered-compaction，结构异常");
     }
-    // 已应用过：把条目规范化成目标形态（archiveDir 可能被改过）
-    group.config[tcIdx] = target;
+    // 已应用过：合并而非覆盖——保留用户在条目上加的其它配置（如 auto、阈值），
+    // 只把 name / enabled / archiveDir / scopeId 规范化成目标值
+    const existing = group.config[tcIdx];
+    group.config[tcIdx] = {
+        ...existing,
+        ...target,
+        config: { ...(existing?.config ?? {}), ...target.config },
+    };
     return { entry: tc, alreadyApplied: true };
 }
 
@@ -133,9 +142,18 @@ function diffTree(a, b, path = "(root)", out = []) {
 }
 
 const dumpText = readFileSync(dumpPath, "utf8");
-// 包名一律从「这台机器实际装了什么」推导，禁止硬编码（见 tools/lib/plugin-name.mjs 顶部事故说明）。
-const pluginName = resolvePluginName({ profileDir, override: pluginNameOverride, dumpText });
-console.log(`插件包名（从已装包推导）: ${pluginName}`);
+// D2：preset 行的 name 固定为 npm 包名 dsh-tiered-compaction（正式发布名）。
+// 仍探测一次已装包：探测结果不同（如 @local/ 本地链接）只告警，不改写产物。
+const pluginName = PLUGIN_BASENAME;
+try {
+    const installed = resolvePluginName({ profileDir, override: pluginNameOverride, dumpText });
+    if (installed !== pluginName) {
+        console.warn(`警告：本机解析到的包名是 ${installed}，产物仍写 ${pluginName}；请改用 npm 正式包安装，否则 preset 行会 import 失败`);
+    }
+} catch (error) {
+    console.warn(`警告：未能确认本机已装 ${pluginName}（${error?.message ?? error}）`);
+}
+console.log(`插件包名: ${pluginName}`);
 
 const { entry: standard, span } = loadPreset(dumpText, "standard");
 const { entry: tc, alreadyApplied } = buildStandardTc(standard, pluginName);
@@ -169,6 +187,7 @@ const expected = [
 ];
 const archivePath = `${base}.config.archiveDir`;
 const enabledPath = `${base}.config.enabled`;
+const scopePath = `${base}.config.scopeId`;
 
 const problems = [];
 // 铁律：preset id 必须仍是 standard，否则 ds-bot 与 136 个存量会话全部找不到 preset。
@@ -179,8 +198,8 @@ if (tc.config.id !== standard.config.id) {
 // 已应用过时，dump 里本来就是目标形态，diff 只剩 archiveDir/enabled 之类，
 // 差异条数会不同；此时只校验「最终形态正确」，不要求差异条数。
 if (!alreadyApplied) {
-    if (flat.length !== expected.length + 2) {
-        problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 2}（含 description/enabled/archiveDir）`);
+    if (flat.length !== expected.length + 3) {
+        problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 3}（含 description/enabled/archiveDir/scopeId）`);
     }
     for (const exp of expected) {
         const hit = flat.find((d) => d.path === exp.path);
@@ -199,6 +218,7 @@ else {
     if (applied.name !== pluginName) problems.push(`引擎 name 错误：${applied.name}`);
     if (applied.config?.enabled !== true) problems.push("引擎 enabled 必须为 true");
     if (applied.config?.archiveDir !== archiveDir) problems.push(`archiveDir 应为 ${archiveDir}，实际 ${applied.config?.archiveDir}`);
+    if (applied.config?.scopeId !== SCOPE_ID) problems.push(`scopeId 应为 ${SCOPE_ID}，实际 ${JSON.stringify(applied.config?.scopeId)}`);
 }
 // description 护栏：宿主列表 UI 依赖它显示介绍（PO 单 #1）。
 // 放在 alreadyApplied 分支之外，重复 Apply 时也校验最终形态。
@@ -218,7 +238,7 @@ if (!alreadyApplied) {
     else if (typeof adHit.to !== "string" || adHit.to.length === 0) problems.push(`${archivePath} 应为非空字符串`);
 }
 
-const allowed = new Set([...expected.map((e) => e.path), enabledPath, archivePath]);
+const allowed = new Set([...expected.map((e) => e.path), enabledPath, archivePath, scopePath]);
 for (const d of flat) {
     if (!allowed.has(d.path)) problems.push(`出现预期之外的差异 ${d.path}`);
 }

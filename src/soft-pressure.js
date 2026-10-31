@@ -4,6 +4,7 @@
  * todo/goal/plan/用户消息/摘要节点永不清理。被驱逐项一律登记谱系表（A10），
  * 可重放项标记 replayable 供重跑恢复（保真原则 1）。
  */
+import { nodeLocation } from "./lineage.js";
 
 /** 驱逐优先级表（设计稿 §3）：数值越小越先驱逐；-1 表示永不清理。 */
 export const EVICTION_PRIORITY = {
@@ -96,7 +97,7 @@ export function evictVolatile(nodes, deps, options = {}) {
         }
         const reason = replayable ? "volatile-replayable" : "volatile-archived";
         deps.lineage.record(
-            `node#${node.seq}`,
+            nodeLocation(node.seq, options.sessionId),
             replayable ? "-（可重跑恢复）" : String(node.archivePath ?? "-"),
             "soft-pressure",
         );

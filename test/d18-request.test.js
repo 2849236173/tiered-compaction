@@ -17,6 +17,7 @@
  *
  * 运行：node --test test/d18-request.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile } from "node:fs/promises";

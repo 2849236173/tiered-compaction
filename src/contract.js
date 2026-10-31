@@ -17,7 +17,8 @@
  */
 import { randomUUID } from "node:crypto";
 // D22：Service 用于 `[Service.init]`（工具注册必须在服务就绪后，构造期拿不到 tools）
-import { Service } from "@deepseek-ai/cordis";
+// beta3 多 realm：Context.isolate 用于判定「这个 agent 归不归本 realm 的 compaction」
+import { Context, Service } from "@deepseek-ai/cordis";
 import {
     CompactionEngine,
     CompactionId,
@@ -26,7 +27,7 @@ import {
     toolPairingBalancedBefore,
     toolPairingBalancedAfter,
 } from "@deepseek-ai/dsh-compaction";
-import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler, errorChain } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
 import { HealthReporter, collectHealth } from "./health-check.js";
@@ -42,7 +43,24 @@ import { buildSummaryInput } from "./summary-input.js";
 import { restoreSpilled } from "./spill-to-disk.js";
 // 任务 #1：只读状态路由。同样探针式取 webServer，不进 static inject——
 // 理由与 tiered_restore 相同（详见 status-route.js 头注）。
-import { registerStatusRoute } from "./status-route.js";
+import { mountStatusRoute } from "./status-route.js";
+// beta3 多 realm：L1-L4 计数、最近活跃会话、lastCompaction 都放进程级共享表——
+// 观察者与状态路由全进程各一份，持有者未必是产生这些数的那个实例。
+import {
+    activeObserver,
+    lastCompaction as sharedLastCompaction,
+    latestSession as sharedLatestSession,
+    layerStatsSnapshot,
+    recordCompaction,
+    sessionById,
+    setActiveObserver,
+    startedAt as sharedStartedAt,
+    summaryCount as sharedSummaryCount,
+    touchSession,
+} from "./shared-stats.js";
+
+/** 不持观察者的实例读第 1-3 层计数用：与观察者同源（共享表），形状同 statsFor。 */
+const SHARED_LAYER_STATS = Object.freeze({ statsFor: layerStatsSnapshot });
 
 /**
  * 把流式摘要的终止状态映射成必须上抛的错误（照抄 basic finishError 判定口径）。
@@ -158,10 +176,17 @@ function openTurnOf(session) {
  * 追加在重放前缀之后，让模型把前面对话压成可无损续做的检查点。
  */
 const COMPACTION_INSTRUCTION = [
-    "You are now acting as a compaction engine for this AI coding assistant.",
-    "Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.",
-    "Preserve exact file paths, commands, error strings, identifiers, numeric values and user corrections.",
-    "Output only the checkpoint text: do not call any tool or take any other action.",
+    "You are now acting as a compaction engine for this AI assistant.",
+    "Create a structured checkpoint so another assistant can continue the work without losing essential context.",
+    "Preserve these sections when applicable:",
+    "1. Primary request and intent: the user's goal and the current task.",
+    "2. Latest user instructions: quote or faithfully preserve the newest request and any corrections.",
+    "3. Constraints and decisions: explicit requirements, rejected options, and unresolved choices.",
+    "4. Progress: completed work, current state, failed attempts, and important evidence.",
+    "5. Technical details: exact file paths, identifiers, commands, errors, numeric values, and relevant code behavior.",
+    "6. Remaining work: ordered next steps, blockers, and acceptance checks.",
+    "Do not invent facts or claim unfinished work is complete. Keep distinctions between verified facts and hypotheses.",
+    "Output only the checkpoint text. Do not call tools or take any other action.",
 ].join("\n");
 
 /**
@@ -307,6 +332,40 @@ function contextWindowOf(session) {
     }
     return FALLBACK_CONTEXT_WINDOW;
 }
+
+/**
+ * 窗口是否有真实读数（C6，beta3 审计）。
+ * contextWindowOf 读不到时回落 128k；对窗口更小的模型这会低估压力，
+ * pressure 路径应当跳过而不是按假窗口判定（对齐 basic:935 的 TargetPressureConfigError 语义）。
+ * @param {object} session 会话
+ * @returns {boolean}
+ */
+function hasKnownContextWindow(session) {
+    const folded = session?.requestContext?.()?.contextWindow;
+    if (typeof folded === "number" && folded > 0) return true;
+    const total = typeof session?.seq === "number" ? session.seq : (session?.surface?.nodes?.length ?? 0);
+    for (let seq = total - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt?.(seq);
+        if (event?.type !== "request/context") continue;
+        const window = event.data?.contextWindow;
+        if (typeof window === "number" && window > 0) return true;
+    }
+    // 表面里的 request/context（兼容 seq 缺失的桩）
+    for (const seq of session?.surface?.nodes ?? []) {
+        const event = session.eventAt?.(seq);
+        if (event?.type === "request/context" && typeof event.data?.contextWindow === "number" && event.data.contextWindow > 0) return true;
+    }
+    return false;
+}
+
+/**
+ * 摘要连续失败退避（C5，beta3 审计）：连续失败达到该次数后，
+ * 自动 pressure 压缩暂停，直到压力比上次失败时再涨 SUMMARY_BACKOFF_GROWTH
+ * 或经过 SUMMARY_BACKOFF_STEPS 步。手动 /compact 与 overflow 不受影响。
+ */
+const SUMMARY_FAILURE_LIMIT = 3;
+const SUMMARY_BACKOFF_GROWTH = 0.05;
+const SUMMARY_BACKOFF_STEPS = 10;
 
 /** 与 basic 相同的 checkpoint 框架文案（投影层据此识别摘要节点）。 */
 const SUMMARY_OPEN_TAG = "<compacted-summary>";
@@ -611,24 +670,40 @@ export class TieredCompactionEngineService extends CompactionEngine {
         });
         // 观察者：把第 1-2 层接到宿主 session/event 流（工具结果一产生就加工）。
         // 这是 archiveDir 唯一的真实消费方。
-        this.observer = new ToolResultObserver({ engine: this.engine, ctx });
-        this.observer.register();
-        ctx.logger.info(
-            "dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）" +
-            (config.archiveDir ? "" : "；注意：未配置 archiveDir，落盘层将跳过")
-        );
+        //
+        // beta3 多 realm：全进程只挂**一份**观察者。session/event 对未打 scope 标签的
+        // 监听者是全局广播（dsh-scope scopeTarget：tag===undefined → true；root 与各
+        // preset realm 实例都在同一事件总线上），两份观察者 = 同一工具结果两枚 prune，
+        // 正是 D24 病案。持有权由 index.js 申请的 observer 席位决定（ownsObserver）；
+        // 直接构造本服务（单测）时默认持有。
+        this.ownsObserver = config.ownsObserver !== false;
+        this._ownObserver = undefined;
+        if (this.ownsObserver) {
+            this._ownObserver = new ToolResultObserver({
+                engine: this.engine,
+                ctx,
+                // 任何 session/event 都把该会话登记为最近活跃：状态路由不再只认
+                // 「发生过压缩」的会话（旧口径下普通工具结果永远显示 idle + 全 0）
+                onSessionActive: (session) => this._touchSession(session),
+            });
+            this._ownObserver.register();
+            const observer = this._ownObserver;
+            ctx.effect(() => setActiveObserver(observer), "tiered-compaction shared observer");
+            ctx.logger.info(
+                "dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）" +
+                (config.archiveDir ? "" : "；注意：未配置 archiveDir，落盘层将跳过")
+            );
+        } else {
+            ctx.logger.info(
+                "dsh-tiered-compaction：本实例不挂观察者（进程内已有一份，第 1-3 层由它负责），仅负责本 realm 的第 4 层"
+            );
+        }
         /** overflow 重试去重（照 basic 的 WeakMap 口径，按 agent 记账） */
         this.overflowRetries = new WeakMap();
         /** session → agent 映射：清理钩子只拿得到 session，据此找回 agent 清账（P3-3） */
         this.overflowAgents = new WeakMap();
-        // 任务 #1：状态路由的数据底座。口径=「本次运行」（方案 §七定案），
-        // 全部内存计数，重启自然归零——API 的 since 字段就来自这里。
-        this.startedAt = Date.now();
-        this.lastCompaction = null;
-        // 任务 #6：本次运行的有损摘要次数。与 lastCompaction 同点自增，
-        // 只有真正提交的摘要事务才计数；纯内存值，重启随进程归零。
-        this.summaryCount = 0;
-        this.latestSession = null;
+        // 任务 #1 / #6 的数据底座（startedAt / lastCompaction / summaryCount /
+        // latestSession / 会话表）已移到 shared-stats.js，见下方同名 getter。
         if (config.auto ?? true) this._registerAutomaticCompaction();
 
         // D22：tiered_restore 工具的注册**不在这里**，在下面的 [Service.init]。
@@ -650,9 +725,11 @@ export class TieredCompactionEngineService extends CompactionEngine {
      */
     async [Service.init]() {
         this._registerRestoreTool();
-        // 任务 #1：与 tiered_restore 同一时点注册 status 路由（探针式取
-        // webServer，失败只降级不阻断，详见 status-route.js）。
-        registerStatusRoute({ ctx: this.ctx, buildPayload: () => this._statusPayload() });
+        // 任务 #1：与 tiered_restore 同一时点挂 status 路由。beta3（W3/W4）：
+        // 全进程只挂一条（多实例时先到先得，持有者卸载后释放）；注册包在
+        // ctx.effect 里随 fiber 回收；webServer 晚到时由 ctx.inject 补挂。
+        // 载荷全部取自共享统计表，所以由哪个实例挂都看到同一份数。
+        mountStatusRoute({ ctx: this.ctx, buildPayload: (sessionId) => this._statusPayload(sessionId) });
     }
 
     /**
@@ -696,7 +773,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
                     sha256: {
                         type: "string",
                         required: true,
-                        description: "Expected SHA-256 hex digest, as shown in the pruned result preview.",
+                        description: "Expected SHA-256 hex digest: the 16-character prefix shown in the pruned result preview, or the full 64 characters.",
                     },
                 },
                 // 宿主契约（dsh-tools 0.2.x register）：output 是必填项，
@@ -715,8 +792,16 @@ export class TieredCompactionEngineService extends CompactionEngine {
                     if (typeof args?.sha256 !== "string" || args.sha256.length === 0) {
                         throw new Error("tiered_restore: sha256 必填（校验失败的内容比读不到更危险）");
                     }
+                    // S1（beta3 审计）：只允许读存档目录内的普通文件——模型给的 path
+                    // 是不可信输入，旧实现可读任意文件且报错回显实际摘要。
+                    // 未配置 archiveDir 时没有可回读的存档，统一拒绝。
+                    const archiveDir = this.config?.archiveDir;
+                    if (typeof archiveDir !== "string" || archiveDir.length === 0) {
+                        throw new Error("tiered_restore: 未配置 archiveDir，没有可回读的存档");
+                    }
                     // 校验不通过时 restoreSpilled 抛错，不返回内容——这正是要的行为
-                    return restoreSpilled(args.path, args.sha256);
+                    // S4：sha256 接受预览里的 16 位前缀或完整 64 位十六进制
+                    return restoreSpilled(args.path, args.sha256, { archiveDir });
                 },
                 });
         } catch (error) {
@@ -739,17 +824,37 @@ export class TieredCompactionEngineService extends CompactionEngine {
     async compactNow(agent, signal, sourceCommandId) {
         signal?.throwIfAborted();
         // 任务 #1：手动路径也触碰 latestSession（非 agent 桩会话无 agent 映射）
-        const session = agent?.session;
-        if (session !== undefined && session !== null) this.latestSession = session;
-        const result = typeof agent?.runMaintenance !== "function"
+        this._touchSession(agent?.session);
+        let result;
+        if (typeof agent?.runMaintenance !== "function") {
             // 非 agent 桩（测试/探针）：直接走事务，语义等价
-            ? await this._compactWholeSurface(agent, { sourceCommandId, signal })
-            : await agent.runMaintenance(async (agentSignal) => {
-                // 兜底：无外部 signal 时用常开信号（AbortSignal.any 要求非空数组）
-                const signals = [agentSignal, signal].filter(Boolean);
-                const operationSignal = signals.length > 0 ? AbortSignal.any(signals) : agentSignal;
-                return this._compactWholeSurface(agent, { sourceCommandId, signal: operationSignal });
-            });
+            result = await this._compactWholeSurface(agent, { sourceCommandId, signal });
+        } else {
+            // C1（beta3 审计，对齐 basic compactNow）：runMaintenance 在 agent 忙时
+            // **同步**抛普通 Error（dsh-agent-loop `already has active work`）。
+            // command-compact 只认 ManualCompactionError，其余直接 rethrow 成未处理异常，
+            // 所以这里统一包成 busy；agent 自身信号取消的归为 cancelled。
+            let maintenance;
+            try {
+                maintenance = agent.runMaintenance(async (agentSignal) => {
+                    // 兜底：无外部 signal 时只用 agent 信号（AbortSignal.any 要求非空数组）
+                    const signals = [agentSignal, signal].filter(Boolean);
+                    const operationSignal = signals.length > 0 ? AbortSignal.any(signals) : agentSignal;
+                    try {
+                        operationSignal?.throwIfAborted();
+                        return await this._compactWholeSurface(agent, { sourceCommandId, signal: operationSignal });
+                    } catch (error) {
+                        if (agentSignal?.aborted && !(error instanceof ManualCompactionError && error.code === "cancelled")) {
+                            throw new ManualCompactionError("cancelled", "manual compaction was cancelled", { cause: error });
+                        }
+                        throw error;
+                    }
+                });
+            } catch (error) {
+                throw new ManualCompactionError("busy", "manual compaction requires an idle agent with no waking queued work", { cause: error });
+            }
+            result = await maintenance;
+        }
         // P4-2：事务提交后把会话落盘（basic 同款 durability checkpoint）。
         // 缺这一步时压缩结果只在内存里，进程崩溃会丢掉整次压缩。
         await this._flushAfterCommit(agent?.session);
@@ -760,54 +865,95 @@ export class TieredCompactionEngineService extends CompactionEngine {
      * 只读状态载荷工厂（任务 #1）：GET /api/tiered-compaction/status 的响应体。
      * 数据口径=「本次运行」（since 起），零新增采集通道——全部复用
      * collectHealth 已在读的东西 + lastCompaction/startedAt 记账。
+     * @param {string} [sessionId] 请求的会话（`?session=<id>`）；省略时取最近活跃会话
      * @returns {object} 方案规定的七字段 + problems/sessionId
      */
-    _statusPayload() {
-        // 卫语句：无活跃会话（宿主刚启动、还没触发过压缩路径）时返回
-        // 诚实的零值形状，不虚报兜底窗口
+    _statusPayload(sessionId) {
+        // 卫语句：无活跃会话（宿主刚启动、还没有任何事件）或请求了未知会话时
+        // 返回诚实的零值形状，不虚报兜底窗口。未知会话的 sessionId 原样回显，
+        // 客户端据此判断「这份快照是不是当前会话的」。
+        const requested = typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
         const idle = {
             status: "ok",
             pressure: 0,
             window: 0,
             layers: IDLE_LAYERS,
             lastCompaction: this.lastCompaction,
-            archiveDir: this.config?.archiveDir ?? null,
+            // S8（beta3 审计）：状态 API 不回传绝对路径（泄露本机用户名/目录结构），只给布尔
+            hasArchiveDir: typeof this.config?.archiveDir === "string" && this.config.archiveDir.length > 0,
             since: this.startedAt,
             problems: [],
-            sessionId: null,
+            sessionId: requested ?? null,
         };
-        const session = this.latestSession;
+        const session = requested === undefined ? this.latestSession : this._sessionById(requested);
         if (session === undefined || session === null) return idle;
 
-        try {
-            const { window, current } = this._readingOf(session);
-            const health = collectHealth({
-                observer: this.observer,
-                engine: this.engine,
-                session,
-                window,
-                currentTokens: current,
-                config: this.config,
-            });
-            // 只补 API 独有的字段：archiveDir/since/lastCompaction（与
-            // 方案 §五 任务 #1 的字段清单对齐），其余全用健康快照原值。
-            // l4Summaries（任务 #6）：健康快照不产摘要数，它记在服务自身，
-            // 与 lastCompaction 同属「单点记账」——所以只能在这里补。
-            return {
-                ...health,
-                layers: { ...health.layers, l4Summaries: this.summaryCount ?? 0 },
-                lastCompaction: this.lastCompaction,
-                archiveDir: this.config?.archiveDir ?? null,
-                since: this.startedAt,
-            };
-        } catch (error) {
-            // 与路由层约定一致：拼装失败不抛进 handler，由路由的 500 降级
-            // 兜住（双保险，谁先炸都拿不到挂掉的连接）
-            this.ctx?.logger?.warn(
-                `dsh-tiered-compaction: status 载荷拼装失败（${error?.message ?? error}）`,
-            );
-            return idle;
-        }
+        // 读数异常不在这里吞掉：交给 status-route 的 500 分支（旧实现 catch 后
+        // 返回 idle 200，读数坏了也显示「一切正常、全 0」，又一次假健康）
+        const { window, current } = this._readingOf(session);
+        const health = collectHealth({
+            observer: this.observer ?? SHARED_LAYER_STATS,
+            engine: this.engine,
+            session,
+            window,
+            currentTokens: current,
+            config: this.config,
+        });
+        // 只补 API 独有的字段：archiveDir/since/lastCompaction（与
+        // 方案 §五 任务 #1 的字段清单对齐），其余全用健康快照原值。
+        // l4Summaries（任务 #6）：健康快照不产摘要数，它记在服务自身，
+        // 与 lastCompaction 同属「单点记账」——所以只能在这里补。
+        return {
+            ...health,
+            layers: { ...health.layers, l4Summaries: this.summaryCount },
+            lastCompaction: this.lastCompaction,
+            // S8（beta3 审计）：状态 API 不回传绝对路径（泄露本机用户名/目录结构），只给布尔
+            hasArchiveDir: typeof this.config?.archiveDir === "string" && this.config.archiveDir.length > 0,
+            since: this.startedAt,
+        };
+    }
+
+    /**
+     * 登记会话为最近活跃（observer 回调与压缩路径共用）。写进程级共享表：
+     * 观察者所在实例、会话所属 realm 实例、状态路由持有者可能是三个不同实例。
+     * @param {object} session
+     */
+    _touchSession(session) {
+        touchSession(session);
+    }
+
+    /**
+     * 按 id 取见过的会话（共享表；弱引用已失效时顺手清掉条目）。
+     * @param {string} id
+     * @returns {object|undefined}
+     */
+    _sessionById(id) {
+        return sessionById(id);
+    }
+
+    /** 全进程唯一观察者：本实例持有就是自己那份，否则是持有者的那份（可能为 null）。 */
+    get observer() {
+        return this._ownObserver ?? activeObserver() ?? undefined;
+    }
+
+    /** 本次运行的启动时刻（状态 API 的 since）。 */
+    get startedAt() {
+        return sharedStartedAt();
+    }
+
+    /** 全进程最近一次已提交的摘要事务（状态 API 的 lastCompaction）。 */
+    get lastCompaction() {
+        return sharedLastCompaction();
+    }
+
+    /** 任务 #6：本次运行全进程已提交的有损摘要次数（l4Summaries）。 */
+    get summaryCount() {
+        return sharedSummaryCount();
+    }
+
+    /** 全进程最近活跃会话。 */
+    get latestSession() {
+        return sharedLatestSession();
     }
 
     /**
@@ -857,6 +1003,19 @@ export class TieredCompactionEngineService extends CompactionEngine {
     }
 
     /**
+     * 失败事务的落盘（C9(e)）：失败路径上不能用 persistence 错误盖掉原始失败，
+     * 所以 flush 出错只告警。
+     * @param {object} session 会话
+     */
+    async _flushQuietly(session) {
+        try {
+            await this._flushAfterCommit(session);
+        } catch (error) {
+            this.ctx.logger?.warn?.(`tiered-compaction: 失败事务落盘失败（已忽略）：${error?.cause?.message ?? error?.message ?? error}`);
+        }
+    }
+
+    /**
      * 自动触发入口。
      * - "pressure"：70% 提醒（只广播不改历史）→ 80% 驱逐（广播驱逐事件，
      *   由投影侧落地，会话表面不动）→ 达第 4 层阈值才走摘要事务。
@@ -867,7 +1026,17 @@ export class TieredCompactionEngineService extends CompactionEngine {
         const session = agent?.session;
         if (!session) return null;
         // 任务 #1：自动路径（pressure/overflow）记录活跃会话，状态 API 据此取读数
-        this.latestSession = session;
+        this._touchSession(session);
+        // C6：窗口未知时 pressure 路径整体跳过（含 70%/80% 层），每会话只告警一次。
+        // overflow 是 provider 已确认的溢出，不依赖窗口读数，照常处理。
+        if (trigger !== "context-overflow" && !hasKnownContextWindow(session)) {
+            this.unknownWindowWarned ??= new WeakSet();
+            if (!this.unknownWindowWarned.has(session)) {
+                this.unknownWindowWarned.add(session);
+                this.ctx.logger.warn("tiered-compaction: 读不到当前模型的 contextWindow，自动压力压缩已跳过（请在适配器模型上配置 contextWindow）；溢出恢复与 /compact 不受影响");
+            }
+            return null;
+        }
         // 读数链已抽为 _readingOf（任务 #1）：与状态 API 共用同一口径
         const { window, current } = this._readingOf(session);
         const pressure = window > 0 ? current / window : 0;
@@ -937,8 +1106,10 @@ export class TieredCompactionEngineService extends CompactionEngine {
         const need = trigger === "context-overflow" || current >= threshold;
         if (!need) return null;
         if (trigger === "context-overflow") {
-            if (this.overflowRetries.get(agent)) return null; // 一次 overflow 只补一枪
-            this.overflowRetries.set(agent, true);
+            // C2（beta3 审计）：这里曾有「overflowRetries 为真就 return null」的闸，
+            // 与 request-error 钩子共用同一个 WeakMap（布尔与计数混存），
+            // 钩子第一次重试后写入 1，第二次进来就被这道闸挡掉，maxOverflowRetries>1 永不生效。
+            // 重试计数只由钩子管理（basic 的 compactIfNeeded 也没有这道闸）。
             // 交叉审计修复（2026-10-27，gpt-6-astra / gpt-5.6-sol 都报、我实跑确认）：
             // overflow 必须**强制**压缩，不能沿用保留尾部策略。
             //
@@ -958,10 +1129,31 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 retainOverride: 0,
             });
         }
-        return this._compactWithRetention(session, agent, signal, {
-            threshold,
-            measure: () => this.ctx.tokenMeter?.measure?.(session)?.totalTokens ?? 0,
-        });
+        // C5：摘要连续失败退避，避免每一步都白付一次 LLM 调用并追加一对 start/end(error)
+        this.summaryFailures ??= new WeakMap();
+        const failure = this.summaryFailures.get(session);
+        if (failure !== undefined && failure.count >= SUMMARY_FAILURE_LIMIT) {
+            failure.skipped += 1;
+            const grown = pressure >= failure.pressure + SUMMARY_BACKOFF_GROWTH;
+            if (!grown && failure.skipped < SUMMARY_BACKOFF_STEPS) return null;
+            failure.skipped = 0;
+        }
+        try {
+            const result = await this._compactWithRetention(session, agent, signal, {
+                threshold,
+                measure: () => this.ctx.tokenMeter?.measure?.(session)?.totalTokens ?? 0,
+            });
+            this.summaryFailures.delete(session);
+            return result;
+        } catch (error) {
+            // busy/cancelled 不是摘要质量问题，不计入退避
+            const code = error instanceof ManualCompactionError ? error.code : undefined;
+            if (code !== "busy" && code !== "cancelled" && code !== "changed") {
+                const previous = this.summaryFailures.get(session);
+                this.summaryFailures.set(session, { count: (previous?.count ?? 0) + 1, pressure, skipped: 0 });
+            }
+            throw error;
+        }
     }
 
     /**
@@ -1104,9 +1296,61 @@ export class TieredCompactionEngineService extends CompactionEngine {
 
     /* ---------------- 自动钩子（照 basic 写法） ---------------- */
 
+    /**
+     * 这个 agent 的 compaction 服务是不是本实例（beta3 多 realm 门控）。
+     *
+     * 为什么需要：agent/pre-step、agent/request-error 由 agent-loop 经 agent 的
+     * scope carrier 派发（dsh-agent-loop/lib/index.js:777 `agentEvents(loopCtx, this)`、
+     * :909 / :1136 waterfall；dsh-agent/lib/index.js:231 `scopeTarget(agent, agent)`）。
+     * 而 dsh-scope 的过滤（dsh-scope/lib/index.js:327-335）对**没打 scope 标签**的
+     * 监听者一律放行——本插件的钩子挂在插件自身 ctx 上，没有标签，于是 root 实例
+     * 与每个 preset realm 实例都会收到**所有** agent 的钩子。不门控就是 root 去压
+     * preset 会话、preset 去压 root 会话，同一会话两个第 4 层写者。
+     *
+     * 判定口径：「agent 所在 realm 的 compaction 服务 === this」，两级取值：
+     * 1. preset agent：`agentPresets.serviceFor(agent, "compaction")`
+     *    （dsh-agent-preset-registry/lib/index.js:725-727 → serviceForMount :136-145，
+     *    按 mount fiber 子树找实现，返回 store 里的原值 `impl.value`，可直接 ===）。
+     *    不能只比 isolate 键：preset 的 `isolate: {compaction: true}` 只包住 compaction
+     *    组（profile patch 的 compaction 组），agent-loop 在组外，agent ctx 的
+     *    compaction 键仍是 root 的那枚。
+     * 2. 非 preset agent（serviceFor 返回 undefined / 无注册表）：比 isolate 键。
+     *    cordis 服务按 `ctx[symbols.isolate][name]` 作 store 键存取
+     *    （cordis/lib/index.js:805-806 provide、:765-767 _getImpl），同键 ⇔ 同实现。
+     *    不比 `ctx.get("compaction") === this`：get() 返回 getTraceable 代理（:764），恒不等。
+     * agent 无 ctx（单测桩）时视为本实例的——与旧行为一致。
+     * @param {object} agent
+     * @returns {boolean}
+     */
+    _ownsAgent(agent) {
+        const agentCtx = agent?.ctx ?? agent?.loopCtx;
+        if (agentCtx === undefined || agentCtx === null) return true;
+        let registry;
+        try {
+            registry = this.ctx.get?.("agentPresets");
+        } catch {
+            registry = undefined;
+        }
+        if (registry !== undefined && registry !== null && typeof registry.serviceFor === "function") {
+            let presetCompaction;
+            try {
+                presetCompaction = registry.serviceFor(agent, "compaction");
+            } catch {
+                presetCompaction = undefined;
+            }
+            if (presetCompaction !== undefined && presetCompaction !== null) return presetCompaction === this;
+        }
+        const theirs = agentCtx[Context.isolate];
+        const mine = this.ctx?.[Context.isolate];
+        if (!theirs || !mine) return true;
+        return theirs.compaction === mine.compaction;
+    }
+
     _registerAutomaticCompaction() {
         const { ctx } = this;
         ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
+            // beta3 多 realm：只处理归属本 realm compaction 的 agent（见 _ownsAgent）
+            if (!this._ownsAgent(agent)) return next();
             if (!signal?.aborted) {
                 try {
                     const result = await this.compactIfNeeded(agent, "pressure", signal);
@@ -1128,6 +1372,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 背景：审计发现只注册 pre-step，provider 报 CONTEXT_WINDOW_EXCEEDED 后
         // 根本没有恢复路径——真溢出时压缩永不触发。
         ctx.on("agent/request-error", async ({ agent, failure, signal }, next) => {
+            if (!this._ownsAgent(agent)) return next();
             if (failure?.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal?.aborted) return next();
             this.overflowAgents.set(agent.session, agent);
             const target = this._summaryTargetOf(agent);
@@ -1190,7 +1435,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
         const meter = this.ctx.tokenMeter;
         const range = this._selectRange(session, meter.measure(session), 0);
         if (range === null) return null;
-        return this._runTransaction(session, range.start, range.end, agent, signal);
+        // C3（beta3 审计）：sourceCommandId 透传到事务，供 UI/日志关联 /compact 命令
+        return this._runTransaction(session, range.start, range.end, agent, signal, { sourceCommandId });
     }
 
     /**
@@ -1272,9 +1518,23 @@ export class TieredCompactionEngineService extends CompactionEngine {
         const surfaceNodes = session.surface?.nodes ?? [];
         const priced = measurement?.nodes ?? [];
         if (surfaceNodes.length === 0 || priced.length !== surfaceNodes.length) return null;
+        if (priced.some((node, index) => node?.seq !== undefined && node.seq !== surfaceNodes[index])) {
+            throw new Error("tiered-compaction: token meter node seqs do not align with session surface");
+        }
         const head = session.eventAt(surfaceNodes[0]);
         const firstIdx = head?.type === "system/message" ? 1 : 0;
         if (firstIdx >= surfaceNodes.length) return null;
+        // C7：retain=0 用于 overflow 与 /compact，但最新 user/message 是任务的
+        // 当前指令，必须留在表面上原样续做；它之后的所有节点也一并保留。
+        let latestUserIdx = -1;
+        if (retainTokens === 0) {
+            for (let index = surfaceNodes.length - 1; index >= firstIdx; index -= 1) {
+                if (session.eventAt(surfaceNodes[index])?.type === "user/message") {
+                    latestUserIdx = index;
+                    break;
+                }
+            }
+        }
         let accumulated = 0;
         let keepFromIdx = priced.length;
         for (let index = priced.length - 1; index >= 0; index -= 1) {
@@ -1282,11 +1542,14 @@ export class TieredCompactionEngineService extends CompactionEngine {
             keepFromIdx = index;
             if (accumulated >= retainTokens) break;
         }
+        if (latestUserIdx >= 0) keepFromIdx = Math.min(keepFromIdx, latestUserIdx);
         if (keepFromIdx <= firstIdx) return null;
         while (keepFromIdx > firstIdx && !toolPairingBalancedBefore(session, surfaceNodes[keepFromIdx])) {
             keepFromIdx -= 1;
         }
-        if (keepFromIdx <= firstIdx) return null;
+        // 配平只能把保留区向前扩展；若会越过最新 user/message，就放弃压缩，
+        // 不能为了可压而摘要掉当前任务指令。
+        if (keepFromIdx <= firstIdx || (latestUserIdx >= 0 && keepFromIdx < latestUserIdx)) return null;
         // P3-2 修复：整段「好」还不够，要保证被替换区间末尾不把 tool-call/result
         // 配对劈成两半——只往前配平会留下 result 在区间内、call 在区间外（或反之）。
         // 从区间末尾往前收，直到区间自身也是配平的。
@@ -1332,7 +1595,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
      *   2. 摘要返回后、提交前校验选区未变（assertSpanStable）——防止
      *      「按 A 版内容生成摘要，却提交到已变成 B 版的表面」这种错位
      */
-    async _runTransaction(session, start, end, agent, signal) {
+    async _runTransaction(session, start, end, agent, signal, { sourceCommandId } = {}) {
         // 护栏 1：压缩锁。放在 append start 之前，锁被占时不留任何痕迹。
         assertCompactionInactive(session, "tiered-compaction");
         const compactionId = CompactionId(randomUUID());
@@ -1350,8 +1613,16 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // （空闲态压缩是合法的，null 表示不属于任何 turn）。
         //
         // 我们照抄同一口径，并对此前所有历史事件保持兼容。
-        const lifecycle = { compactionId, turn: openTurnOf(session) };
+        const lifecycle = {
+            compactionId,
+            turn: openTurnOf(session),
+            ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+        };
         const startEvent = session.append("compaction/start", lifecycle);
+        // C9(c)（beta3 审计，对齐 basic closing 标志）：end 本身 append 失败时
+        // 不能在 catch 里再写一枚 end
+        let closing = false;
+        let closed = false;
         try {
             const surfaceNodes = session.surface.nodes;
             // D17 沙箱实测挖出的第四个真 bug（2026-10-27）：
@@ -1422,7 +1693,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // 期间仍可能被取消。
             signal?.throwIfAborted();
 
-            const framedEstimate = estimateTextTokens(summary);
+            // C9(a)（beta3 审计）：按**加框后**的检查点文本估算，框架约 80 token 也要算进去
+            const framedEstimate = estimateTextTokens(frameSummaryText(summary).map((block) => block.text ?? "").join(""));
             if (framedEstimate >= estimate) {
                 throw new Error(`summary is not smaller than the shadowed content (${framedEstimate} estimated framed tokens >= ${estimate})`);
             }
@@ -1438,24 +1710,26 @@ export class TieredCompactionEngineService extends CompactionEngine {
             });
             const checkpointMessage = createUserMessage({
                 content: frameSummaryText(summary),
-                source: compactCheckpointSource(compactionId, undefined),
+                source: compactCheckpointSource(compactionId, sourceCommandId),
             });
             session.append("user/message", checkpointMessage, {
                 surfaceOp: { op: "replace", startSeq: start, endSeq: end },
                 sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowedSeqs],
             });
+            closing = true;
             const endEvent = session.append("compaction/end", lifecycle);
+            closed = true;
             // 任务 #1：单点记账（手动/自动/overflow 三条路径都过 _runTransaction，
             // 只在这里写 lastCompaction，状态 API 直接读，无需二次聚合）
-            this.lastCompaction = {
+            // 任务 #6：摘要事务走到提交才算一次——失败/中途取消不虚增计数。
+            // lastCompaction 与 summaryCount 同点记账，写进程级共享表。
+            recordCompaction({
                 compactionId,
                 at: Date.now(),
                 shadowedTokenCount: estimate,
                 startSeq: startEvent.seq,
                 endSeq: endEvent.seq,
-            };
-            // 任务 #6：摘要事务走到提交才算一次——失败/中途取消不虚增计数
-            this.summaryCount = (this.summaryCount ?? 0) + 1;
+            });
             return {
                 compactionId,
                 startSeq: startEvent.seq,
@@ -1467,10 +1741,21 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 endSeq: endEvent.seq,
             };
         } catch (error) {
-            // 失败必须补配对 end（unmatched start 由宿主投影判定为可恢复态）
-            try {
-                session.append("compaction/end", { ...lifecycle, error: String(error?.message ?? error) });
-            } catch { /* close 尽力而为 */ }
+            // 失败必须补配对 end（unmatched start 由宿主投影判定为可恢复态）。
+            // C4：error 用 dsh-llm 的 errorChain（保留 cause 链，对齐 basic）。
+            // let closed 由事务作用域维护；若 end append 本身失败则不重试第二次。
+            if (!closing) {
+                try {
+                    session.append("compaction/end", { ...lifecycle, error: errorChain(error) });
+                    closed = true;
+                } catch { /* close 尽力而为 */ }
+            }
+            // C9(e)（对齐 basic:508）：已闭合的失败事务也落盘，避免重启后看到半截事务
+            if (closed) await this._flushQuietly(session);
+            // C4：取消不归类为 summary（command-compact 据此显示 cancelled）
+            if (signal?.aborted && !(error instanceof ManualCompactionError && error.code === "cancelled")) {
+                throw new ManualCompactionError("cancelled", "compaction was cancelled", { cause: error });
+            }
             if (error instanceof ManualCompactionError) throw error;
             throw new ManualCompactionError("summary", "tiered-compaction 事务失败", { cause: error });
         }

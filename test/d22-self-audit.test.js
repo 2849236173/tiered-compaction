@@ -132,7 +132,8 @@ test("D22-0 插件入口必须做 preset 共存检测", () => {
 
     // 检测函数必须存在并被调用——这是「装了但没用」唯一的可见化手段
     assert.match(source, /function reportCoexistingEngines/, "必须有 preset 共存检测函数");
-    assert.match(source, /await reportCoexistingEngines\(ctx\)/, "检测必须在 apply 里真被调用");
+    assert.match(source, /reportCoexistingEngines\(ctx\)\.catch\(/, "检测必须在 apply 里真被调用（后台跑，失败只告警）");
+    assert.doesNotMatch(source, /await reportCoexistingEngines\(ctx\)/, "W6：诊断不得阻塞 apply（registry.list 会等本实例 activate）");
 
     // 告警文案必须说清后果，否则用户看不懂
     assert.match(source, /实际压缩由 preset 内引擎执行/, "告警要说清「实际不是本插件在压」");
@@ -210,7 +211,7 @@ test("D22-2 tiered_restore 工具端到端：注册、校验读回、拒绝错�
 
         // 错哈希必须拒绝——读到坏内容比读不到更危险
         await assert.rejects(
-            () => tool.execute({ path: spilled.path, sha256: "deadbeef" }),
+            () => tool.execute({ path: spilled.path, sha256: "deadbeef".repeat(8) }),
             /SHA-256 校验失败/,
             "哈希不匹配必须拒绝返回内容"
         );

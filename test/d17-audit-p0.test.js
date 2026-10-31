@@ -252,10 +252,11 @@ test("P1-3 驱逐的谱系必须按契约逐节点登记（originalLocation = no
 
         const entries = engine.lineage.toArray().filter((e) => e.replacedBy === "soft-pressure");
         assert.equal(entries.length, 1, "每个被驱逐节点必须各有一条记录");
+        // S2（beta3）：键带会话维度 `<sessionId>#node#<seq>`，跨会话同 seq 不再撞
         assert.match(
             entries[0].originalLocation,
-            /^node#\d+$/,
-            "originalLocation 必须是 node#<seq>，否则 findByOriginal 查不到",
+            /^L#node#\d+$/,
+            "originalLocation 必须是 <sessionId>#node#<seq>，否则 findByOriginal 查不到",
         );
         // 查询面必须能命中
         assert.equal(

@@ -31,7 +31,7 @@ export const DEFAULT_SELFCHECK_INTERVAL_MS = 10 * 60 * 1000;
  * 收集一次健康快照（纯函数，零副作用）。
  *
  * @param {object} deps
- * @param {object} deps.observer 工具结果观察者（提供 done/evicted/stats）
+ * @param {object} deps.observer 工具结果观察者（提供 statsFor(session)；旧桩只有 stats）
  * @param {object} deps.engine 四层引擎（提供 lineage）
  * @param {object} [deps.session] 当前会话（用于窗口/压力读数）
  * @param {number} [deps.window] 窗口 token 数（由调用方用 contextWindowOf 取）
@@ -50,16 +50,35 @@ export function collectHealth(deps = {}) {
     } = deps;
 
     // 各层实际计数——这是"真的在跑"的唯一硬证据
-    const stats = observer?.stats ?? {};
-    const layer3Evicted = observer?.evicted?.size ?? 0;
-    const layer12Processed = observer?.done?.size ?? 0;
+    //
+    // 口径修复：旧代码读 `observer.evicted.size`（观察者上根本没有这个属性，
+    // l3Evicted 恒为 0）和 `observer.done.size`（「尝试过」的占位集合，
+    // skip/无收益也算，且只属于最近一次 handleEvent 的会话），其余又是
+    // 全进程累计——同一张表里三种范围混在一起。
+    // 现在 L1/L2/L3 一律取**目标会话**的显式计数（observer.statsFor）。
     const lineage = engine?.lineage?.toArray?.() ?? [];
     const lineageSize = lineage.length;
-    // 落盘次数：数谱系里由第 2 层登记的条目。
-    // 字段语义见 src/lineage.js：replacedBy 记录**是谁取代的**
-    // （lossless-fold / spill-to-disk / soft-pressure / lossy-summarize），
-    // newLocation 才是存档路径。别把两者搞反——那是 D17 反复出现的坑。
-    const spillCount = lineage.filter((entry) => entry?.replacedBy === "spill-to-disk").length;
+    let counts;
+    if (typeof observer?.statsFor === "function") {
+        counts = observer.statsFor(session);
+    } else {
+        // 兼容只带 stats 的旧桩：退回进程级累计。
+        // 落盘次数数谱系里由第 2 层登记的条目（replacedBy 记录**是谁取代的**，
+        // newLocation 才是存档路径，见 src/lineage.js）。
+        const stats = observer?.stats ?? {};
+        counts = {
+            processed: stats.replaced ?? 0,
+            bytesSaved: stats.bytesSaved ?? 0,
+            skipped: stats.skipped ?? 0,
+            failed: stats.failed ?? 0,
+            evicted: 0,
+            spilled: lineage.filter((entry) => entry?.replacedBy === "spill-to-disk").length,
+        };
+    }
+    const stats = { replaced: counts.processed, failed: counts.failed };
+    const layer3Evicted = counts.evicted;
+    const layer12Processed = counts.processed;
+    const spillCount = counts.spilled;
 
     const pressure = window > 0 ? currentTokens / window : 0;
 
@@ -107,10 +126,10 @@ export function collectHealth(deps = {}) {
         currentTokens,
         layers: {
             l12Processed: layer12Processed,
-            l12Replaced: stats.replaced ?? 0,
-            l12Failed: stats.failed ?? 0,
-            l12Skipped: stats.skipped ?? 0,
-            l12BytesSaved: stats.bytesSaved ?? 0,
+            l12Replaced: counts.processed,
+            l12Failed: counts.failed,
+            l12Skipped: counts.skipped,
+            l12BytesSaved: counts.bytesSaved,
             l3Evicted: layer3Evicted,
             spillCount,
             lineageEntries: lineageSize,

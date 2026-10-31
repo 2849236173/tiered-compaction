@@ -9,7 +9,7 @@
  *   2. 过程性内容（大输出、中间产物）归档到会话目录（复用第 2 层落盘）；
  *   3. 全部取代关系登记谱系表。
  */
-import { Lineage } from "./lineage.js";
+import { Lineage, nodeLocation } from "./lineage.js";
 import { spillIfNeeded } from "./spill-to-disk.js";
 
 /**
@@ -42,15 +42,15 @@ export async function purgeOnGoalSwitch(event, deps) {
         const spill = await spillIfNeeded(node.content, deps.archiveDir, `goal-switch-${event.oldGoalId}-node${node.seq}`, { threshold: 1 });
         if (spill) {
             archived.push(spill.path);
-            lineage.record(`node#${node.seq}`, spill.path, "goal-switch", spill.sha256);
+            lineage.record(nodeLocation(node.seq, event.sessionId), spill.path, "goal-switch", spill.sha256);
         } else {
-            lineage.record(`node#${node.seq}`, "-", "goal-switch-dropped-short");
+            lineage.record(nodeLocation(node.seq, event.sessionId), "-", "goal-switch-dropped-short");
         }
     }
 
     // 胶囊携带的节点也登记（取代者=goal-switch-capsule，可审计）
     for (const node of capsuleNodes) {
-        lineage.record(`node#${node.seq}`, `capsule:${event.newGoalId}`, "goal-switch-capsule");
+        lineage.record(nodeLocation(node.seq, event.sessionId), `capsule:${event.newGoalId}`, "goal-switch-capsule");
     }
 
     return { capsule, archived, llmCalls: 0 };

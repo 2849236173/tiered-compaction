@@ -21,8 +21,10 @@ function healthyDeps(overrides = {}) {
     return {
         observer: {
             stats: { replaced: 9, bytesSaved: 100000, skipped: 0, failed: 0 },
-            done: new Set([1, 2, 3]),
-            evicted: new Set([4]),
+            // 按会话计数（口径修复后 collectHealth 只读 statsFor）
+            statsFor: (session) => (session?.id === "s1"
+                ? { processed: 9, bytesSaved: 100000, skipped: 0, failed: 0, evicted: 1, spilled: 1 }
+                : { processed: 0, bytesSaved: 0, skipped: 0, failed: 0, evicted: 0, spilled: 0 }),
         },
         engine: {
             lineage: {
@@ -104,7 +106,8 @@ test("格式化输出必须包含关键计数，便于 grep 与人工扫读", ()
     const line = formatHealth(collectHealth(healthyDeps()));
     assert.match(line, /window=1000000/);
     assert.match(line, /pressure=5\.0%/);
-    assert.match(line, /l12=3\/9repl\/0fail/);
+    // 口径修复后 processed 只计实际替换（=replaced），不再是「尝试过」的 done.size
+    assert.match(line, /l12=9\/9repl\/0fail/);
     assert.match(line, /l3=1evict/);
     assert.match(line, /status=ok/);
 });

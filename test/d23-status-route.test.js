@@ -10,6 +10,7 @@
  *
  * 运行：node --test test/d23-status-route.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -133,7 +134,7 @@ test("#1 路由以 exact kind 注册在约定路径，GET 返回方案规定的�
     spec.handler({ method: "GET" }, res);
     assert.equal(res.statusCode, 200);
     const payload = JSON.parse(res.body);
-    for (const key of ["status", "pressure", "window", "layers", "lastCompaction", "archiveDir", "since"]) {
+    for (const key of ["status", "pressure", "window", "layers", "lastCompaction", "hasArchiveDir", "since"]) {
         assert.ok(key in payload, `载荷缺 ${key}`);
     }
     assert.equal(typeof payload.since, "number");
@@ -142,7 +143,9 @@ test("#1 路由以 exact kind 注册在约定路径，GET 返回方案规定的�
     assert.equal(payload.window, 0, "无活跃会话时窗口读数为 0（不虚报兜底值）");
     assert.equal(payload.pressure, 0);
     assert.equal(payload.layers.l12Processed, 0);
-    assert.ok(String(payload.archiveDir).length > 0, "archiveDir 应如实回传配置值");
+    // S8（beta3）：不回传绝对路径，只回布尔
+    assert.equal(payload.hasArchiveDir, true, "已配置 archiveDir 时 hasArchiveDir 为 true");
+    assert.ok(!("archiveDir" in payload), "状态 API 不得回传 archiveDir 绝对路径");
     // 读数不允许被浏览器缓存（三入口同秒一致的验收前提）
     assert.match(res.headers["cache-control"], /no-store/);
     assert.match(res.headers["content-type"], /application\/json/);

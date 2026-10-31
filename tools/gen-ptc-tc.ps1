@@ -5,7 +5,7 @@
 .DESCRIPTION
     用途：dsh-tiered-compaction 在 desktop profile 里通过「自有 preset」方式接管压缩。
     ptc-tc 是 ptc 的精确副本，只把 compaction 组里的 compaction-basic 换成
-    @local/dsh-tiered-compaction。上游 DSH 升级会改动 ptc，此时必须重跑本脚本
+    dsh-tiered-compaction（npm 包名，固定）。上游 DSH 升级会改动 ptc，此时必须重跑本脚本
     重新生成 ptc-tc，否则 ptc-tc 会固化成老配置（漂移）。
 
     本脚本是薄封装：实际生成与自检在 tools/gen-ptc-tc.mjs 里做（Node，全程 UTF-8）。
@@ -14,14 +14,16 @@
     实测会造成中文乱码与产物不幂等。
 
     内置自检（由 Node 侧执行，失败即退出且不写产物）：
-    生成后与 ptc 做递归结构 diff，差异必须恰好是以下 7 项叶子，否则报错：
+    生成后与 ptc 做递归结构 diff，首次应用差异必须恰好是以下 9 项叶子（含 description），否则报错：
       (root).id                                    preset-ptc         -> preset-ptc-tc
       (root).config.id                             ptc                -> ptc-tc
       (root).config.order                          2                  -> <Order>
       (root).config.plugins[N].config[0].id        compaction-basic   -> tiered-compaction
-      (root).config.plugins[N].config[0].name      @deepseek-ai/...   -> @local/...
+      (root).config.plugins[N].config[0].name      @deepseek-ai/...   -> dsh-tiered-compaction
       (root).config.plugins[N].config[0].config.enabled               -> true
       (root).config.plugins[N].config[0].config.archiveDir            -> <ArchiveDir>
+      (root).config.plugins[N].config[0].config.scopeId               -> ptc-tc
+    已应用过（源 ptc 里已是 tiered-compaction）时合并而非覆盖，只校验最终形态。
     其中 N = compaction 组在 plugins 里的下标（按 id 查找，不写死）。
 
 .PARAMETER Profile
@@ -36,6 +38,9 @@
 
 .PARAMETER ArchiveDir
     写进 tiered-compaction 配置的落盘目录，默认 $env:USERPROFILE\.dsh\tiered-archive。
+
+.PARAMETER PluginName
+    仅用于探测本机已装包；产物里的 name 始终是 dsh-tiered-compaction，探测结果不同只告警。
 
 .EXAMPLE
     pwsh tools/gen-ptc-tc.ps1

@@ -65,3 +65,16 @@ export class Lineage {
         return [...this.entries.values()].map((entry) => ({ ...entry }));
     }
 }
+
+/**
+ * 谱系里的节点原位置：带会话维度（seq 是会话内序号，裸 `node#seq` 跨会话会撞）。
+ * 无会话 id 时退回旧格式 `node#seq`（纯函数层/测试无会话时的兼容口径）。
+ * @param {number|string} seq
+ * @param {string} [sessionId]
+ * @returns {string}
+ */
+export function nodeLocation(seq, sessionId) {
+    return typeof sessionId === "string" && sessionId !== ""
+        ? `${sessionId}#node#${seq}`
+        : `node#${seq}`;
+}

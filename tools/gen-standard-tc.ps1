@@ -21,7 +21,11 @@
       所以产物是 preset-standard 的完整 config，只把引擎一项换掉。
 
     护栏：
-      - 生成后与原 dump 做递归 diff，差异必须恰好 4 项叶子，否则报错不落地；
+      - 生成后与原 dump 做递归 diff，首次应用差异必须恰好 6 项叶子（description、
+        引擎 id/name、config.enabled/archiveDir/scopeId），否则报错不落地；
+      - 引擎 name 固定为 npm 包名 dsh-tiered-compaction；config.scopeId 固定为 standard
+        （单写者守卫按它给本 realm 分座，与 root 实例并存而不互斥）；
+      - 已应用过时合并而非覆盖：保留条目上的其它配置，只规范化 name/enabled/archiveDir/scopeId；
       - config.id 必须仍是 "standard"（改名会让 ds-bot 与存量会话全部 not-found）；
       - 写回前自动备份 cordis.patch.yml。
 
@@ -33,6 +37,9 @@
 
 .PARAMETER ArchiveDir
     第 2 层落盘目录，默认 $env:USERPROFILE\.dsh\tiered-archive。
+
+.PARAMETER PluginName
+    仅用于探测本机已装包；产物里的 name 始终是 dsh-tiered-compaction，探测结果不同只告警。
 
 .EXAMPLE
     pwsh tools/gen-standard-tc.ps1

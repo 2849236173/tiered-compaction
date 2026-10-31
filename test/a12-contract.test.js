@@ -8,6 +8,7 @@
  *
  * 运行：node --test test/a12-contract.test.js
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -28,7 +29,7 @@ function stubSession(nodes, dispatchers = []) {
     const surface = nodes.map((n) => (n.seq = ++seq, n.seq));
     const store = new Map(nodes.map((n) => [n.seq, { seq: n.seq, type: n.type, data: n.data }]));
     const session = {
-        surface: { get nodes() { return surface; } },
+        surface: { get nodes() { return surface; }, replaceGeneration: 0 },
         eventAt: (seq) => store.get(seq),
         requestHeader: () => ({ config: { provider: "test", model: "test" } }),
         /** 与宿主 ctx.on("session/event", ...) 同构的注册面（缺省无监听者）。 */
@@ -49,6 +50,7 @@ function stubSession(nodes, dispatchers = []) {
                 const idxEnd = surface.indexOf(endSeq);
                 if (idxStart === -1 || idxEnd === -1) throw new Error("replace 区间不在表面");
                 surface.splice(idxStart, idxEnd - idxStart + 1, ev.seq);
+                session.surface.replaceGeneration += 1;
                 store.set(ev.seq, { seq: ev.seq, type, data });
             }
             // 宿主语义：append 同步派发 session/event，不 await 返回的 Promise
@@ -74,7 +76,7 @@ function stubAgent(session) {
 }
 
 /** 组装一个装好契约层的 ctx（enabled=true，测试摘要桩）。 */
-async function setup(t, { window, perNode, summary }) {
+async function setup(t, { window, perNode, summary, auto = true }) {
     const dir = await mkdtemp(join(tmpdir(), "a12-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const ctx = new Context();
@@ -96,9 +98,11 @@ async function setup(t, { window, perNode, summary }) {
     await ctx.plugin(SessionsStub, {});
     await apply(ctx, {
         enabled: true,
+        auto,
         archiveDir: dir,
-        summarizeFn: async (req) => {
+        summarizeFn: async (req, input, signal) => {
             assert.equal(req.maxTokens, 20000, "A4a：摘要预算必须写死 20k");
+            if (typeof summary === "function") return summary(req, input, signal);
             return summary ?? "这是一段足够短的摘要文本";
         },
         summaryTarget: { provider: "test", model: "test" },
@@ -188,7 +192,11 @@ test("A12① /compact 路径：compactNow 走真实事务，事件序列与返�
     // 替换消息带 compactCheckpointSource（宿主投影识别依赖）
     const replaceEv = session.events.find((e) => e.type === "user/message");
     assert.ok(replaceEv.opts.sourceEventSeqs.length >= 3);
-    assert.ok(replaceEv.data.source, "user/message 必须带 checkpoint source");
+    const startEv = session.events.find((e) => e.type === "compaction/start");
+    const endEv = session.events.find((e) => e.type === "compaction/end");
+    assert.equal(startEv.data.sourceCommandId, "cmd-1");
+    assert.equal(endEv.data.sourceCommandId, "cmd-1");
+    assert.equal(replaceEv.data.source.sourceCommandId, "cmd-1");
 });
 
 test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80% 驱逐事件 / 阈值摘要", async (t) => {
@@ -260,8 +268,9 @@ test("A12③ 失败路径：摘要为空抛 ManualCompactionError 且补配对 e
     setMeter(meter, 3000);
     const svc = ctx.compaction;
     const session = stubSession([
-        { type: "user/message", data: { content: "一" } },
-        { type: "tool/output", data: { content: "二" } },
+        { type: "user/message", data: { content: "历史请求 " + "旧上下文。".repeat(500) } },
+        { type: "tool/output", data: { content: "历史工具输出 " + "旧结果。".repeat(500) } },
+        { type: "user/message", data: { content: "当前指令：继续修复" } },
     ]);
     const agent = stubAgent(session);
     await assert.rejects(() => svc.compactNow(agent, undefined, "cmd-2"), /ManualCompactionError|为空|事务失败/);
@@ -271,17 +280,214 @@ test("A12③ 失败路径：摘要为空抛 ManualCompactionError 且补配对 e
     assert.ok(session.events.at(-1).data.error, "end 事件必须带 error 说明");
 });
 
-test("A12④ context-overflow 触发：直接走摘要事务，重试去重只补一枪", async (t) => {
+test("C1 /compact：agent 忙时归类为 busy，agentSignal 取消归类为 cancelled", async (t) => {
+    const { svc } = await setup(t, { window: 128000, perNode: 2000 });
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史" } },
+        { type: "user/message", data: { content: "当前指令" } },
+    ]);
+    const busyAgent = {
+        session,
+        runMaintenance() { throw new Error('agent "x" already has active work'); },
+    };
+    await assert.rejects(() => svc.compactNow(busyAgent), (error) => error.code === "busy");
+
+    const cancelledAgent = {
+        session,
+        async runMaintenance(fn) {
+            const controller = new AbortController();
+            controller.abort(new Error("cancelled by test"));
+            return fn(controller.signal);
+        },
+    };
+    await assert.rejects(() => svc.compactNow(cancelledAgent), (error) => error.code === "cancelled");
+});
+
+test("C2 maxOverflowRetries=2：request-error 钩子允许两次恢复，不在 compactIfNeeded 内去重", async (t) => {
+    const { ctx, svc } = await setup(t, { window: 128000, perNode: 30000 });
+    svc.config.maxOverflowRetries = 2;
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史" } },
+        { type: "user/message", data: { content: "当前指令" } },
+    ]);
+    session.surface.replaceGeneration = 0;
+    const agent = stubAgent(session);
+    let calls = 0;
+    svc.compactIfNeeded = async () => {
+        calls += 1;
+        session.surface.replaceGeneration += 1;
+        return { shadowedSeqs: [1], shadowedRange: { start: 1, end: 1 } };
+    };
+    const { CONTEXT_WINDOW_EXCEEDED_CODE } = await import("@deepseek-ai/dsh-llm");
+    const emitFailure = () => ctx.emit("agent/request-error", {
+        agent,
+        failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
+        signal: new AbortController().signal,
+    }, () => {});
+    await emitFailure();
+    await waitFor(() => calls === 1, 1000);
+    await emitFailure();
+    await waitFor(() => calls === 2, 1000);
+    await emitFailure();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(calls, 2, "maxOverflowRetries=2 应恰好允许两次恢复");
+});
+
+test("C6 窗口未知：跳过 pressure 自动层并按会话只告警一次", async (t) => {
+    const { ctx, svc, meter } = await setup(t, { window: 128000, perNode: 30000 });
+    const session = stubSession([
+        { type: "user/message", data: { content: "大段历史" } },
+        { type: "user/message", data: { content: "当前指令" } },
+    ]);
+    const warnings = [];
+    const logger = ctx.logger;
+    const originalWarn = logger.warn;
+    logger.warn = (message) => warnings.push(String(message));
+    try {
+        setMeter(meter, 120000);
+        const agent = stubAgent(session);
+        assert.equal(await svc.compactIfNeeded(agent, "pressure"), null);
+        assert.equal(await svc.compactIfNeeded(agent, "pressure"), null);
+        assert.equal(session.events.length, 0, "窗口未知时不能执行压力提醒、驱逐或摘要");
+        assert.equal(warnings.filter((message) => message.includes("contextWindow")).length, 1);
+    } finally {
+        logger.warn = originalWarn;
+    }
+});
+
+test("C7 retain=0 保留最新 user/message 与其后的节点；C9(b) 检出 token 节点序号错位", async (t) => {
+    const { svc } = await setup(t, { window: 128000, perNode: 2000 });
+    const session = stubSession([
+        { type: "user/message", data: { content: "旧用户任务" } },
+        { type: "assistant/message", data: { message: { content: [{ type: "text", text: "旧答复" }] } } },
+        { type: "user/message", data: { content: "必须保留的最新指令" } },
+        { type: "assistant/message", data: { message: { content: [{ type: "text", text: "最新指令后的内容" }] } } },
+    ]);
+    const aligned = session.surface.nodes.map((seq, index) => ({ seq, tokens: 2000 + index }));
+    const range = svc._selectRange(session, { nodes: aligned }, 0);
+    assert.ok(range);
+    assert.ok(session.surface.nodes.indexOf(range.end) < 2, "待压缩区间不得包含最新 user/message");
+    assert.throws(() => svc._selectRange(session, {
+        nodes: aligned.map((node, index) => index === 1 ? { ...node, seq: 9999 } : node),
+    }, 0), /seqs do not align/);
+});
+
+test("C9(c) compaction/end append 失败时不重试写第二枚 end", async (t) => {
+    const { svc } = await setup(t, { window: 128000, perNode: 2000 });
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史请求 " + "旧上下文。".repeat(500) } },
+        { type: "tool/output", data: { content: "历史工具输出 " + "旧结果。".repeat(500) } },
+        { type: "user/message", data: { content: "当前指令" } },
+    ]);
+    const append = session.append;
+    let endAttempts = 0;
+    session.append = (type, ...args) => {
+        if (type === "compaction/end") {
+            endAttempts += 1;
+            throw new Error("simulated end append failure");
+        }
+        return append(type, ...args);
+    };
+    await assert.rejects(() => svc.compactNow(stubAgent(session)), /事务失败|simulated/);
+    assert.equal(endAttempts, 1);
+});
+
+test("auto:false 不注册 agent/pre-step 与 agent/request-error 自动钩子", async (t) => {
+    const { ctx, svc } = await setup(t, { window: 100000, perNode: 30000, auto: false });
+    let calls = 0;
+    svc.compactIfNeeded = async () => { calls += 1; };
+    const session = stubSession([{ type: "user/message", data: { content: "当前指令" } }]);
+    const agent = stubAgent(session);
+    await ctx.emit("agent/pre-step", { agent, signal: new AbortController().signal }, () => {});
+    await ctx.emit("agent/request-error", {
+        agent,
+        failure: { code: "CONTEXT_WINDOW_EXCEEDED" },
+        signal: new AbortController().signal,
+    }, () => {});
+    assert.equal(calls, 0);
+    assert.equal(svc.config.auto, false);
+});
+
+test("C5 摘要连续失败退避，压力增长后重试，成功后清零", async (t) => {
+    let shouldFail = true;
+    let summaries = 0;
+    const { svc, meter } = await setup(t, {
+        window: 100000,
+        perNode: 30000,
+        summary: async () => {
+            summaries += 1;
+            if (shouldFail) throw new Error("temporary summarizer failure");
+            return "short checkpoint";
+        },
+    });
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史任务 " + "旧上下文内容。".repeat(500) } },
+        { type: "tool/output", data: { content: "历史输出 " + "旧工具结果。".repeat(500) } },
+        { type: "user/message", data: { content: "当前指令" } },
+    ]);
+    setWindowOnSession(session, 100000);
+    const agent = stubAgent(session);
+    let currentTotal = 85000;
+    meter.measure = (currentSession) => {
+        const totalTokens = currentSession.surface.replaceGeneration > 0 ? 70000 : currentTotal;
+        const nodes = currentSession.surface.nodes.map((seq) => ({ seq, tokens: Math.floor(totalTokens / currentSession.surface.nodes.length) }));
+        return { totalTokens, nodes };
+    };
+    meter.currentTokens = () => session.surface.replaceGeneration > 0 ? 70000 : currentTotal;
+    for (let index = 0; index < 3; index += 1) {
+        await assert.rejects(() => svc.compactIfNeeded(agent, "pressure"));
+    }
+    assert.equal(summaries, 3);
+    assert.equal(await svc.compactIfNeeded(agent, "pressure"), null);
+    assert.equal(summaries, 3, "连续失败达到门槛后，不应每一步都再次调用 LLM");
+
+    shouldFail = false;
+    currentTotal = 90000;
+    const result = await svc.compactIfNeeded(agent, "pressure");
+    assert.ok(result, "压力比上次失败增加 5 个百分点后应允许再试");
+    assert.equal(svc.summaryFailures.has(session), false, "成功后失败计数清零");
+
+});
+
+test("C4 摘要等待期间 agentSignal 取消时返回 cancelled 且不提交检查点", async (t) => {
+    let release;
+    const { svc } = await setup(t, {
+        window: 128000,
+        perNode: 30000,
+        summary: (_request, _input, signal) => new Promise((resolve, reject) => {
+            release = resolve;
+            signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
+        }),
+    });
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史请求 " + "旧上下文。".repeat(500) } },
+        { type: "tool/output", data: { content: "历史输出 " + "旧结果。".repeat(500) } },
+        { type: "user/message", data: { content: "当前指令" } },
+    ]);
+    const controller = new AbortController();
+    const agent = {
+        session,
+        async runMaintenance(fn) { return fn(controller.signal); },
+    };
+    const pending = svc.compactNow(agent);
+    await waitFor(() => typeof release === "function", 1000);
+    controller.abort(new Error("cancelled by test"));
+    await assert.rejects(() => pending, (error) => error.code === "cancelled");
+    assert.equal(session.events.some((event) => event.type === "compaction/summary"), false);
+    assert.equal(session.events.some((event) => event.type === "user/message"), false);
+});
+
+
+test("A12④ context-overflow 触发：直接调用会走摘要事务，重试上限由 request-error 钩子管理", async (t) => {
     // meter 读数：total 60k > retain 16k（选区可压缩）；overflow 触发不看压力阈值
     const { svc, meter } = await setup(t, { window: 128000, perNode: 30000 });
     const session = stubSession([
-        { type: "user/message", data: { content: "a " + "溢出前的大段历史。".repeat(300) } },
-        { type: "tool/output", data: { content: "b " + "溢出前的工具输出。".repeat(300) } },
+        { type: "user/message", data: { content: "旧请求 " + "溢出前的大段历史。".repeat(300) } },
+        { type: "tool/output", data: { content: "旧工具 " + "溢出前的工具输出。".repeat(300) } },
+        { type: "user/message", data: { content: "当前溢出恢复指令" } },
     ]);
     const agent = stubAgent(session);
     setMeter(meter, 60000);
     const r1 = await svc.compactIfNeeded(agent, "context-overflow", undefined);
     assert.ok(r1, "overflow 必须触发摘要事务");
-    const r2 = await svc.compactIfNeeded(agent, "context-overflow", undefined);
-    assert.equal(r2, null, "同一 agent 的第二次 overflow 必须被记账去重");
 });

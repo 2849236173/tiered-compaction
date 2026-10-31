@@ -13,7 +13,10 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import yaml from "js-yaml";
-import { assertNoStaleScopeNames, optionValue, resolvePluginName } from "./lib/plugin-name.mjs";
+import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "./lib/plugin-name.mjs";
+
+/** D2：本 preset 的 realm 标识，写进引擎 config.scopeId（单写者守卫按它分座）。 */
+const SCOPE_ID = "ptc-tc";
 
 const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
     kind: "scalar",
@@ -52,14 +55,26 @@ function buildPtcTc(ptc, pluginName) {
     tc.config.description = "基于官方 ptc，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开";
     const group = tc.config.plugins.find((p) => p.id === "compaction");
     if (!group) throw new Error("ptc 里找不到 id=compaction 的组");
-    const idx = group.config.findIndex((p) => p.id === "compaction-basic");
-    if (idx < 0) throw new Error("compaction 组里找不到 compaction-basic");
-    group.config[idx] = {
+    const target = {
         id: "tiered-compaction",
         name: pluginName,
-        config: { enabled: true, archiveDir },
+        config: { enabled: true, archiveDir, scopeId: SCOPE_ID },
     };
-    return tc;
+    const idx = group.config.findIndex((p) => p.id === "compaction-basic");
+    if (idx >= 0) {
+        group.config[idx] = target;
+        return { entry: tc, alreadyApplied: false };
+    }
+    const tcIdx = group.config.findIndex((p) => p.id === "tiered-compaction");
+    if (tcIdx < 0) throw new Error("compaction 组里既无 compaction-basic 也无 tiered-compaction，结构异常");
+    // 已应用过：合并而非覆盖——保留条目上的其它配置，只规范化 name / enabled / archiveDir / scopeId
+    const existing = group.config[tcIdx];
+    group.config[tcIdx] = {
+        ...existing,
+        ...target,
+        config: { ...(existing?.config ?? {}), ...target.config },
+    };
+    return { entry: tc, alreadyApplied: true };
 }
 
 /**
@@ -86,12 +101,21 @@ function stabilize(node) {
 }
 
 const dumpText = readFileSync(dumpPath, "utf8");
-// 包名一律从「这台机器实际装了什么」推导，禁止硬编码（见 tools/lib/plugin-name.mjs 顶部事故说明）。
-const pluginName = resolvePluginName({ profileDir, override: pluginNameOverride, dumpText });
-console.log(`插件包名（从已装包推导）: ${pluginName}`);
+// D2：preset 行的 name 固定为 npm 包名 dsh-tiered-compaction（正式发布名）。
+// 仍探测一次已装包：探测结果不同（如 @local/ 本地链接）只告警，不改写产物。
+const pluginName = PLUGIN_BASENAME;
+try {
+    const installed = resolvePluginName({ profileDir, override: pluginNameOverride, dumpText });
+    if (installed !== pluginName) {
+        console.warn(`警告：本机解析到的包名是 ${installed}，产物仍写 ${pluginName}；请改用 npm 正式包安装，否则 preset 行会 import 失败`);
+    }
+} catch (error) {
+    console.warn(`警告：未能确认本机已装 ${pluginName}（${error?.message ?? error}）`);
+}
+console.log(`插件包名: ${pluginName}`);
 
 const { entry: ptc } = loadPtc(dumpText);
-const tc = buildPtcTc(ptc, pluginName);
+const { entry: tc, alreadyApplied } = buildPtcTc(ptc, pluginName);
 
 /* ---------------- 自检：递归 diff ---------------- */
 function diffTree(a, b, path = "(root)", out = []) {
@@ -138,14 +162,19 @@ const expected = [
     { path: `${base}.id`, to: "tiered-compaction" },
     { path: `${base}.name`, to: pluginName },
     { path: `${base}.config.enabled`, to: true },
+    { path: `${base}.config.scopeId`, to: SCOPE_ID },
 ];
 const archivePath = `${base}.config.archiveDir`;
 
 const problems = [];
-if (flat.length !== expected.length + 1) {
+// 已应用过时源条目里已有引擎，diff 条数不同；只校验最终形态（见下方护栏）
+if (!alreadyApplied && flat.length !== expected.length + 1) {
     problems.push(`展开后差异 ${flat.length} 处，预期 ${expected.length + 1}（含 description/archiveDir）`);
 }
-for (const exp of expected) {
+const appliedEntry = tc.config.plugins.find((p) => p.id === "compaction")?.config?.find((p) => p.id === "tiered-compaction");
+if (appliedEntry?.name !== pluginName) problems.push(`引擎 name 应为 ${pluginName}，实际 ${JSON.stringify(appliedEntry?.name)}`);
+if (appliedEntry?.config?.scopeId !== SCOPE_ID) problems.push(`scopeId 应为 ${SCOPE_ID}，实际 ${JSON.stringify(appliedEntry?.config?.scopeId)}`);
+for (const exp of alreadyApplied ? [] : expected) {
     const hit = flat.find((d) => d.path === exp.path);
     if (!hit) problems.push(`缺少预期差异 ${exp.path}`);
     else if (JSON.stringify(hit.to) !== JSON.stringify(exp.to)) {
@@ -153,7 +182,9 @@ for (const exp of expected) {
     }
 }
 const adHit = flat.find((d) => d.path === archivePath);
-if (!adHit) problems.push(`缺少预期差异 ${archivePath}`);
+if (alreadyApplied) {
+    if (appliedEntry?.config?.archiveDir !== archiveDir) problems.push(`archiveDir 应为 ${archiveDir}`);
+} else if (!adHit) problems.push(`缺少预期差异 ${archivePath}`);
 else if (typeof adHit.to !== "string" || adHit.to.length === 0) problems.push(`${archivePath} 应为非空字符串`);
 for (const d of flat) {
     if (!expected.some((e) => e.path === d.path) && d.path !== archivePath) {

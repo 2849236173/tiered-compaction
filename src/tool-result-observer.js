@@ -19,6 +19,9 @@
  * - `compaction/prune` 必须先于 replace 写入（宿主据此做影子定价）；
  * - 任何异常只记警告，绝不阻断会话（与 basic / pre-step 钩子同款口径）。
  */
+import { nodeLocation } from "./lineage.js";
+// beta3 多 realm：计数存进进程级共享表，状态路由持有者（可能是别的实例）也读得到。
+import { layerCountsFor } from "./shared-stats.js";
 
 /** 替换内容的标记：一眼能看出这是被压缩过的，并给出存档路径。 */
 export const PRUNE_MARKER = "[tiered-compaction";
@@ -54,6 +57,22 @@ export function prunedContent(preview, info) {
 }
 
 /**
+ * 源事件是否仍是当前表面上的活节点（W8）。
+ *
+ * 宿主 API（dsh-session lib）：`session.surface.nodes` 是当前表面的 seq 数组，
+ * `session.eventAt(seq)` 返回日志里该 seq 的事件对象（同一冻结引用）。
+ * 两条都满足才允许写 prune + replace。
+ * @param {object} session
+ * @param {{seq: number}} event
+ * @returns {boolean}
+ */
+function isLiveSurfaceNode(session, event) {
+    const nodes = session?.surface?.nodes;
+    if (!Array.isArray(nodes) || !nodes.includes(event.seq)) return false;
+    return typeof session.eventAt !== "function" || session.eventAt(event.seq) === event;
+}
+
+/**
  * 观察者：把工具结果压缩接到会话表面。
  *
  * 与 `TieredCompactionEngine` 的分工：引擎是纯函数式四层实现，不做任何 I/O 与
@@ -67,10 +86,15 @@ export class ToolResultObserver {
      *   enabled?: boolean,
      * }} options
      */
-    constructor({ engine, ctx, enabled = true }) {
+    constructor({ engine, ctx, enabled = true, onSessionActive } = {}) {
         this.engine = engine;
         this.ctx = ctx;
         this.enabled = enabled;
+        /**
+         * 会话活跃回调：每处理一条 session/event 就把该会话登记给 contract，
+         * 状态路由据此找到「最近活跃会话」（不再只认发生过压缩的会话）。
+         */
+        this.onSessionActive = typeof onSessionActive === "function" ? onSessionActive : undefined;
         /**
          * 每个会话各自的去重集合，`WeakMap<session, {done, evicted}>`。
          *
@@ -100,15 +124,42 @@ export class ToolResultObserver {
     /**
      * 取某会话的去重集合（不存在则创建）。
      * @param {object} session
-     * @returns {{done: Set<number>, evicted: Set<number>}}
+     * @returns {{done: Set<number>, evicted: Set<number>, counts: object}}
      */
     stateOf(session) {
         let state = this.perSession.get(session);
         if (state === undefined) {
-            state = { done: new Set(), evicted: new Set() };
+            // counts 是**该会话**的显式计数：processed 只记实际写回的替换，
+            // done 集合是「尝试过」的占位（含 skip/无收益），不能当计数用。
+            state = {
+                done: new Set(),
+                evicted: new Set(),
+                counts: layerCountsFor(session),
+            };
             this.perSession.set(session, state);
         }
         return state;
+    }
+
+    /**
+     * 查询某会话的计数快照（health-check / 状态路由用）。
+     * 未见过的会话返回全 0，且不在 WeakMap 里留下条目。
+     * @param {object} session
+     * @returns {{processed: number, bytesSaved: number, skipped: number, failed: number, evicted: number, spilled: number}}
+     */
+    statsFor(session) {
+        const counts = session == null ? undefined : this.perSession.get(session)?.counts;
+        return counts === undefined
+            ? { processed: 0, bytesSaved: 0, skipped: 0, failed: 0, evicted: 0, spilled: 0 }
+            : { ...counts };
+    }
+
+    /** 把会话登记为最近活跃（回调异常不得影响会话）。 */
+    _markActive(session) {
+        if (this.onSessionActive === undefined || session == null) return;
+        try {
+            this.onSessionActive(session);
+        } catch { /* 登记失败只影响状态展示 */ }
     }
 
     /** 注册宿主钩子：工具结果产生即加工。 */
@@ -145,6 +196,7 @@ export class ToolResultObserver {
             } catch (error) {
                 // 绝不阻断会话：压缩层失败必须降级为「不加工」
                 this.stats.failed += 1;
+                this.stateOf(session).counts.failed += 1;
                 this.ctx.logger.warn(
                     `tiered-compaction: 工具结果观察者出错（已降级，不影响会话）：${error?.message ?? error}`,
                 );
@@ -158,6 +210,8 @@ export class ToolResultObserver {
      * @param {object} event 事件
      */
     async handleEvent(session, event) {
+        // 任何事件都说明该会话正在活动：先登记，再按类型过滤
+        this._markActive(session);
         if (event?.type !== "tool/result") return;
         if (event.seq === undefined) return;
         // **P0 交叉审计修复（2026-10-27，gpt-6-astra 报、我实跑确认）**：
@@ -186,6 +240,12 @@ export class ToolResultObserver {
 
         const eventText = textOfToolResult(event);
         if (eventText !== null && eventText.startsWith(PRUNE_MARKER)) return;
+        // W9（beta3 审计）：宿主 `Session.append` 把 surfaceOp 展开在事件**顶层**
+        // （dsh-session lib:1517-1534），不在 data 里——旧判据 `data.surfaceOp`
+        // 永远 undefined，替换产物会被再加工一次。源事件的标记是字符串 "append"
+        // （lib:193 isAppendSurfaceEvent），替换是 { op: "replace", ... } 对象。
+        // 只处理 append；undefined 仅出现在未带标记的桩里，按 append 对待。
+        if (event.surfaceOp !== undefined && event.surfaceOp !== "append") return;
         if (event.data?.surfaceOp?.op === "replace") return;
         if (state.evicted.has(event.seq)) return;
         // D17 系统审计修复（2026-10-27）：去重标记必须在 **await 之前**占位。
@@ -204,6 +264,7 @@ export class ToolResultObserver {
         const text = textOfToolResult(event);
         if (text === null) {
             this.stats.skipped += 1;
+            state.counts.skipped += 1;
             return;
         }
         // 第 1-2 层：折叠 → （折叠后仍 >8k 字节才）落盘
@@ -222,13 +283,21 @@ export class ToolResultObserver {
             throw error;
         }
         if (processed === text || layers.length === 0) {
-            return; // 无收益，占位保留（不必重复尝试同一内容）
+            // 无收益，占位保留（不必重复尝试同一内容）；只计 skipped，不计 processed
+            state.counts.skipped += 1;
+            return;
         }
         // 落盘信息从谱系表取回（引擎在落盘层已登记）
         // 传 session.id：spillInfo 的键是 `sessionId#seq`，不传会按后缀兜底匹配
         const spillInfo = this.engine.lastSpillInfo?.(event.seq, session?.id) ?? {};
         try {
-            this.replace(session, event, processed, spillInfo);
+            if (this.replace(session, event, processed, spillInfo) === null) {
+                // W8：源节点已不在表面（await 期间被替换），不写任何事件；
+                // 占位保留——该 seq 已离开表面，再处理也写不回去
+                this.stats.skipped += 1;
+                state.counts.skipped += 1;
+                return;
+            }
         } catch (error) {
             // P1-4：写表面失败也必须回滚占位，否则该 seq 永久封禁。
             // （第 2 步真正改表面的操作同样可能失败——例如 await 期间
@@ -238,6 +307,9 @@ export class ToolResultObserver {
         }
         this.stats.replaced += 1;
         this.stats.bytesSaved += Math.max(0, text.length - processed.length);
+        state.counts.processed += 1;
+        state.counts.bytesSaved += Math.max(0, text.length - processed.length);
+        if (layers.includes("spill-to-disk")) state.counts.spilled += 1;
         // P2-6：日志不在 try 内会外抛，导致 stats 已计数但实际未完成。
         try {
             this.ctx.logger.info(
@@ -264,6 +336,12 @@ export class ToolResultObserver {
      * @param {{path?: string, sha256?: string, size?: number}} spillInfo
      */
     replace(session, event, processed, spillInfo) {
+        // W8（beta3 审计）：prune 前**同步**复核源节点仍在表面上、且仍是同一条事件。
+        // handleEvent 在 processToolOutput 的 await 期间，第 3 层驱逐或其它写者
+        // 可能已把该 seq 替换掉；此时再写 prune，shadowedSeqs 不再指向当前表面
+        // 的精确区间，会话日志冷加载直接失败（format-v3-to-v4 span 校验）。
+        // 复核与两次 append 之间没有 await，单线程下不会再被插队。
+        if (!isLiveSurfaceNode(session, event)) return null;
         // 第一步：影子定价（纯消费方可据此扣减 token，不必逐节点记账）
         session.append("compaction/prune", {
             shadowedRange: { start: event.seq, end: event.seq },
@@ -297,6 +375,9 @@ export class ToolResultObserver {
         const surface = session.surface?.nodes ?? [];
         let evicted = 0;
         for (const seq of [...surface]) {
+            // W8：遍历的是快照；每个 seq 写 prune 前都要复核它仍在**当前**表面上
+            // （同一循环里同步派发的监听者可能已改动表面）
+            if (!session.surface?.nodes?.includes(seq)) continue;
             const event = session.eventAt(seq);
             if (event?.type !== "tool/result") continue;
             // 只跳过「已被第 3 层驱逐过」的，不能沿用 `done`。
@@ -358,13 +439,15 @@ export class ToolResultObserver {
             // 同时记新 seq（防止下一轮把替换产物当新节点再驱逐一次）
             if (replacement?.seq !== undefined) state.evicted.add(replacement.seq);
             state.evicted.add(seq);
-            // P1-3：谱系按契约逐节点登记（originalLocation = node#seq）
+            // P1-3：谱系按契约逐节点登记；S2（beta3）：键带会话维度
+            // （`<sessionId>#node#<seq>`，无会话 id 时退回 `node#<seq>`）
             this.engine.lineage.record(
-                `node#${seq}`,
+                nodeLocation(seq, session?.id),
                 keptPath ?? "-（已驱逐，靠重跑恢复）",
                 "soft-pressure",
             );
             evicted += 1;
+            state.counts.evicted += 1;
         }
         if (evicted > 0) {
             this.ctx.logger.warn(`tiered-compaction: 80% 压力驱逐 ${evicted} 个可重放工具结果`);

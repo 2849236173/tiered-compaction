@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { Service } from "@deepseek-ai/cordis";
+import z from "@deepseek-ai/schemastery";
 import { TieredCompactionEngine } from "./engine.js";
 // A12 契约层：宿主三入口 + 自动钩子的真实实现（enabled=true 的接管路径）。
 // 注意：本模块名与 TieredCompactionEngineService 同名导出会与下方 M4.5 服务类
@@ -20,21 +21,50 @@ import { TieredCompactionEngine } from "./engine.js";
 import { TieredCompactionEngineService as HostContractEngineService } from "./contract.js";
 // P1/P2-1 修补：工具结果观察者——把第 1-3 层真正接到宿主会话事件流。
 import { ToolResultObserver } from "./tool-result-observer.js";
+import { setActiveObserver } from "./shared-stats.js";
 // D22：把阈值夹取的告警接到宿主日志（见 reportCoexistingEngines 与 lossy-summarize）。
 import { setThresholdWarnSink } from "./lossy-summarize.js";
 // D24：单写者守卫——全进程内最多一个「会写归档 / 会产 prune」的活跃实例。
 // 背景：插件曾被多处装配（bundle 根平面 + preset realm），两个实例都把观察者
 // 接到同一条会话事件流上，各自对同一批工具结果发 compaction/prune，第二枚
 // 落盘时目标已换出 surface，宿主重放必抛 SessionFormatError（会话打不开）。
-import { acquireSingleWriter, releaseSingleWriter } from "./single-writer-guard.js";
+import {
+    acquireSingleWriter,
+    compactionSeat,
+    OBSERVER_SEAT,
+    releaseSingleWriter,
+} from "./single-writer-guard.js";
 
 /** 本插件在 Cordis 中的服务位名（不与宿主 `compaction` 冲突）。 */
 const SERVICE_NAME = "tieredCompaction";
 
-/** D24：本模块实例当前持有的写者席位 token（null = 未持票）。
- *  detach() 时归还；同一份模块代码被多路径解析时，各副本各有此变量，
- *  而 Symbol.for 席位表是全局的——只有真正持票的副本能够归还。 */
-let writerSeat = null;
+/**
+ * 插件配置（W5）。与 contract.js 的 Config 同一写法（schemastery）。
+ * - scopeId 非字符串**必须报错**：静默当作 root 会让 preset 实例去抢 root 席位。
+ * - 未列出的键（auto / bypassMode / 测试桩 tokenMeter 等）由 z.object 原样透传，
+ *   交给 contract.js 的 Config 再校验。
+ */
+export const Config = z.object({
+    enabled: z.boolean().default(true).description("开启后接管 ctx.compaction；关闭只注册只读自检服务"),
+    auto: z.boolean().default(true).description("是否注册自动压力与溢出压缩钩子"),
+    archiveDir: z.string().description("第 2 层落盘目录，缺省为 ~/.dsh/tiered-archive"),
+    scopeId: z.string().description("preset realm 挂载点的标识（如 standard / ptc-tc）；root 挂载不填"),
+});
+
+/**
+ * 在 fiber 上申请一个席位，并用 ctx.effect 托管归还（fiber 卸载即归还）。
+ * @returns {object|null} token；席位被占时 null
+ */
+function holdSeat(ctx, kind, scope) {
+    let token = null;
+    ctx.effect(() => {
+        token = acquireSingleWriter(kind, { logger: ctx.logger, scope });
+        return () => {
+            if (token !== null) releaseSingleWriter(token);
+        };
+    }, `tiered-compaction seat ${scope}`);
+    return token;
+}
 
 /**
  * 存档目录默认值：`~/.dsh/tiered-archive`。
@@ -90,9 +120,14 @@ class TieredCompactionBypassService extends Service {
             archiveDir: config.archiveDir,
             logger: ctx.logger,
         });
-        // 旁路模式下第 1-2 层照样服务（与 rollover 形态互补，设计稿 §9-6）
-        this.observer = new ToolResultObserver({ engine: this.engine, ctx });
-        this.observer.register();
+        // 旁路模式下第 1-2 层照样服务（与 rollover 形态互补，设计稿 §9-6）。
+        // beta3：只有持 observer 席位的实例才挂观察者（全进程一份）。
+        if (config.ownsObserver !== false) {
+            this.observer = new ToolResultObserver({ engine: this.engine, ctx });
+            this.observer.register();
+            const observer = this.observer;
+            ctx.effect(() => setActiveObserver(observer), "tiered-compaction shared observer");
+        }
         ctx.logger.warn(
             "dsh-tiered-compaction：compaction 服务位已被占用，降级为第 1-2 层旁路模式" +
             "（无损折叠+落盘仍可用；第 3-4 层挂起）"
@@ -157,8 +192,7 @@ async function reportCoexistingEngines(ctx) {
     const registry = typeof ctx.get === "function" ? ctx.get("agentPresets") : undefined;
     if (registry === undefined || registry === null) {
         ctx.logger.info(
-            "dsh-tiered-compaction: 无 agentPresets 服务（非 preset 架构），" +
-            "本插件即为唯一的 compaction 实现"
+            "dsh-tiered-compaction: 暂未发现 agentPresets 服务"
         );
         return;
     }
@@ -239,18 +273,23 @@ function presetLabel(row) {
  *   summaryTarget 仅作为测试桩与兜底（宿主真链路从 ctx 注入解析）。
  */
 export async function apply(ctx, config = {}) {
+    // W5：经 cordis 装配时 Config 已校验；直接调用 apply（单测 / 旧装配器）
+    // 不经过 Config，这里再守一次——非字符串 scopeId 必须报错，不得回落成 root。
+    if (config.scopeId !== undefined && typeof config.scopeId !== "string") {
+        throw new TypeError(`dsh-tiered-compaction: scopeId 必须是字符串，实际是 ${typeof config.scopeId}`);
+    }
     const resolved = {
         // 默认开启：装上就该生效。要并存或临时停用，显式配 enabled: false。
         enabled: config.enabled ?? true,
+        auto: config.auto ?? true,
         // 存档目录必须有个能用的默认值。
         // 为什么不能留空：archiveDir 缺失时第 1-2 层（折叠 + 落盘）会被整层跳过，
         // 而且是静默跳过——装了插件、界面不报错、日志只有一行「无 archiveDir（落盘层跳过）」。
         // 这正是「装了但没生效」最典型的一种。
         // 默认放在宿主配置目录下，与 DSH 自身的存储位置同级，不污染用户目录。
         archiveDir: config.archiveDir ?? defaultArchiveDir(),
-        // D24：preset 组挂载点应显式携带 scopeId（如 'ptc-tc-realm'），
-        // 使各 realm 的实例各自持有独立席位；不携带则视为 root/bundle 挂载，
-        // 参与「全进程唯一写者」竞争。
+        // D24：preset 组挂载点显式携带 scopeId（standard / ptc-tc），各 realm 各持
+        // 一个 compaction 席位；不携带即 root 挂载（席位 compaction:root）。
         scopeId: typeof config.scopeId === "string" && config.scopeId.length > 0
             ? config.scopeId
             : undefined,
@@ -260,7 +299,7 @@ export async function apply(ctx, config = {}) {
     //   apply 根本没被调用（模块解析/挂载问题）
     //   apply 被调用了但服务没构造（static inject 依赖缺）
     ctx.logger.info(
-        `dsh-tiered-compaction apply 被调用（enabled=${resolved.enabled}）`
+        `dsh-tiered-compaction apply 被调用（enabled=${resolved.enabled}，scope=${resolved.scopeId ?? "root"}）`
     );
 
     // D22：把阈值夹取的告警接到宿主日志。
@@ -269,51 +308,44 @@ export async function apply(ctx, config = {}) {
     // 不接这条 sink，夹取就是静默的——用户改了设置、没生效、日志里一个字都没有。
     setThresholdWarnSink((message) => ctx.logger.warn(message));
 
-    // 开关关闭（默认）：只注册自检服务，绝不触碰 ctx.compaction 服务位，
+    // 开关关闭：只注册自检服务，绝不触碰 ctx.compaction 服务位，
     // 保证与 dsh-compaction-basic 完全并存、行为与纯 basic 一致（验收 A6）。
     if (!resolved.enabled) {
         ctx.plugin(TieredCompactionService, resolved);
         return;
     }
 
-    // D24：单写者守卫（仅在即将开始写盘动作前申请；enabled=false 的纯自检
-    // 实例不占座，避免「自检僵尸」把后来者挤成降级）。
-    // scope 语义：bundle/root 平面挂载（默认）使用 global 座——全进程唯一写者；
-    // preset compaction 组内的挂载经由配置显式携带 scopeId（如 'ptc-tc-realm'），
-    // 各 realm 一座——realm 天然按会话隔离，合法并存。
-    const seatScope = resolved.scopeId ? `realm:${resolved.scopeId}` : "global";
-    if (writerSeat === null) {
-        writerSeat = acquireSingleWriter("contract", { logger: ctx.logger, scope: seatScope });
-    }
-    if (writerSeat === null) {
+    // D24 / beta3：两类席位，都用 ctx.effect 托管归还（fiber 卸载即还）。
+    // 1. compaction:<scope>——同 scope 重复 apply 即双写，拒绝并降级为自检服务。
+    const seatScope = compactionSeat(resolved.scopeId);
+    const compactionToken = holdSeat(ctx, "contract", seatScope);
+    if (compactionToken === null) {
         ctx.logger.warn(
-            `dsh-tiered-compaction：本实例未取得单写者席位（scope=${seatScope} 已有别的实例在写），` +
+            `dsh-tiered-compaction：本实例未取得席位（${seatScope} 已有别的实例在写），` +
             "降级为纯自检服务（无观察者、无引擎、不写任何归档）"
         );
         ctx.plugin(TieredCompactionService, resolved);
         return;
     }
+    // 2. observer——全进程一份。session/event 对无标签监听者是全局广播，
+    //    root 实例一般最先 apply 并持有；没有 root 时第一个 apply 的 realm 实例持有。
+    const observerToken = holdSeat(ctx, "observer", OBSERVER_SEAT);
+    const ownsObserver = observerToken !== null;
 
-    // D22：检测「realm 内另有压缩引擎」——这是 preset 架构下最隐蔽的失效：
-    // 我们注册在 root realm 成功、日志显示「已接管」，但每个会话实际跑的是
-    // preset realm 内那份官方 basic（preset 的 plugins 是对象字段，patch 的
-    // buildMap 递归不进去，所以插件自带 patch 停不掉它）。
-    // 期望 false 以外的结果都要报出来，把「装了但没用」从静默变可见。
-    await reportCoexistingEngines(ctx);
-    // 开关关闭（默认）：只注册自检服务，绝不触碰 ctx.compaction 服务位，
-    // 保证与 dsh-compaction-basic 完全并存、行为与纯 basic 一致（验收 A6）。
-    if (!resolved.enabled) {
-        ctx.plugin(TieredCompactionService, resolved);
-        return;
-    }
+    // D22（W6）：诊断「preset realm 内另有压缩引擎」放后台跑，不 await。
+    // preset 实例里 registry.list() 会等当前 activate（即正在装配的本实例）
+    // 结束，await 它等于把自己的装配挂满 1500ms 截止时间。失败只记 debug/warn。
+    reportCoexistingEngines(ctx).catch((error) => {
+        ctx.logger.warn(`dsh-tiered-compaction: 并存引擎诊断失败（已忽略）：${error?.message ?? error}`);
+    });
+
     // 开关开启：construction-catch 探测服务位（设计稿 §8 R38-1 定稿写法）。
     // 严禁 ctx.get('compaction') 探针——它会强制实例化懒声明的引擎、把槽占掉
     // 反噬自己（headless 实测坑）。改为直接构造引擎服务：Cordis 的 Service
     // 构造器在 await ctx.plugin(...) 时同步 provide，槽被占时抛
     // "service ... has been registered at <...>"，catch 后解析持有者并降级为
     // 第 1-2 层旁路模式（§9-6），显式标 bypassMode。
-    // （cordis 实测：ctx.plugin() 返回 thenable fiber，构造发生在 await 后，
-    //   报错文案 `service "<name>" has been registered at <owner>`。）
+    // 席位由 ctx.effect 托管：这里抛错时 fiber 失败回收，席位随之归还。
     try {
         // A12 起接管服务 = 宿主契约层（CompactionEngine 基类 + 三入口 + 自动钩子）。
         // 契约层内部仍持有四层引擎（engine.js）的依赖；config 桩仅测试用。
@@ -324,6 +356,7 @@ export async function apply(ctx, config = {}) {
             tokenMeter: config.tokenMeter,
             summarizeFn: config.summarizeFn,
             summaryTarget: config.summaryTarget,
+            ownsObserver,
         });
     } catch (err) {
         if (!/has been registered/.test(String(err?.message))) throw err;
@@ -335,12 +368,7 @@ export async function apply(ctx, config = {}) {
             ...resolved,
             bypassMode: true,
             archiveDir: resolved.archiveDir,
+            ownsObserver,
         });
     }
-}
-
-/** 插件卸载：Cordis 依据 Service 自动回收；本模块归还单写者席位。 */
-export function detach() {
-    releaseSingleWriter(writerSeat);
-    writerSeat = null;
 }

@@ -57,27 +57,18 @@ export class TieredCompactionEngine {
             spillBreaker: this.spillBreaker,
             logger: this.logger,
         });
-        // 记下这次落盘的存档信息，供宿主替换事件写进预览（观察者取用）
+        // 记下这次产出的存档信息，供宿主替换事件写进预览（观察者取用）。
+        // S2/S6（beta3 审计）：直接用仲裁器返回的**本次**存档，不再按 `node#seq`
+        // 反查进程级谱系表——那个键跨会话同 seq 会撞，拿到别的会话的路径；
+        // 且旧逻辑只认 spill-to-disk，只折叠时预览里没有存档入口。
+        // size 是写盘缓冲的字节数，与实物一致（D17：曾经显示「0 字节」）。
         this.spillInfo ??= new Map();
-        const entry = this.lineage.toArray().findLast(
-            (item) => item.originalLocation === `node#${at.seq}` && item.replacedBy === "spill-to-disk",
-        );
-        if (entry !== undefined) {
-            // D17 实测修复：原先只存 path + sha256，没存 size，预览因此显示
-            // 「0 字节」而实际文件是 32KB——用户看到的第一条压缩提示就报错数。
-            // 大小直接量落盘后的文件，保证与实物一致（不靠估算）。
-            let size = 0;
-            try {
-                const { stat } = await import("node:fs/promises");
-                size = (await stat(entry.newLocation)).size;
-            } catch {
-                // 文件已不在（外部清理）：保持 0，预览不显示误导性数字
-            }
-            this.spillInfo.set(`${at.sessionId ?? "?"}#${at.seq}`, {
-                path: entry.newLocation,
-                sha256: entry.digest,
-                size,
-            });
+        const key = `${at.sessionId ?? "?"}#${at.seq}`;
+        if (result.archive) {
+            this.spillInfo.set(key, { ...result.archive });
+        } else {
+            // 本次没有存档：清掉同键旧值，免得观察者拿到上一轮的存档
+            this.spillInfo.delete(key);
         }
         return result;
     }

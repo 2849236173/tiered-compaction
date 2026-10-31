@@ -2,13 +2,15 @@
  * M2 骨架自检：验证插件模块可被 Node ESM 加载、导出面完整。
  * 运行：node --test test/（不依赖宿主运行时）
  */
+import "./reset-writer.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { apply, detach } from "../src/index.js";
+import { apply, Config } from "../src/index.js";
 
-test("插件模块可加载且导出面完整", () => {
+test("插件模块可加载且导出面完整", async () => {
     assert.equal(typeof apply, "function", "必须导出 apply 函数");
-    assert.equal(typeof detach, "function", "必须导出 detach 函数");
+    assert.equal(typeof Config, "function", "必须导出 Config（W5：schemastery 配置）");
+    assert.equal(typeof (await import("../src/index.js")).detach, "undefined", "detach() 已删除：席位由 ctx.effect 托管归还");
 });
 
 /** 极简宿主桩：记录 plugin() 调用，模拟 Cordis ctx 的最小表面。 */
@@ -20,6 +22,8 @@ function stubCtx() {
             calls.push({ name: Service.name ?? String(Service), config });
         },
         logger: { info() {}, warn() {} },
+        // 席位由 ctx.effect 托管（beta3）；桩只需立即执行副作用
+        effect(fn) { fn(); },
     };
 }
 
