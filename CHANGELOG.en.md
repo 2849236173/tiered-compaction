@@ -6,7 +6,21 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.5] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested yet)** — diagnostic build: logging only, no compaction logic changes.
+
+### Known issue (under investigation)
+
+- With beta.4 in the real desktop app, layers 1-3 and the automatic check run, but the layer-4 pressure summary fails above ~82% with `pressure 钩子失败，继续步进：Cannot read properties of undefined (reading '<seq>')`, where the seq is the system message at the head of the surface. The failure never blocks the turn, but no automatic layer-4 summary happens; run `/compact` manually under high pressure. Replaying the session snapshot offline with the host's real `Session` does not reproduce it.
+
+### Changed
+
+- When the pressure hook fails, the first 6 stack frames are also logged at warn level (the host log drops debug), to locate the issue above.
+
 ## [0.4.0-beta.4] - 2026-10-31
+
+> ⚠️ Known issue: the layer-4 pressure summary fails in the real host; see 0.4.0-beta.5.
 
 **Release tier: beta / preview (not fully tested yet)** — automated tests pass; the automatic compaction hook fix has a regression test against real cordis proxies, but the real desktop environment and the new UI are not yet verified. **beta.3 users should upgrade.**
 

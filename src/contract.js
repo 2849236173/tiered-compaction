@@ -1417,6 +1417,12 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 } catch (error) {
                     // 钩子失败绝不阻断步进（basic 同款口径）
                     ctx.logger.warn(`tiered-compaction: pressure 钩子失败，继续步进：${error?.message ?? error}`);
+                    // 只给消息定位不了故障点（beta4 实测 "reading '1933'" 无从下手），堆栈落 debug
+                    // 宿主日志不收 debug 级，堆栈前几帧随 warn 一起落盘
+                    if (error?.stack) {
+                        const frames = String(error.stack).split("\n").slice(1, 7).map((l) => l.trim()).join(" | ");
+                        ctx.logger.warn(`tiered-compaction: pressure 钩子失败堆栈：${frames}`);
+                    }
                 }
             }
             return next();
