@@ -132,7 +132,16 @@ if ($Apply) {
         # 静默不命中、还误报「已替换」。
         # 注意：不能用 (?=^- id: )——^ 在未开启 Multiline 时只匹配字符串开头，
         # 该分支会永远失效，正则退回 \z 把块后面所有条目一并吞掉。
-        $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?(\r?\n' + [regex]::Escape($endMarker) + '\r?\n|\r?\n(?=- id: )|\r?\n?\z)'
+        # beta5 修复：旧正则里的 `\r?\n(?=- id: )` 会先命中块内自身的
+        # `- id: preset-standard`，只替换块头注释、旧块体原样留下，每次 -Apply
+        # 多叠一份 standard（宿主按 id 取最后一份，所以此前没表现出故障）。
+        # 现在：有结束标记时一律吃到「最后一个」结束标记，把历史叠出的副本一并收拢；
+        # 只有完全没有结束标记的老格式才退回「下一个非 preset-standard 顶层条目 / 文件末尾」。
+        if ($patchText.Contains($endMarker)) {
+            $pattern = [regex]::Escape($beginMarker) + '[\s\S]*' + [regex]::Escape($endMarker) + '\r?\n?'
+        } else {
+            $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?(\r?\n(?=- id: (?!preset-standard\b))|\r?\n?\z)'
+        }
         $replaced = [System.Text.RegularExpressions.Regex]::Replace($patchText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $newBlock }, 1)
         if ($replaced -eq $patchText) {
             Write-Error "替换未命中：D17 开始标记存在但边界匹配失败，中止写回（profile 未被改动）。"
