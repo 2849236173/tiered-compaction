@@ -6,6 +6,41 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.3] - 2026-10-31
+
+**Release tier: beta / preview (not fully tested yet)** — automated tests pass, but the real desktop environment and real LLM summarization path have not been fully verified. Intended for users willing to try it and report issues; choose a stable release if you need maximum confidence.
+
+### Fixed (session integrity / security)
+
+- **Prevented session corruption from competing writes**: only one observer runs per process across preset mounts. Before writing a prune, it rechecks that the target tool result is still live; stale work is skipped. The observer now ignores non-append surface events, so it no longer processes the host pruner's replacements again.
+- **Confined `tiered_restore`** to ordinary files inside the archive directory; symlinks and traversal paths are rejected, and errors no longer reveal the file's actual digest.
+- **Prevented cross-session archive mix-ups**: previews and lineage are session-scoped. Folding and spilling the same source now produce only one archive.
+- **Made archive writes atomic**: content is written and synced to a temporary file before final placement; existing archives are never overwritten. Windows-invalid characters and reserved names are sanitized.
+- **Removed the absolute archive path from the status API**; it now reports `hasArchiveDir`.
+
+### Fixed (behavior)
+
+- **Improved `/compact` and overflow recovery**: busy agents produce a `busy` result; cancellation is classified as `cancelled`; `maxOverflowRetries > 1` now works; the initiating command ID is recorded in lifecycle events and checkpoints.
+- **Made the automatic-hook switch effective**: `auto: false` now prevents pressure and overflow hooks from registering; manual `/compact` remains available.
+- **Added summarization-failure backoff** to avoid repeating costly LLM calls on every step; success resets it. When context capacity is unknown, automatic pressure handling is skipped instead of assuming 128k.
+- **Improved checkpoint quality** with structured instructions and preservation of the latest user message and following content during overflow and `/compact`.
+- **Corrected size and transaction checks**: estimate the framed checkpoint, validate token-meter node order, avoid duplicate end events, and attempt to flush failed transactions.
+- **Unified per-session status data across both UI entry points**; refreshes every 5 seconds and pauses while the page is hidden. Corrected L1/L2 and L3 counters.
+
+### Changed
+
+- **Multi-realm layout**: one compaction service per realm, keyed by the optional string `scopeId`; one observer per process. `Config` is exported for validation. Standard and ptc-tc generators now emit the matching scope and merge existing config.
+- **Default cordis preset**: install the companion local `tiered-cordis-preset` bundle to enable this plugin in that preset. New sessions use the updated preset. The bundle replaces the entire cordis preset plugin list; review and sync it after DSH upgrades.
+- **Narrowed the npm package** to runtime code and release docs; `test/`, `docs/`, `tools/`, and `scripts/` are excluded.
+- `tiered_restore` accepts a 16-character SHA-256 prefix from previews or the full 64-character digest.
+
+### Known issues and unverified items
+
+- The `goal-switch` bypass is not wired into the host call chain. Archive retention has no automatic cleanup limit, and very large tool outputs can still cause high memory peaks.
+- Real desktop UI behavior and the real LLM summarization flow remain unverified; existing sessions may need to be recreated to use the updated preset layout.
+- Generators received syntax checks only; they were not run with a real profile dump using `--diff-only`. Run `--diff-only` before using `-Apply`.
+- This is a beta / preview release (not fully tested), not a stable release.
+
 ## [0.4.0-beta.2] - 2026-10-30
 
 **Release tier: beta (NOT fully tested yet)** — tooling and release-script only;

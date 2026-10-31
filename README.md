@@ -9,6 +9,10 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 
 本插件把压缩拆成四层，前三层零 LLM 成本吃掉大部分体积，只有真正触阈值才动用一次带预算预留的摘要。
 
+**当前尝新版：0.4.0-beta.3（beta / 尝新版，未完全测试通过）**。自动化测试通过，但真实桌面 UI 与真实 LLM 摘要链路尚未完成验证；反馈问题前请保留会话备份。
+
+> beta 版不是正式稳定版。只想使用稳定版本的用户请暂缓升级。
+
 ## 四层管线
 
 | 层 | 做什么 | 成本 |
@@ -226,7 +230,28 @@ dsh plugin --profile desktop remove dsh-tiered-compaction
 
 （只想临时换回官方压缩、但保留插件：把 patch 里两个开关互换即可，不过这种情况卸载更简单。）
 
+## preset 多 realm 部署（0.4.0-beta.3）
+
+多 realm 下，每个 realm 各有一份 compaction 服务，但全进程只有一份 observer。root 挂载不填 `scopeId`；preset 中每个插件条目必须填唯一且稳定的 `scopeId`，例如 `standard`、`ptc-tc` 或 `cordis`。同一个 scope 重复挂载会被拒绝，避免双写。
+
+```yaml
+# root 挂载：不设置 scopeId
+- id: tiered-compaction
+  name: dsh-tiered-compaction
+  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive }
+
+# preset realm 内挂载：scopeId 必须与 realm 对应
+- id: tiered-compaction
+  name: dsh-tiered-compaction
+  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive, scopeId: standard }
+```
+
+`tools/gen-standard-tc.*` 与 `tools/gen-ptc-tc.*` 会分别生成 `scopeId: standard` 和 `scopeId: ptc-tc`，且合并已有 config。先用 `--diff-only` 检查，再决定是否应用；不要把不同 preset 配成同一个 scope。
+
+默认 cordis preset 的替换包是独立的本地 bundle `tiered-cordis-preset`，其条目使用 `scopeId: cordis`。在 DSH Plugin Manager 中从工作区安装该 bundle；它会**整份覆盖**默认 cordis preset 插件清单，升级 DSH 后需检查同步。新建会话后生效，现有会话仍使用其创建时绑定的 preset。
+
 ## 配置（全部可选）
+
 
 装完即用，以下字段仅在需要自定义时才填：
 
@@ -234,8 +259,9 @@ dsh plugin --profile desktop remove dsh-tiered-compaction
 - id: tiered-compaction
   config:
     enabled: true                        # 默认 true
+    auto: true                           # 默认 true；false 时不注册自动钩子
     archiveDir: ~/.dsh/tiered-archive    # 默认值，可改
-    auto: true                           # 是否自动触发
+    scopeId: standard                   # preset realm 用；root 挂载不填
     summaryTarget:                       # 摘要用哪个模型，不填则跟随当前会话
       provider: deepseek-official
       model: deepseek-chat
@@ -246,7 +272,8 @@ dsh plugin --profile desktop remove dsh-tiered-compaction
 |---|---|---|
 | `enabled` | `true` | 是否接管压缩服务位 |
 | `archiveDir` | `~/.dsh/tiered-archive` | 落盘与摘要存档目录，自动创建 |
-| `auto` | `true` | 是否自动触发（压力/溢出） |
+| `auto` | `true` | 是否自动触发（压力/溢出）；设为 `false` 可关闭自动钩子 |
+| `scopeId` | 不填 | preset realm 的唯一标识；root 不填，不同 realm 不可重复 |
 | `summaryTarget` | 会话路由 | 摘要用的 provider/model |
 | `modelPolicies` | `{}` | 按模型覆盖阈值、重试次数等 |
 

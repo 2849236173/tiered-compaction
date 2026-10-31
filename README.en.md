@@ -9,6 +9,10 @@ DSH's default compaction, once the context reaches the threshold, makes one LLM 
 
 This plugin splits compaction into four tiers. The first three tiers consume most of the volume at zero LLM cost; only when the threshold is actually reached does it spend one budget-reserved summarization.
 
+**Current preview: 0.4.0-beta.3 (beta / preview — not fully tested yet).** Automated tests pass, but real desktop UI behavior and the real LLM summarization flow have not been fully verified. Keep session backups before trying it.
+
+> This is not a stable release. If you need a stable version, defer upgrading.
+
 ## Four-tier pipeline
 
 | Tier | What it does | Cost |
@@ -191,6 +195,26 @@ After uninstalling, the official `dsh-compaction-basic` **is restored automatica
 
 (If you only want to switch back to the official compaction temporarily while keeping the plugin: swap the two switches in the patch — though in that case uninstalling is simpler.)
 
+## Multi-realm preset deployment (0.4.0-beta.3)
+
+In a multi-realm setup, each realm has its own compaction service while the process has only one observer. Leave `scopeId` unset for the root mount; every preset entry must use a unique, stable `scopeId`, such as `standard`, `ptc-tc`, or `cordis`. A duplicate scope is rejected to prevent double writes.
+
+```yaml
+# Root mount: no scopeId
+- id: tiered-compaction
+  name: dsh-tiered-compaction
+  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive }
+
+# Preset realm mount: scopeId identifies the realm
+- id: tiered-compaction
+  name: dsh-tiered-compaction
+  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive, scopeId: standard }
+```
+
+`tools/gen-standard-tc.*` and `tools/gen-ptc-tc.*` emit `scopeId: standard` and `scopeId: ptc-tc`, and merge existing config. Run `--diff-only` first; do not use the same scope for different presets.
+
+The default cordis preset replacement is the separate local `tiered-cordis-preset` bundle, whose entry uses `scopeId: cordis`. Install that bundle through DSH Plugin Manager from the workspace. It **replaces the entire** default cordis preset plugin list, so review and synchronize it after DSH upgrades. It takes effect for new sessions; existing sessions keep the preset bound when they were created.
+
 ## Configuration (all optional)
 
 Works immediately after install; the fields below only need to be filled in when customization is required:
@@ -199,8 +223,9 @@ Works immediately after install; the fields below only need to be filled in when
 - id: tiered-compaction
   config:
     enabled: true                        # Default true
+    auto: true                           # Default true; false disables automatic hooks
     archiveDir: ~/.dsh/tiered-archive    # Default value, editable
-    auto: true                           # Whether to trigger automatically
+    scopeId: standard                    # For a preset realm; omit for root
     summaryTarget:                       # Model used for summarization; if empty, follows the current session
       provider: deepseek-official
       model: deepseek-chat
@@ -211,7 +236,8 @@ Works immediately after install; the fields below only need to be filled in when
 |---|---|---|
 | `enabled` | `true` | Whether to take over the compaction service slot |
 | `archiveDir` | `~/.dsh/tiered-archive` | Directory for spill and summary archives, created automatically |
-| `auto` | `true` | Whether to trigger automatically (pressure / overflow) |
+| `auto` | `true` | Whether to trigger automatically (pressure / overflow); `false` disables automatic hooks |
+| `scopeId` | unset | Unique preset-realm identifier; omit for root and do not reuse across realms |
 | `summaryTarget` | Session routing | provider/model used for summarization |
 | `modelPolicies` | `{}` | Per-model overrides of thresholds, retry counts, etc. |
 
