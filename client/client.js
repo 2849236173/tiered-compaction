@@ -6,16 +6,12 @@
  * `window.__ModuleLoader__.load({ id, factory })`——与官方模板
  * decoration/client.js 同构，不 import/export（combo 走普通 script 通道）。
  *
- * 数据区共用同一份实现，入口只差外围壳，按 `surface` 分支：
- *   - settings：全尺寸（标题 + 状态 + 条 + 刻度线图例 + 四层数字块），
+ * 数据区共用同一份实现，入口只差外围壳，按 `surface` 分支渲染：
+ *   - settings：全尺寸（标题 + 状态卡 + 条 + 刻度线图例 + 四层数字块），
  *     设置页主入口；
- *   - sidebar（main 槽位）：侧栏面板，标题 + 状态 + 条 + 窗口行 +
- *     四层数字一行式，图例属设置页专有（方案 §3.2 侧栏版没有图例行），
- *     点侧栏图标后展示的就是这一层；
- *   - sidebar.panellist：图标行精简态——图标 + 一行摘要（状态字 + 压力 +
- *     窗口），条/图例/四层统计一概不渲染（任务 #5，验收「点击显示精简状态」）；
- *   - overlay：迷你 HUD（条与三线保留＋#4 的拖动/关闭/随压力变色），
- *     不加四层数字（任务 #6 定案：保持迷你）。
+ *   - overlay：低干扰 HUD（状态点 + 压力百分比 + 可读压力条），不遮挡输入区，
+ *     可拖动、可关闭；
+ *   设置页与 HUD 是用户可见的两处入口，数据源始终是同一份状态快照。
  */
 
 /** 模块 id 必须等于包名（dshmarket 同款约定）。 */
@@ -45,7 +41,8 @@ const STRINGS = Object.freeze({
         sessionPrefix: "本次会话：",
         sessionPrefixWithSince: "本次会话（{since}）：",
         missingValue: "—",
-        l12Processed: "无损折叠",
+        statsTitle: "活动统计",
+         l12Processed: "无损折叠",
         spillCount: "落盘存档",
         l3Evicted: "软压力驱逐",
         l4Summaries: "有损摘要",
@@ -77,7 +74,8 @@ const STRINGS = Object.freeze({
         sessionPrefix: "This session:",
         sessionPrefixWithSince: "This session (since {since}):",
         missingValue: "—",
-        l12Processed: "Lossless fold",
+        statsTitle: "Activity",
+         l12Processed: "Lossless fold",
         spillCount: "Spill to disk",
         l3Evicted: "Soft-pressure eviction",
         l4Summaries: "Lossy summary",
@@ -128,7 +126,9 @@ const OVERLAY_ID = "tiered-compaction-hud";
 const OVERLAY_LABEL = "tiered-compaction";
 /** overlay 悬浮层级：高于宿主常规内容即可。 */
 const OVERLAY_Z_INDEX = 1000;
+/** HUD 默认右侧偏移；底部使用宿主 composer 高度变量避让输入区。 */
 const OVERLAY_CORNER_OFFSET = "16px";
+const OVERLAY_SAFE_BOTTOM = "calc(var(--dsh-composer-height, 152px) + 16px)";
 
 /**
  * overlay 记忆键（方案 §五 #4「可关闭（localStorage 记住）」+ 拖动位置）。
@@ -202,14 +202,17 @@ const BAR_TRACK_STYLE = {
     right: "0",
     top: "0",
     height: BAR_FILL_HEIGHT,
-    backgroundColor: "#8884",
+    borderRadius: "999px",
+    backgroundColor: "var(--dsw-alias-fill-tertiary, rgba(31, 35, 40, .12))",
 };
 const BAR_FILL_STYLE = {
     position: "absolute",
     left: "0",
     top: "0",
     height: BAR_FILL_HEIGHT,
-    backgroundColor: "#4a9eda",
+    borderRadius: "999px",
+    backgroundColor: "var(--dsh-tiered-tone, var(--dsw-alias-state-business-primary, #4a9eda))",
+    transition: "width .22s ease, background-color .22s ease",
 };
 
 /**
@@ -222,14 +225,20 @@ const BAR_MARK_BASE_STYLE = {
     transform: `translate(-50%, ${BAR_MARK_OFFSET})`,
     width: MARK_LINE_WIDTH,
     height: BAR_MARK_HEIGHT,
-    backgroundColor: "#555",
+    borderRadius: "2px",
+    backgroundColor: "var(--dsw-alias-label-tertiary, #7a8591)",
 };
 
 const BAR_LEGEND_ROW_STYLE = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: "6px 12px",
     marginTop: "4px",
+    color: "var(--dsw-alias-label-tertiary, #7a8591)",
     fontSize: "11px",
-    opacity: "0.75",
-    whiteSpace: "nowrap",
+    lineHeight: "1.4",
 };
 
 /**
@@ -312,43 +321,157 @@ const UNAVAILABLE_SNAPSHOT = Object.freeze({
 const HUD_BASE_STYLE = {
     position: "fixed",
     zIndex: OVERLAY_Z_INDEX,
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    padding: "6px 10px",
-    minWidth: "190px",
-    borderRadius: "8px",
-    backgroundColor: "rgba(24, 24, 27, 0.88)",
-    color: "#f4f4f5",
-    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.35)",
+    display: "block",
+    width: "min(224px, calc(100vw - 24px))",
+    minWidth: "0",
+    padding: "10px 11px",
+    border: ".5px solid var(--dsw-alias-border-l2, #e2e6ea)",
+    borderRadius: "12px",
+    color: "var(--dsw-alias-label-primary, #1f2328)",
+    backgroundColor: "var(--dsw-alias-bg-module-platform, rgba(255, 255, 255, .96))",
+    boxShadow: "0 8px 28px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 18%, transparent)",
     cursor: "move",
     userSelect: "none",
     touchAction: "none",
 };
 
-/** 状态点：颜色表示压力档位（绿/黄/橙/灰），形状固定。 */
+/** 状态点与压力档位同色；未知态使用宿主次级文字色。 */
 const HUD_DOT_STYLE = {
     flex: "0 0 auto",
-    width: "8px",
-    height: "8px",
+    width: "7px",
+    height: "7px",
     borderRadius: "50%",
+    backgroundColor: "var(--dsh-tiered-tone, var(--dsw-alias-label-tertiary, #7a8591))",
 };
 
-/** HUD 里的状态文本比全尺寸入口更小，避免占宽。 */
-const HUD_STATUS_STYLE = { fontSize: "11px", opacity: "0.8", whiteSpace: "nowrap" };
+/** HUD 文本允许收缩，避免英文长词撑破窗口。 */
+const HUD_STATUS_STYLE = {
+    minWidth: "0",
+    color: "var(--dsw-alias-label-tertiary, #7a8591)",
+    fontSize: "11px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+};
+
+/** HUD 拖动边距和估算尺寸：实际宽度由 CSS 限制，足以做安全边界校正。 */
+const HUD_EDGE_GAP = 12;
+const HUD_ESTIMATED_WIDTH = 224;
+const HUD_ESTIMATED_HEIGHT = 76;
+
+/** 将 HUD 坐标限制在视口内；测试桩没有视口尺寸时保持原值。 */
+function clampHudPosition(left, top) {
+    if (typeof window === "undefined") return { left, top };
+    const viewportWidth = Number(window.innerWidth);
+    const viewportHeight = Number(window.innerHeight);
+    if (!Number.isFinite(viewportWidth) || !Number.isFinite(viewportHeight) || viewportWidth <= 0 || viewportHeight <= 0) {
+        return { left, top };
+    }
+    return {
+        left: Math.min(Math.max(HUD_EDGE_GAP, left), Math.max(HUD_EDGE_GAP, viewportWidth - HUD_ESTIMATED_WIDTH - HUD_EDGE_GAP)),
+        top: Math.min(Math.max(HUD_EDGE_GAP, top), Math.max(HUD_EDGE_GAP, viewportHeight - HUD_ESTIMATED_HEIGHT - HUD_EDGE_GAP)),
+    };
+}
 
 /** 关闭按钮：贴右，无边框，保持 HUD 的紧凑观感。 */
 const HUD_CLOSE_STYLE = {
     flex: "0 0 auto",
     marginLeft: "auto",
-    padding: "0 2px",
-    border: "none",
+    padding: "2px 5px",
+    border: "0",
+    borderRadius: "6px",
     background: "transparent",
     color: "inherit",
     cursor: "pointer",
-    fontSize: "13px",
+    fontSize: "15px",
     lineHeight: "1",
 };
+
+/** 所有样式都带插件前缀，跟随宿主 Design Tokens，不污染聊天和设置页。 */
+const UI_STYLE_ID = "tiered-compaction-ui-v2";
+const UI_CSS = `
+.dsh-tiered-compaction {
+    box-sizing: border-box;
+    width: min(100%, 760px);
+    margin: 0 auto;
+    padding: 24px;
+    color: var(--dsw-alias-label-primary, #1f2328);
+    font: inherit;
+    line-height: 1.45;
+}
+.dsh-tiered-compaction *, .dsh-tiered-compaction *::before, .dsh-tiered-compaction *::after { box-sizing: border-box; }
+.dsh-tiered-compaction__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.dsh-tiered-compaction__identity { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.dsh-tiered-compaction__mark { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; color: var(--dsw-alias-state-business-primary, #176b61); background: var(--dsw-alias-state-business-tertiary, color-mix(in srgb, currentColor 12%, transparent)); font-size: 17px; }
+.dsh-tiered-compaction__eyebrow { margin: 0 0 3px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.dsh-tiered-compaction__title { margin: 0; color: var(--dsw-alias-label-primary, #1f2328); font-size: 18px; font-weight: 620; line-height: 1.25; }
+.dsh-tiered-compaction__subtitle { margin: 5px 0 0; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 12px; }
+.dsh-tiered-compaction__state { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; max-width: 42%; padding: 6px 9px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 999px; color: var(--dsw-alias-label-secondary, #58636e); background: var(--dsw-alias-bg-module-platform, #f6f7f8); font-size: 12px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__state-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--dsh-tiered-tone, var(--dsw-alias-state-business-primary, #2f9e44)); }
+.dsh-tiered-compaction__hero { padding: 18px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 14px; background: var(--dsw-alias-bg-module-platform, #fff); box-shadow: 0 8px 24px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 6%, transparent); }
+.dsh-tiered-compaction__hero-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.dsh-tiered-compaction__hero-label { color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 12px; }
+.dsh-tiered-compaction__pressure { color: var(--dsh-tiered-tone, var(--dsw-alias-state-business-primary, #2f9e44)); font-size: 28px; font-weight: 650; letter-spacing: -.03em; line-height: 1; }
+.dsh-tiered-compaction__status-line { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--dsw-alias-label-secondary, #58636e); font-size: 13px; }
+.dsh-tiered-compaction__status-line strong { color: var(--dsw-alias-label-primary, #1f2328); font-weight: 560; overflow-wrap: anywhere; }
+.dsh-tiered-compaction__bar { min-width: 0; }
+.dsh-tiered-compaction__bar-track { border-radius: 999px; background: var(--dsw-alias-fill-tertiary, color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 10%, transparent)); }
+.dsh-tiered-compaction__bar-fill { border-radius: 999px; background: var(--dsh-tiered-tone, var(--dsw-alias-state-business-primary, #4a9eda)); transition: width .22s ease, background-color .22s ease; }
+.dsh-tiered-compaction__legend { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; line-height: 1.4; }
+.dsh-tiered-compaction__marks { display: inline-flex; flex-wrap: wrap; gap: 5px 10px; min-width: 0; }
+.dsh-tiered-compaction__mark-label { white-space: nowrap; }
+.dsh-tiered-compaction__window { display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: .5px solid var(--dsw-alias-border-l2, #e2e6ea); color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 12px; }
+.dsh-tiered-compaction__window strong { color: var(--dsw-alias-label-secondary, #58636e); font-weight: 550; }
+.dsh-tiered-compaction__stats-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 22px 0 10px; }
+.dsh-tiered-compaction__stats-title { margin: 0; color: var(--dsw-alias-label-primary, #1f2328); font-size: 14px; font-weight: 600; }
+.dsh-tiered-compaction__since { color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; white-space: nowrap; }
+.dsh-tiered-compaction__stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.dsh-tiered-compaction__stat { min-width: 0; padding: 13px 14px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 11px; background: var(--dsw-alias-bg-module-platform, #fff); }
+.dsh-tiered-compaction__stat-label { min-height: 34px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; line-height: 1.45; }
+.dsh-tiered-compaction__stat-value { margin-top: 7px; color: var(--dsw-alias-label-primary, #1f2328); font-size: 22px; font-weight: 650; letter-spacing: -.02em; line-height: 1; }
+.dsh-tiered-compaction__stat-note { min-height: 17px; margin-top: 7px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; overflow-wrap: anywhere; }
+.dsh-tiered-compaction__empty { display: flex; align-items: center; gap: 9px; padding: 14px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 11px; color: var(--dsw-alias-label-tertiary, #7a8591); background: var(--dsw-alias-bg-module-platform, #fff); font-size: 12px; }
+.dsh-tiered-compaction__hud { width: min(224px, calc(100vw - 24px)); min-width: 0; padding: 10px 11px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 12px; color: var(--dsw-alias-label-primary, #1f2328); background: var(--dsw-alias-bg-module-platform, rgba(255,255,255,.96)); box-shadow: 0 8px 28px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 18%, transparent); cursor: move; user-select: none; touch-action: none; }
+.dsh-tiered-compaction__hud-head { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 8px; }
+.dsh-tiered-compaction__hud-title { min-width: 0; color: var(--dsw-alias-label-secondary, #58636e); font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-tiered-compaction__hud-status { min-width: 0; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-tiered-compaction__hud:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 2px; }
+.dsh-tiered-compaction__hud button:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 1px; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__legend { margin-top: 3px; }
+@media (max-width: 560px) {
+    .dsh-tiered-compaction { padding: 18px 14px; }
+    .dsh-tiered-compaction__header { gap: 10px; }
+    .dsh-tiered-compaction__title { font-size: 16px; }
+    .dsh-tiered-compaction__state { max-width: 46%; }
+    .dsh-tiered-compaction__hero { padding: 14px; }
+    .dsh-tiered-compaction__stats { gap: 7px; }
+    .dsh-tiered-compaction__stat { padding: 11px; }
+}
+@media (max-width: 370px) {
+    .dsh-tiered-compaction { padding-inline: 10px; }
+    .dsh-tiered-compaction__header { display: block; }
+    .dsh-tiered-compaction__state { margin-top: 10px; max-width: 100%; }
+    .dsh-tiered-compaction__hero-head { align-items: flex-start; flex-direction: column; gap: 8px; }
+    .dsh-tiered-compaction__pressure { font-size: 24px; }
+    .dsh-tiered-compaction__stats { grid-template-columns: 1fr 1fr; }
+    .dsh-tiered-compaction__stat-label { min-height: 46px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .dsh-tiered-compaction__bar-fill { transition: none; }
+}
+`;
+
+/** 宿主已有 renderer 样式时只补一次插件私有样式；测试桩没有 DOM API 时安全跳过。 */
+function ensureUiStyles() {
+    if (typeof document === "undefined" || typeof document.createElement !== "function") return;
+    if (typeof document.querySelector === "function" && document.querySelector(`style[data-plugin-css="${UI_STYLE_ID}"]`)) return;
+    const style = document.createElement("style");
+    style.dataset.plugin = MODULE_ID;
+    style.dataset.pluginCss = UI_STYLE_ID;
+    style.textContent = UI_CSS;
+    const parent = document.head ?? document.documentElement;
+    if (parent && typeof parent.appendChild === "function") parent.appendChild(style);
+}
 
 window.__ModuleLoader__.load({
     id: MODULE_ID,
@@ -680,28 +803,41 @@ window.__ModuleLoader__.load({
             if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
             const layers = snapshot.layers;
 
-            const rowOf = (key) =>
-                h(
+            const rowOf = (key) => {
+                const value = layers[key] ?? tOf(t, "missingValue");
+                const note =
+                    key === "spillCount" && layers.spillCount !== null && layers.spillCount > 0
+                        ? bytesSavedTextOf(layers.bytesSaved, t)
+                        : null;
+                return h(
                     "div",
-                    { key: `layer-${key}` },
-                    `${tOf(t, LAYERS_LABELS[key])}　${layers[key] ?? tOf(t, "missingValue")}${key === "spillCount" && layers.spillCount !== null && layers.spillCount > 0 ? `（${bytesSavedTextOf(layers.bytesSaved, t)}）` : ""}`,
+                    { key: `layer-${key}`, className: "dsh-tiered-compaction__stat", "data-layer": key },
+                    h("div", { className: "dsh-tiered-compaction__stat-label" }, tOf(t, LAYERS_LABELS[key])),
+                    h("div", { className: "dsh-tiered-compaction__stat-value" }, String(value)),
+                    h("div", { className: "dsh-tiered-compaction__stat-note" }, note ?? " "),
                 );
+            };
 
             const sinceMark = sinceMarkOf(snapshot, t);
             return h(
-                "div",
+                "section",
                 { key: "layer-stats", "data-testid": LAYERS_BLOCK_TESTID },
                 h(
                     "div",
-                    { key: "layer-stats-title" },
+                    { className: "dsh-tiered-compaction__stats-head" },
+                    h("h2", { className: "dsh-tiered-compaction__stats-title" }, tOf(t, "statsTitle")),
                     sinceMark === null
-                        ? tOf(t, "sessionPrefix")
-                        : tOf(t, "sessionPrefixWithSince", { since: sinceMark }),
+                        ? h("span", { className: "dsh-tiered-compaction__since" }, tOf(t, "sessionPrefix"))
+                        : h("span", { className: "dsh-tiered-compaction__since" }, sinceMark),
                 ),
-                rowOf("l12Processed"),
-                rowOf("spillCount"),
-                rowOf("l3Evicted"),
-                rowOf("l4Summaries"),
+                h(
+                    "div",
+                    { className: "dsh-tiered-compaction__stats" },
+                    rowOf("l12Processed"),
+                    rowOf("spillCount"),
+                    rowOf("l3Evicted"),
+                    rowOf("l4Summaries"),
+                ),
             );
         }
 
@@ -852,7 +988,7 @@ window.__ModuleLoader__.load({
          */
         function dragOriginOf(state, event) {
             if (Number.isFinite(state.left) && Number.isFinite(state.top)) {
-                return { left: state.left, top: state.top };
+                return clampHudPosition(state.left, state.top);
             }
             const target = event?.currentTarget;
             if (target && typeof target.getBoundingClientRect === "function") {
@@ -877,15 +1013,16 @@ window.__ModuleLoader__.load({
          */
         function hudPositionStyleOf(state) {
             if (Number.isFinite(state.left) && Number.isFinite(state.top)) {
+                const position = clampHudPosition(state.left, state.top);
                 return {
                     ...HUD_BASE_STYLE,
-                    left: pixelOf(state.left),
-                    top: pixelOf(state.top),
+                    left: pixelOf(position.left),
+                    top: pixelOf(position.top),
                     right: "auto",
                     bottom: "auto",
                 };
             }
-            return { ...HUD_BASE_STYLE, right: OVERLAY_CORNER_OFFSET, bottom: OVERLAY_CORNER_OFFSET };
+            return { ...HUD_BASE_STYLE, right: OVERLAY_CORNER_OFFSET, bottom: OVERLAY_SAFE_BOTTOM };
         }
 
         /**
@@ -905,8 +1042,12 @@ window.__ModuleLoader__.load({
             if (dragSession === null) return;
             const point = pointerPointOf(event);
             if (point === null) return;
-            dragSession.left = dragSession.originLeft + (point.x - dragSession.startX);
-            dragSession.top = dragSession.originTop + (point.y - dragSession.startY);
+            const position = clampHudPosition(
+                dragSession.originLeft + (point.x - dragSession.startX),
+                dragSession.originTop + (point.y - dragSession.startY),
+            );
+            dragSession.left = position.left;
+            dragSession.top = position.top;
             dragSession.moved = true;
             dragSession.apply({ closed: false, left: dragSession.left, top: dragSession.top });
         }
@@ -1006,30 +1147,39 @@ window.__ModuleLoader__.load({
                     : { ...BAR_FILL_STYLE, width: "0%" };
 
             const markNodes = PRESSURE_MARKS.map((mark) => renderPressureMark(mark, t));
-            const valueNode = h(
-                "span",
-                {
-                    key: "pressure-value",
-                    style: { marginLeft: options.compact ? "auto" : undefined, color: options.valueColor },
-                },
-                valueText,
-            );
-
             return h(
                 "div",
-                { key: "pressure-bar", "data-testid": "pressure-bar" },
+                { key: "pressure-bar", className: "dsh-tiered-compaction__bar", "data-testid": "pressure-bar" },
                 h(
                     "div",
-                    { style: BAR_STYLE },
-                    h("div", { style: BAR_TRACK_STYLE }),
-                    h("div", { style: fillStyle }),
+                    { className: "dsh-tiered-compaction__bar-track", style: BAR_STYLE },
+                    h("div", { className: "dsh-tiered-compaction__bar-track-fill", style: BAR_TRACK_STYLE }),
+                    h("div", { className: "dsh-tiered-compaction__bar-fill", style: fillStyle }),
                     markNodes,
                 ),
                 h(
                     "div",
-                    { style: BAR_LEGEND_ROW_STYLE },
-                    ...(options.compact ? [] : [h("span", { key: "marks-legend" }, renderMarkLegend(t))]),
-                    valueNode,
+                    { className: "dsh-tiered-compaction__legend", style: BAR_LEGEND_ROW_STYLE },
+                    ...(options.compact
+                        ? []
+                        : [
+                              h(
+                                  "span",
+                                  { key: "marks-legend", className: "dsh-tiered-compaction__marks" },
+                                  PRESSURE_MARKS.map((mark) =>
+                                      h(
+                                          "span",
+                                          { key: mark.key, className: "dsh-tiered-compaction__mark-label" },
+                                          tOf(t, mark.key, { percent: mark.percent }),
+                                      ),
+                                  ),
+                              ),
+                          ]),
+                    h(
+                        "span",
+                        { key: "pressure-value", "data-testid": "pressure-inline-value", style: { marginLeft: options.compact ? "auto" : undefined, color: options.valueColor } },
+                        valueText,
+                    ),
                 ),
             );
         }
@@ -1046,33 +1196,81 @@ window.__ModuleLoader__.load({
         function panelBodyOf(snapshot, options) {
             const isCompact = options.compact === true;
             const t = options.t ?? null;
-            return [
-                h(
-                    "div",
-                    { key: "status-line", style: isCompact ? HUD_STATUS_STYLE : undefined },
-                    options.statusText ?? statusLineOf(snapshot, t),
-                ),
-                pressureBarBlockOf(snapshot, options),
-            ];
+            const body = [];
+            if (options.showStatus !== false) {
+                body.push(
+                    h(
+                        "div",
+                        { key: "status-line", className: "dsh-tiered-compaction__status-line", style: isCompact ? HUD_STATUS_STYLE : undefined },
+                        options.statusText ?? statusLineOf(snapshot, t),
+                    ),
+                );
+            }
+            body.push(pressureBarBlockOf(snapshot, options));
+            return body;
         }
 
         /**
-         * 全尺寸面板（settings）：标题 + 状态文本 + 带图例的压力条 + 四层数字块。
-         * 注意：不透传 ownerProps——合成链末尾 ownerProps 会覆盖同名键
-         * （close/size 等宿主常用名），干脆不接任何宿主 prop。
-         * 非 ready 相位不出假数字（数值文本各自降级）。
+         * 设置页全量面板：状态徽标、压力卡、四层统计卡片。
+         * 所有内容使用宿主 Design Tokens；非 ready 相位不出假数字。
          */
         function StatusPanel(props) {
             const t = typeof props.t === "function" ? props.t : null;
             const snapshot = useStatusSnapshot();
             const layersBlock = layersBlockOf(snapshot, t);
+            const toneKey = pressureToneOf(snapshot);
+            const tone = PRESSURE_TONES[toneKey];
+            const statusText = statusLineOf(snapshot, t);
+            const pressureText = pressureValueTextOf(snapshot, t);
             return h(
                 "div",
-                { "data-surface": props.surface },
-                h("div", { key: "panel-title" }, tOf(t, PANEL_TITLE_KEY)),
-                ...panelBodyOf(snapshot, { compact: false, t }),
-                // 无四层数据时整块不出现：宁可少一块，也不给假读数
-                ...(layersBlock === null ? [] : [layersBlock]),
+                {
+                    "data-surface": props.surface,
+                    "data-testid": "settings-panel",
+                    className: "dsh-tiered-compaction",
+                    style: { "--dsh-tiered-tone": tone.color },
+                },
+                h(
+                    "div",
+                    { className: "dsh-tiered-compaction__header" },
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__identity" },
+                        h("div", { className: "dsh-tiered-compaction__mark", "aria-hidden": "true" }, "◉"),
+                        h(
+                            "div",
+                            null,
+                            h("p", { className: "dsh-tiered-compaction__eyebrow" }, "tiered-compaction"),
+                            h("h1", { className: "dsh-tiered-compaction__title" }, tOf(t, PANEL_TITLE_KEY)),
+                        ),
+                    ),
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__state", "data-tone": toneKey, title: statusText },
+                        h("span", { className: "dsh-tiered-compaction__state-dot", style: { backgroundColor: tone.color }, "aria-hidden": "true" }),
+                        statusText,
+                    ),
+                ),
+                h(
+                    "section",
+                    { className: "dsh-tiered-compaction__hero", "data-testid": "pressure-card" },
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__hero-head" },
+                        h("div", { className: "dsh-tiered-compaction__hero-label" }, tOf(t, "pressurePrefix")),
+                        h("div", { className: "dsh-tiered-compaction__pressure", "data-testid": "pressure-value" }, pressureText),
+                    ),
+                    ...panelBodyOf(snapshot, { compact: false, t, showStatus: false, valueColor: tone.color }),
+                    snapshot.window === null
+                        ? null
+                        : h(
+                              "div",
+                              { className: "dsh-tiered-compaction__window" },
+                              h("span", null, tOf(t, "windowPrefix")),
+                              h("strong", null, String(snapshot.window)),
+                          ),
+                ),
+                layersBlock,
             );
         }
 
@@ -1084,7 +1282,8 @@ window.__ModuleLoader__.load({
          *   - 读写失败一律降级为「不记住」，绝不让 overlay 崩掉。
          * 关闭后返回 null：槽位仍注册着，但不出任何 DOM。
          */
-        function OverlayHud() {
+        function OverlayHud(props) {
+            const t = typeof props?.t === "function" ? props.t : null;
             const snapshot = useStatusSnapshot();
             const [hudState, setHudState] = React.useState(readHudState);
             const state = normalizeHudState(hudState);
@@ -1124,38 +1323,50 @@ window.__ModuleLoader__.load({
                 if (typeof event.preventDefault === "function") event.preventDefault();
             }
 
+            const statusText = statusLineOf(snapshot, t);
             return h(
                 "div",
                 {
                     "data-surface": SURFACE_OVERLAY,
                     "data-testid": "overlay-hud",
                     "data-tone": toneKey,
-                    style: hudPositionStyleOf(state),
+                    role: "status",
+                    "aria-live": "polite",
+                    tabIndex: 0,
+                    className: "dsh-tiered-compaction__hud",
+                    style: { ...hudPositionStyleOf(state), "--dsh-tiered-tone": tone.color },
                     [dragChannel().down]: beginDrag,
                 },
-                h("span", {
-                    key: "tone-dot",
-                    "data-testid": "overlay-status-dot",
-                    "data-tone": toneKey,
-                    title: `压力${tone.label}`,
-                    style: { ...HUD_DOT_STYLE, backgroundColor: tone.color },
-                }),
-                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color }),
                 h(
-                    "button",
-                    {
-                        key: "close",
-                        type: "button",
-                        "data-testid": "overlay-close",
-                        title: "关闭悬浮窗",
-                        style: HUD_CLOSE_STYLE,
-                        onClick: closeHud,
-                        // 按下若冒泡到 HUD 就会开始拖动，这里截断
-                        onMouseDown: stopPropagationOf,
-                        onPointerDown: stopPropagationOf,
-                    },
-                    "×",
+                    "div",
+                    { className: "dsh-tiered-compaction__hud-head" },
+                    h("span", {
+                        key: "tone-dot",
+                        "data-testid": "overlay-status-dot",
+                        "data-tone": toneKey,
+                        title: tOf(t, tone.key),
+                        style: { ...HUD_DOT_STYLE, backgroundColor: tone.color },
+                    }),
+                    h("span", { className: "dsh-tiered-compaction__hud-title" }, "tiered-compaction"),
+                    h("span", { className: "dsh-tiered-compaction__hud-status" }, statusText),
+                    h(
+                        "button",
+                        {
+                            key: "close",
+                            type: "button",
+                            "data-testid": "overlay-close",
+                            "aria-label": tOf(t, "hudCloseTitle"),
+                            title: tOf(t, "hudCloseTitle"),
+                            style: HUD_CLOSE_STYLE,
+                            onClick: closeHud,
+                            // 按下若冒泡到 HUD 就会开始拖动，这里截断
+                            onMouseDown: stopPropagationOf,
+                            onPointerDown: stopPropagationOf,
+                        },
+                        "×",
+                    ),
                 ),
+                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false }),
             );
         }
 
@@ -1166,14 +1377,14 @@ window.__ModuleLoader__.load({
          *   - settings 用 StatusPanel（全量视图）。
          * 数据源始终是同一个 useStatusSnapshot。
          */
-        function makeSurfaceComponent(surface) {
+        function makeSurfaceComponent(surface, t) {
             if (surface === SURFACE_OVERLAY) {
                 return function SurfacePanel() {
-                    return h(OverlayHud);
+                    return h(OverlayHud, { t });
                 };
             }
             return function SurfacePanel() {
-                return h(StatusPanel, { surface });
+                return h(StatusPanel, { surface, t });
             };
         }
 
@@ -1191,7 +1402,7 @@ window.__ModuleLoader__.load({
                         locale: I18N_NS,
                         label: () => tOf(t, PANEL_TITLE_KEY),
                     },
-                    makeSurfaceComponent(SURFACE_SETTINGS),
+                    makeSurfaceComponent(SURFACE_SETTINGS, t),
                 ),
             );
         }
@@ -1206,7 +1417,7 @@ window.__ModuleLoader__.load({
                         locale: I18N_NS,
                         label: () => OVERLAY_LABEL,
                     },
-                    makeSurfaceComponent(SURFACE_OVERLAY),
+                    makeSurfaceComponent(SURFACE_OVERLAY, t),
                 ),
             );
         }
@@ -1215,6 +1426,7 @@ window.__ModuleLoader__.load({
             name: MODULE_ID,
             inject: ["slots"],
             apply(ctx) {
+                ensureUiStyles();
                 // 宿主有 locale 服务 → 字典注册进宿主、语言跟宿主 preference；
                 // 没有 → 本地探测链兜底（任务 #7 探测决策，见 bindLocaleService）
                 const t = bindLocaleService(ctx) ?? initLocalLocale();

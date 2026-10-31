@@ -308,7 +308,7 @@ test("D26-1 没有 localStorage 时 overlay 照常渲染（角落常驻）", asy
     assert.equal(hud.props["data-surface"], "overlay", "overlay 入口仍要标 surface");
     assert.equal(hud.props.style.position, "fixed", "角落常驻=fixed 定位");
     assert.equal(hud.props.style.right, "16px", "未拖动过用角落偏移");
-    assert.equal(hud.props.style.bottom, "16px");
+    assert.equal(hud.props.style.bottom, "calc(var(--dsh-composer-height, 152px) + 16px)", "默认 HUD 必须避让输入区");
     assert.equal(hud.props.style.left, undefined, "未拖动过不该有 left");
     // 关闭按钮与压力条都在（条是 #3 的能力，HUD 不能把它弄丢）
     assert.ok(nodeWithTestId(harness.tree, OVERLAY_CLOSE_TESTID), "必须有关闭按钮");

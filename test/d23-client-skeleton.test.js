@@ -199,7 +199,8 @@ test("D23C-4 组件按 surface 分支：overlay 固定角落定位，设置页�
 
     const settingsTree = surfaceTreeOf(slots, "settings.section");
     assert.equal(settingsTree.props["data-surface"], "settings");
-    assert.equal(settingsTree.props.style, undefined, "非 overlay 不预设定位样式");
+    assert.equal(settingsTree.props.style.position, undefined, "设置页不能使用 fixed 定位");
+    assert.equal(typeof settingsTree.props.style["--dsh-tiered-tone"], "string", "设置页应提供主题色变量");
 
     const overlayTree = surfaceTreeOf(slots, "shell.overlay");
     assert.equal(overlayTree.props["data-surface"], "overlay");
