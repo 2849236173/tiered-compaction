@@ -97,8 +97,19 @@ for (const s of drop) {
     const dup = bySeq.get(s);
     const replace = bySeq.get(s - 1);
     const first = bySeq.get(s - 2);
-    const same = first?.type === "compaction/prune" && JSON.stringify(first.data.shadowedSeqs) === JSON.stringify(dup.data.shadowedSeqs)
-        && replace?.type === "tool/result" && replace.surfaceOp?.op === "replace" && replace.surfaceOp.startSeq === dup.data.shadowedRange.start;
+    // 宽化（8382411b）：并行工具结果会交错成 prune(A) replace(A) prune(B) replace(B) prune(A) prune(B)，
+    // 所以向前 12 条内找「同目标的保留 prune + 同目标 replace」即可，不要求紧邻
+    void first; void replace;
+    const target = dup.data.shadowedRange.start;
+    let sawPrune = false, sawReplace = false;
+    if (dup.data.shadowedRange.end === target && dup.data.shadowedSeqs.length === 1) {
+        for (let q = s - 1; q >= Math.max(0, s - 12); q -= 1) {
+            const e = bySeq.get(q);
+            if (e?.type === "tool/result" && e.surfaceOp?.op === "replace" && e.surfaceOp.startSeq === target) sawReplace = true;
+            if (e?.type === "compaction/prune" && !drop.has(q) && e.data.shadowedRange.start === target) { sawPrune = true; break; }
+        }
+    }
+    const same = sawPrune && sawReplace;
     if (!same) { console.error(`seq ${s} 不是已知的重复 prune 模式，停止`); process.exit(1); }
 }
 console.log(`待删重复 prune：${[...drop].join(", ")}`);
