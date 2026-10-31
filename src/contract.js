@@ -24,9 +24,9 @@ import {
     CompactionId,
     ManualCompactionError,
     compactCheckpointSource,
-    toolPairingBalancedBefore,
-    toolPairingBalancedAfter,
 } from "@deepseek-ai/dsh-compaction";
+// beta6：配对检查改用插件自带实现（外部解析可能落到不兼容的 CLI 版 dsh-compaction）
+import { toolPairingBalancedBefore, toolPairingBalancedAfter } from "./tool-pairing.js";
 import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler, errorChain } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";

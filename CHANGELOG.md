@@ -6,7 +6,14 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.4.0-beta.5] - 2026-11-01
+## [0.4.0-beta.6] - 2026-11-01
+
+**档位：beta / 尝新版（未完全测试通过）** —— 修复了 beta.4/beta.5 第 4 层压力摘要从不成功的问题；真实桌面上的第 4 层摘要尚待验证。
+
+### 修复
+
+- **第 4 层压力摘要报 `Cannot read properties of undefined (reading '<seq>')`**：插件从 `@deepseek-ai/dsh-compaction` 导入配对检查函数，但本包不声明这个依赖，运行时按 Node 规则向上解析。在部分机器上会解析到 `~/.dsh/profiles/node_modules` 里指向全局 CLI 版 dsh（0.1.0-rc.7）的副本，它按 `session.events[seq]` 读事件；桌面宿主（0.2.1-rc.2）的 Session 没有 `events`，于是每次都抛错，钩子降级跳过，自动摘要一次都没执行。现在改用插件自带的配对检查，只用两代宿主都有的 `session.eventAt`。补了回归测试，并确认 rc.7 的实现在同样的会话形状下会抛同一个错误。
+
 
 **档位：beta / 尝新版（未完全测试通过）** —— 诊断版，只加日志、不改压缩逻辑。
 

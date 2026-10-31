@@ -6,7 +6,14 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
-## [0.4.0-beta.5] - 2026-11-01
+## [0.4.0-beta.6] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested yet)** — fixes the layer-4 pressure summary never succeeding in beta.4/beta.5; layer-4 summaries in the real desktop app are not yet verified.
+
+### Fixed
+
+- **Layer-4 pressure summary failed with `Cannot read properties of undefined (reading '<seq>')`**: the plugin imported the tool-pairing checks from `@deepseek-ai/dsh-compaction` without declaring that dependency, so Node resolved it upward. On some machines that lands on a copy in `~/.dsh/profiles/node_modules` linked to the global CLI dsh (0.1.0-rc.7), which reads `session.events[seq]`; the desktop host's (0.2.1-rc.2) Session has no `events`, so every call threw, the hook degraded, and no automatic summary ever ran. The plugin now ships its own pairing check that only uses `session.eventAt`, present in both host generations. Added a regression test and confirmed the rc.7 implementation throws the same error on the same session shape.
+
 
 **Release tier: beta / preview (not fully tested yet)** — diagnostic build: logging only, no compaction logic changes.
 
