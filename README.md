@@ -21,11 +21,34 @@ DSH 的分层上下文压缩插件。前三层不调用 LLM，只有压力真正
 
 ## 安装
 
+插件分两档发布，选一个装：
+
+| 档位 | 说明 | npm 标签 |
+|---|---|---|
+| 正式版 | 测试完全通过，推荐大多数人用 | `latest` |
+| beta 尝新版 | 有新修复或新功能，**未完全测试通过** | `beta` |
+
+**装正式版：**
+
 ```powershell
-dsh plugin --profile desktop add dsh-tiered-compaction
+dsh plugin --profile desktop add dsh-tiered-compaction@latest
 ```
 
-装完重启 DSH 即可，不用改配置。Web 版、命令行、TUI 把 `desktop` 换成 `web`、`headless`、`tui`。
+**装 beta 版：**
+
+```powershell
+dsh plugin --profile desktop add dsh-tiered-compaction@beta
+```
+
+命令最后可能报 `ERR_PNPM_IGNORED_BUILDS`。这是 pnpm 跳过了插件里一个只打印提示的安装脚本，插件已经装好，可以忽略。
+
+装完完全退出 DSH 再打开，不用改配置。Web 版、命令行、TUI 把 `desktop` 换成 `web`、`headless`、`tui`。
+
+beta 不一定比正式版新。正式版发布后，beta 标签可能还停在更早的版本。装之前先看两个标签各指向哪个版本：
+
+```powershell
+npm view dsh-tiered-compaction dist-tags
+```
 
 ## 让四层全部生效
 
@@ -49,15 +72,25 @@ DSH 的每个会话在创建时绑定一个预设，之后不能更换。只装�
 
 设置页里有同样的信息和更详细的分层统计。
 
-## 更新和卸载
+## 更新、切换和卸载
+
+更新和切换档位都用 `add` 加标签，重新执行一次就行：
+
+| 想做什么 | 命令 |
+|---|---|
+| 正式版升到最新正式版 | `dsh plugin --profile desktop add dsh-tiered-compaction@latest` |
+| beta 版升到最新 beta | `dsh plugin --profile desktop add dsh-tiered-compaction@beta` |
+| 从正式版换到 beta | `dsh plugin --profile desktop add dsh-tiered-compaction@beta` |
+| 从 beta 换回正式版 | `dsh plugin --profile desktop add dsh-tiered-compaction@latest` |
+| 卸载（官方压缩自动恢复） | `dsh plugin --profile desktop remove dsh-tiered-compaction` |
+
+不要用 `update`：安装时记下的是确切版本号，`update` 不会跨过它升级，也不会在两档之间切换。
+
+执行完要完全退出 DSH 再打开。确认当前装的是哪个版本：
 
 ```powershell
-dsh plugin --profile desktop update dsh-tiered-compaction   # 升到最新正式版
-dsh plugin --profile desktop add dsh-tiered-compaction@beta # 装尝新版
-dsh plugin --profile desktop remove dsh-tiered-compaction   # 卸载，官方压缩自动恢复
+dsh plugin --profile desktop list dsh-tiered-compaction
 ```
-
-更新后要完全退出 DSH 再打开。
 
 ## 配置
 

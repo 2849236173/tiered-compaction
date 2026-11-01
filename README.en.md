@@ -21,11 +21,34 @@ Nothing is lost for good: spilled output and pre-summary history are archived in
 
 ## Install
 
+The plugin ships in two tiers. Pick one:
+
+| Tier | Meaning | npm tag |
+|---|---|---|
+| Stable | Fully tested; recommended for most people | `latest` |
+| Beta | New fixes or features, **not fully tested** | `beta` |
+
+**Install stable:**
+
 ```powershell
-dsh plugin --profile desktop add dsh-tiered-compaction
+dsh plugin --profile desktop add dsh-tiered-compaction@latest
 ```
 
-Restart DSH. No configuration needed. For the web app, CLI, or TUI, replace `desktop` with `web`, `headless`, or `tui`.
+**Install beta:**
+
+```powershell
+dsh plugin --profile desktop add dsh-tiered-compaction@beta
+```
+
+The command may end with `ERR_PNPM_IGNORED_BUILDS`. pnpm skipped an install script that only prints a message; the plugin is installed and you can ignore it.
+
+Fully quit and reopen DSH. No configuration needed. For the web app, CLI, or TUI, replace `desktop` with `web`, `headless`, or `tui`.
+
+Beta is not always newer than stable. After a stable release, the beta tag may still point to an older version. Check both tags first:
+
+```powershell
+npm view dsh-tiered-compaction dist-tags
+```
 
 ## Enable all four tiers
 
@@ -49,15 +72,25 @@ Only **new sessions** pick up the change; existing sessions keep their preset. R
 
 The settings page shows the same information plus per-tier statistics.
 
-## Update and uninstall
+## Update, switch, uninstall
+
+Updating and switching tiers both use `add` with a tag. Just run it again:
+
+| Goal | Command |
+|---|---|
+| Stable → newest stable | `dsh plugin --profile desktop add dsh-tiered-compaction@latest` |
+| Beta → newest beta | `dsh plugin --profile desktop add dsh-tiered-compaction@beta` |
+| Stable → beta | `dsh plugin --profile desktop add dsh-tiered-compaction@beta` |
+| Beta → stable | `dsh plugin --profile desktop add dsh-tiered-compaction@latest` |
+| Uninstall (official compaction comes back) | `dsh plugin --profile desktop remove dsh-tiered-compaction` |
+
+Don't use `update`: the install records an exact version, and `update` neither moves past it nor switches tiers.
+
+Fully quit and reopen DSH afterwards. To see which version is installed:
 
 ```powershell
-dsh plugin --profile desktop update dsh-tiered-compaction   # latest stable
-dsh plugin --profile desktop add dsh-tiered-compaction@beta # beta
-dsh plugin --profile desktop remove dsh-tiered-compaction   # uninstall; official compaction comes back
+dsh plugin --profile desktop list dsh-tiered-compaction
 ```
-
-Fully quit and reopen DSH after updating.
 
 ## Configuration
 
