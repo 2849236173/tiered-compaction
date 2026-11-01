@@ -6,6 +6,20 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-11-01
+
+**Release tier: stable** — rolls up every change from 0.4.0-beta.1 to beta.12. All automated tests pass (363 tests, 362 passed, 1 real-session check skipped by design), and the new HUD has been accepted in the real desktop app. See the beta entries below for details.
+
+### Highlights
+
+- Fixes for tier counts, event pairing, single-writer and multi-realm isolation (beta.3 to beta.8).
+- One-step swap of the official standard / ptc / minimal presets onto this plugin.
+- Redesigned settings page and HUD: aurora progress bar, gradient numbers, real-weight font stack, style self-healing after hot reload (beta.9 to beta.12).
+
+### Fixed
+
+- **Restored the beta.2 session repair script**: `docs/修复/fix-compaction-turn.mjs` is back to the rewrite that honors the host first-frame contract, with its contract test `test/repair-tool-contract.test.js` (9 tests). Both had stayed on the `fix/repair-tool-contract` branch since beta.2.
+
 ## [0.4.0-beta.12] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested)** — HUD typography and motion polish. Not yet fully verified in the real desktop app.

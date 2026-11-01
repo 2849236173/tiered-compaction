@@ -6,6 +6,20 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-11-01
+
+**档位：正式版 / 稳定版** —— 汇总 0.4.0-beta.1 到 beta.12 的全部改动。自动化测试全部通过（363 项，362 通过，1 项需真实会话的校验按设计跳过），悬浮窗新界面已在真实桌面端验收。各项细节见下方 beta 条目。
+
+### 主要内容
+
+- 四层压缩的计数、事件配对、单写者与多 realm 隔离等修复（beta.3 至 beta.8）。
+- 官方 standard / ptc / minimal 预设一键换装本插件（`tools/gen-standard-tc.ps1`、`tools/gen-ptc-tc.ps1`）。
+- 设置页与悬浮窗两入口界面重做：极光渐变进度条、渐变数字、真实字重字体栈、热替换后样式自愈（beta.9 至 beta.12）。
+
+### 修复
+
+- **补回 beta.2 的会话修复脚本**：`docs/修复/fix-compaction-turn.mjs` 换回遵守宿主首帧契约的重写版，同时补回它的契约测试 `test/repair-tool-contract.test.js`（9 项）。这两项在 beta.2 发布时只留在 `fix/repair-tool-contract` 分支，没有进入后续版本。
+
 ## [0.4.0-beta.12] - 2026-11-01
 
 **档位：beta / 尝新版（未完全测试通过）** —— 悬浮窗字体渲染与动效优化。新样式还没有在真实桌面端完整验证。

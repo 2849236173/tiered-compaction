@@ -9,9 +9,7 @@ DSH's default compaction, once the context reaches the threshold, makes one LLM 
 
 This plugin splits compaction into four tiers. The first three tiers consume most of the volume at zero LLM cost; only when the threshold is actually reached does it spend one budget-reserved summarization.
 
-**Current preview: 0.4.0-beta.12 (beta / preview, not fully tested).** Automated tests pass. This release only restyles the HUD; the new style, plus the beta.8 count backfill and official ptc / minimal preset overrides, have not been fully verified in the real desktop app. Keep session backups before trying it.
-
-> This is not a stable release. If you need a stable version, defer upgrading.
+**Current stable release: 0.4.0 (stable).** All automated tests pass and the new HUD has been accepted in the real desktop app. The npm `latest` tag points to this version; install it directly.
 
 ## Four-tier pipeline
 
@@ -182,7 +180,7 @@ foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
 }
 ```
 
-Output like `dsh-tiered-compaction → 0.3.1` means that is the currently active version.
+Output like `dsh-tiered-compaction → 0.4.0` means that is the currently active version.
 
 > **Note**: DSH does not proactively notify you of new versions. To find out whether an update exists, if you installed from npm you can run `npm view dsh-tiered-compaction version` and compare; you can also check the repository's [CHANGELOG](CHANGELOG.md).
 

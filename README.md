@@ -9,9 +9,7 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 
 本插件把压缩拆成四层，前三层零 LLM 成本吃掉大部分体积，只有真正触阈值才动用一次带预算预留的摘要。
 
-**当前尝新版：0.4.0-beta.12（beta / 尝新版，未完全测试通过）**。自动化测试通过；本版只改了悬浮窗外观，新样式和 beta.8 的计数回填、官方 ptc / minimal 预设覆盖还没有在真实桌面端完整验证，反馈问题前请保留会话备份。
-
-> beta 版不是正式稳定版。只想使用稳定版本的用户请暂缓升级。
+**当前正式版：0.4.0（正式版 / 稳定版）**。自动化测试全部通过，悬浮窗新界面已在真实桌面端验收。npm 的 `latest` 标签指向这个版本，直接安装即可。
 
 ## 四层管线
 
@@ -197,7 +195,7 @@ foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
 }
 ```
 
-输出形如 `dsh-tiered-compaction → 0.3.1`，那就是当前生效的版本。
+输出形如 `dsh-tiered-compaction → 0.4.0`，那就是当前生效的版本。
 
 > **注意**：DSH 不会主动提示有新版本。想知道有没有更新，从 npm 装的可以跑 `npm view dsh-tiered-compaction version` 对比；也可以看仓库的 [CHANGELOG](CHANGELOG.md)。
 
