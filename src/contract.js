@@ -49,9 +49,11 @@ import { mountStatusRoute } from "./status-route.js";
 // 观察者与状态路由全进程各一份，持有者未必是产生这些数的那个实例。
 import {
     activeObserver,
+    agentStatusOf,
     autoCheckOf,
     lastCompaction as sharedLastCompaction,
     lastCompactionFor,
+    markAgentStatus,
     markAutoCheck,
     latestSession as sharedLatestSession,
     layerStatsSnapshot,
@@ -957,6 +959,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // beta3 回归就是这里长期为 null 而界面照常显示，加上它界面才能说真话。
             autoCheckedAt: autoCheck?.at ?? null,
             autoEnabled: this.config?.auto ?? true,
+            // "running" | "idle" | null（本进程还没收到过该会话的状态事件）
+            agentStatus: agentStatusOf(session),
         };
     }
 
@@ -1480,6 +1484,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
         // 只增不清的 WeakMap 会让同一 agent 在长时间会话里永久失去溢出恢复能力。
         ctx.on("agent/status", ({ agent, status }) => {
             if (status === "idle") this.overflowRetries.delete(agent);
+            // 给状态 API 用：空闲时界面不再误报「自动压缩未运行」
+            if (agent?.session) markAgentStatus(agent.session, status);
         });
         ctx.on("session/event", (session, event) => {
             if (event?.type !== "assistant/message") return;

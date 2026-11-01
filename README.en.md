@@ -11,6 +11,8 @@ This plugin splits compaction into four tiers. The first three tiers consume mos
 
 **Current stable release: 0.4.0 (stable).** All automated tests pass and the new HUD has been accepted in the real desktop app. The npm `latest` tag points to this version; install it directly.
 
+**Current beta: 0.4.1-beta.1 (beta, not fully tested)** — fixes the HUD falsely reporting "auto compaction not running" while the session is idle. Install with `dsh-tiered-compaction@beta`.
+
 ## Four-tier pipeline
 
 | Tier | What it does | Cost |

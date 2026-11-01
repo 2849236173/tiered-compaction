@@ -281,6 +281,20 @@ test("D31-4d beta4 口径：摘要按会话记账，状态载荷带自动检查�
     assert.ok(pa.since >= pa.processSince, "since 是会话首次被看到的时刻");
 });
 
+test("D31-4e 状态载荷带 agent 运行状态（来自宿主 agent/status 事件）", async (t) => {
+    const { root, archiveDir } = await makeRoot(t);
+    await root.plugin(tieredPlugin, { archiveDir });
+    const svc = root.get("compaction");
+    const { touchSession } = await import("../src/shared-stats.js");
+    const session = { id: "sess-st", surface: { nodes: [] }, eventAt: () => undefined };
+    touchSession(session);
+    assert.equal(svc._statusPayload("sess-st").agentStatus, null, "没收到事件前为 null");
+    await root.emit("agent/status", { agent: { session }, status: "running" });
+    assert.equal(svc._statusPayload("sess-st").agentStatus, "running");
+    await root.emit("agent/status", { agent: { session }, status: "idle" });
+    assert.equal(svc._statusPayload("sess-st").agentStatus, "idle");
+});
+
 test("D31-5 只有 preset 实例（无 root）：仍只有一份观察者", async (t) => {
     const { root, archiveDir } = await makeRoot(t);
     const standard = root.isolate("compaction");

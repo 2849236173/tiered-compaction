@@ -181,6 +181,28 @@ export function markAutoCheck(session, trigger) {
 }
 
 /**
+ * 记下会话所属 agent 的运行状态（宿主 agent/status 事件：running / idle）。
+ * 界面靠它区分「会话空闲，下条消息才检查」和「运行中却没检查」。
+ * @param {object} session
+ * @param {string} status
+ */
+export function markAgentStatus(session, status) {
+    if (status !== "running" && status !== "idle") return;
+    const entry = entryFor(session);
+    if (entry !== undefined) entry.agentStatus = status;
+}
+
+/**
+ * @param {object} session
+ * @returns {"running"|"idle"|null} 未见过状态事件时为 null
+ */
+export function agentStatusOf(session) {
+    const id = session?.id;
+    const entry = typeof id === "string" ? table().sessions.get(id) : undefined;
+    return entry !== undefined && entry.ref.deref() === session ? entry.agentStatus ?? null : null;
+}
+
+/**
  * @param {object} session
  * @returns {{at: number, trigger: string}|null}
  */

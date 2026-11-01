@@ -81,6 +81,8 @@ const STRINGS = Object.freeze({
         totalSavedValue: "≈ {value} tokens",
         totalSavedOfWindow: "相当于窗口的 {percent}",
         autoNotRunning: "自动压缩未运行，可手动执行 /compact",
+        autoIdlePending: "会话空闲，下条消息时自动压缩（也可手动 /compact）",
+        autoIdlePendingShort: "空闲 · 下条消息时自动压缩",
         autoCheckedAgo: "自动压缩：{seconds} 秒前检查",
         lastCompaction: "最近一次摘要：{time}，{trigger}，遮蔽 {nodes} 个节点 ≈ {shadowed} tokens → {summary} tokens",
         triggerAuto: "自动",
@@ -145,6 +147,8 @@ const STRINGS = Object.freeze({
         totalSavedValue: "≈ {value} tokens",
         totalSavedOfWindow: "{percent} of the window",
         autoNotRunning: "Auto compaction is not running; run /compact manually",
+        autoIdlePending: "Session idle; auto compaction runs on the next message (or run /compact)",
+        autoIdlePendingShort: "Idle · compacts on next message",
         autoCheckedAgo: "Auto compaction: checked {seconds}s ago",
         lastCompaction: "Last summary: {time}, {trigger}, shadowed {nodes} nodes ≈ {shadowed} tokens → {summary} tokens",
         triggerAuto: "auto",
@@ -368,6 +372,7 @@ const LOADING_SNAPSHOT = Object.freeze({
     autoCheckKnown: false,
     autoCheckedAt: null,
     autoEnabled: null,
+    agentStatus: null,
     lastCompaction: null,
 });
 const UNAVAILABLE_SNAPSHOT = Object.freeze({
@@ -382,6 +387,7 @@ const UNAVAILABLE_SNAPSHOT = Object.freeze({
     autoCheckKnown: false,
     autoCheckedAt: null,
     autoEnabled: null,
+    agentStatus: null,
     lastCompaction: null,
 });
 
@@ -876,6 +882,8 @@ window.__ModuleLoader__.load({
                 autoCheckKnown: Object.prototype.hasOwnProperty.call(payload, "autoCheckedAt"),
                 autoCheckedAt: epochMsOf(payload.autoCheckedAt),
                 autoEnabled: typeof payload.autoEnabled === "boolean" ? payload.autoEnabled : null,
+                // 宿主 agent 状态：idle 时自动检查要等下条消息，不算故障
+                agentStatus: payload.agentStatus === "running" || payload.agentStatus === "idle" ? payload.agentStatus : null,
                 lastCompaction: lastCompactionOf(payload.lastCompaction),
             };
         }
@@ -972,11 +980,12 @@ window.__ModuleLoader__.load({
          * 自动压缩健康（A.6）：
          *   - 旧服务端（无 autoCheckedAt 字段）或自动压缩被关 → null（什么都不显示）；
          *   - 压力 ≥ 驱逐线且从没检查过/上次检查超过 120 秒 → {kind:"stale"} 报警；
+         *   - 同上但 agent 空闲 → {kind:"idle"}：空闲会话不跑步骤，检查本来就等下条消息，不算故障；
          *   - 最近检查过 → {kind:"recent", seconds}；
          *   - 其余（低压力且从没检查过）→ null。
          * @param {object} snapshot 渲染快照
          * @param {number} now Date.now()
-         * @returns {{kind: "stale"}|{kind: "recent", seconds: number}|null}
+         * @returns {{kind: "stale"}|{kind: "idle"}|{kind: "recent", seconds: number}|null}
          */
         function autoHealthOf(snapshot, now) {
             if (snapshot.phase !== PHASE_READY || snapshot.autoCheckKnown !== true) return null;
@@ -984,7 +993,9 @@ window.__ModuleLoader__.load({
             const ratio = pressureRatioOf(snapshot);
             const at = snapshot.autoCheckedAt;
             const stale = at === null || now - at > AUTO_CHECK_STALE_MS;
-            if (ratio !== null && ratio >= PRESSURE_EVICT_RATIO && stale) return { kind: "stale" };
+            if (ratio !== null && ratio >= PRESSURE_EVICT_RATIO && stale) {
+                return snapshot.agentStatus === "idle" ? { kind: "idle" } : { kind: "stale" };
+            }
             if (at !== null && !stale) return { kind: "recent", seconds: Math.max(0, Math.round((now - at) / 1000)) };
             return null;
         }
@@ -998,6 +1009,13 @@ window.__ModuleLoader__.load({
                     "div",
                     { key: `${keyPrefix}-auto`, className: "dsh-tiered-compaction__alert", role: "alert", "data-testid": "auto-warning" },
                     tOf(t, "autoNotRunning"),
+                );
+            }
+            if (health.kind === "idle") {
+                return h(
+                    "div",
+                    { key: `${keyPrefix}-auto`, className: "dsh-tiered-compaction__auto-hint", "data-testid": "auto-idle" },
+                    tOf(t, "autoIdlePending"),
                 );
             }
             return h(
@@ -2275,7 +2293,15 @@ window.__ModuleLoader__.load({
         /** B.7 HUD 里的自动压缩告警（只出告警，不出「N 秒前检查」，保持迷你）。 */
         function hudAutoWarningNodeOf(snapshot, t, now) {
             const health = autoHealthOf(snapshot, now);
-            if (health === null || health.kind !== "stale") return null;
+            if (health === null || health.kind === "recent") return null;
+            // 空闲：只给一行静态提示，不用告警样式
+            if (health.kind === "idle") {
+                return h(
+                    "div",
+                    { key: "auto", className: "dsh-tiered-compaction__auto-hint", "data-testid": "overlay-auto-idle" },
+                    tOf(t, "autoIdlePendingShort"),
+                );
+            }
             return h(
                 "div",
                 { key: "auto", className: "dsh-tiered-compaction__alert", role: "alert", "data-testid": "overlay-auto-warning" },

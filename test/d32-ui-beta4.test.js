@@ -275,6 +275,17 @@ test("D32-4 自动压缩健康：0.98 且从未检查 → 告警；最近检查 
     assert.equal(byTestId(recentTree, "auto-warning"), null, "最近检查过不告警");
     assert.match(collectTextOf(byTestId(recentTree, "auto-checked")), /自动压缩：\d+ 秒前检查/);
 
+    // 会话空闲：超时没检查是正常的（要等下条消息），不告警，改成静态提示
+    const idle = beta4Payload({ pressure: 0.9, autoCheckedAt: Date.now() - 10 * 60 * 1000, agentStatus: "idle" });
+    const idleTree = (await mount(SETTINGS_SLOT, idle)).tree;
+    assert.equal(byTestId(idleTree, "auto-warning"), null, "空闲不告警");
+    assert.match(collectTextOf(byTestId(idleTree, "auto-idle")), /下条消息时自动压缩/);
+    const idleHud = (await mount(OVERLAY_SLOT, idle)).tree;
+    assert.equal(byTestId(idleHud, "overlay-auto-warning"), null, "HUD 空闲不告警");
+    assert.match(collectTextOf(byTestId(idleHud, "overlay-auto-idle")), /下条消息时自动压缩/);
+    const running = beta4Payload({ pressure: 0.9, autoCheckedAt: Date.now() - 10 * 60 * 1000, agentStatus: "running" });
+    assert.ok(byTestId((await mount(OVERLAY_SLOT, running)).tree, "overlay-auto-warning"), "运行中超时仍告警");
+
     const disabled = beta4Payload({ pressure: 0.98, autoCheckedAt: null, autoEnabled: false });
     assert.equal(byTestId((await mount(SETTINGS_SLOT, disabled)).tree, "auto-warning"), null, "用户关了自动压缩不告警");
 

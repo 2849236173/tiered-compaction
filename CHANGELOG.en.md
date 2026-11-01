@@ -6,6 +6,14 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1-beta.1] - 2026-11-01
+
+**Release tier: beta (not fully tested)** — fixes the HUD falsely reporting "auto compaction not running" while the session is idle. Automated tests pass; not yet verified in the real desktop app.
+
+### Fixed
+
+- **False alarm while idle**: auto compaction only checks pressure before an agent step, so an idle session waits for the next message by design. The old HUD only looked at "pressure ≥ 80% and no check for 120 s", treated idle as a failure and asked the user to run `/compact`. The plugin now listens to the host `agent/status` event and the status API adds an `agentStatus` field (`running` / `idle`). While idle the HUD shows "Idle · compacts on next message"; it warns only when a running agent goes unchecked.
+
 ## [0.4.0] - 2026-11-01
 
 **Release tier: stable** — rolls up every change from 0.4.0-beta.1 to beta.12. All automated tests pass (363 tests, 362 passed, 1 real-session check skipped by design), and the new HUD has been accepted in the real desktop app. See the beta entries below for details.
