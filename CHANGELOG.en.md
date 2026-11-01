@@ -6,6 +6,18 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.10] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — refines the HUD surface material, unified three-column stats well, and progress-bar shimmer animations, and fixes hot-reload style updates. Not yet fully verified in the real desktop app.
+
+### Fixed
+
+- **Hot-reload stale styles**: `ensureUiStyles()` now updates the existing `<style>` element in place instead of returning early.
+- **Dark-mode white halo and light-mode opaque grey background**: replaced the inline `--dsw-alias-bg-module-platform` fill and `--dsw-alias-label-primary` shadow with translucent `--dsw-specific-input-major` glass and `--dsw-menu-backdrop-filter`.
+
+### Changed
+
+- **Unified inset stats well and animations**: merged the three counters into a single hairline-divided inset well, visually hid the `tiered-compaction ` package prefix in the HUD header, and added spring fill-in, liquid shimmer, status-dot ripple, and top indicator bar animations.
 ## [0.4.0-beta.9] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested)** — HUD appearance only; data and compaction logic are unchanged. The new style has not been fully verified under the desktop app's dark theme.
