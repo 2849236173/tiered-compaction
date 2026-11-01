@@ -83,6 +83,7 @@ const STRINGS = Object.freeze({
         autoNotRunning: "自动压缩未运行，可手动执行 /compact",
         autoIdlePending: "会话空闲，下条消息时自动压缩（也可手动 /compact）",
         autoIdlePendingShort: "空闲 · 下条消息时自动压缩",
+        summarizingFor: "正在摘要… {seconds}s",
         autoCheckedAgo: "自动压缩：{seconds} 秒前检查",
         lastCompaction: "最近一次摘要：{time}，{trigger}，遮蔽 {nodes} 个节点 ≈ {shadowed} tokens → {summary} tokens",
         triggerAuto: "自动",
@@ -149,6 +150,7 @@ const STRINGS = Object.freeze({
         autoNotRunning: "Auto compaction is not running; run /compact manually",
         autoIdlePending: "Session idle; auto compaction runs on the next message (or run /compact)",
         autoIdlePendingShort: "Idle · compacts on next message",
+        summarizingFor: "Summarizing… {seconds}s",
         autoCheckedAgo: "Auto compaction: checked {seconds}s ago",
         lastCompaction: "Last summary: {time}, {trigger}, shadowed {nodes} nodes ≈ {shadowed} tokens → {summary} tokens",
         triggerAuto: "auto",
@@ -373,6 +375,7 @@ const LOADING_SNAPSHOT = Object.freeze({
     autoCheckedAt: null,
     autoEnabled: null,
     agentStatus: null,
+    summarizingSince: null,
     lastCompaction: null,
 });
 const UNAVAILABLE_SNAPSHOT = Object.freeze({
@@ -388,6 +391,7 @@ const UNAVAILABLE_SNAPSHOT = Object.freeze({
     autoCheckedAt: null,
     autoEnabled: null,
     agentStatus: null,
+    summarizingSince: null,
     lastCompaction: null,
 });
 
@@ -508,7 +512,7 @@ const HUD_CLOSE_STYLE = {
 };
 
 /** 所有样式都带插件前缀，跟随宿主 Design Tokens，不污染聊天和设置页。 */
-const UI_STYLE_ID = "tiered-compaction-ui-v5";
+const UI_STYLE_ID = "tiered-compaction-ui-v6";
 const UI_CSS = `
 .dsh-tiered-compaction {
     box-sizing: border-box;
@@ -611,6 +615,10 @@ body[data-ds-dark-theme] .dsh-tiered-compaction__chip:hover, [data-ds-dark-theme
 @keyframes dsh-tiered-compaction-bump { 0% { background: color-mix(in srgb, #8b5cf6 18%, transparent); border-color: #8b5cf6; box-shadow: 0 0 12px rgba(139, 92, 246, .28); } 30% { transform: translateY(-1.5px) scale(1.03); } 100% { transform: translateY(0) scale(1); } }
 .dsh-tiered-compaction__alert { margin-top: 7px; padding: 5.5px 7.5px; border-radius: 8px; border: .5px solid color-mix(in srgb, #d97706 26%, transparent); color: var(--dsw-alias-state-warn-label, #b45309); background: color-mix(in srgb, #d97706 10%, transparent); font-size: 11px; line-height: 1.35; animation: dsh-tiered-compaction-hud-in .24s cubic-bezier(.16, 1, .3, 1); }
 .dsh-tiered-compaction__auto-hint { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #81858c); font-size: 11px; }
+.dsh-tiered-compaction__summarizing { display: flex; align-items: center; gap: 6px; margin-top: 7px; padding: 5.5px 7.5px; border-radius: 8px; border: .5px solid color-mix(in srgb, #8b5cf6 28%, transparent); color: color-mix(in srgb, #8b5cf6 80%, var(--dsw-alias-label-primary, #0f1115)); background: color-mix(in srgb, #8b5cf6 10%, transparent); font-size: 11px; font-weight: 600; line-height: 1.35; font-variant-numeric: tabular-nums; animation: dsh-tiered-compaction-hud-in .24s cubic-bezier(.16, 1, .3, 1); }
+.dsh-tiered-compaction__summarizing-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: dsh-tiered-compaction-spin .9s linear infinite; }
+@keyframes dsh-tiered-compaction-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dsh-tiered-compaction__summarizing-dot { animation: none; } }
 .dsh-tiered-compaction__toast { margin-top: 7px; padding: 5.5px 7.5px; border-radius: 8px; border: .5px solid color-mix(in srgb, #10a37f 28%, transparent); color: color-mix(in srgb, #10a37f 84%, var(--dsw-alias-label-primary, #0f1115)); background: color-mix(in srgb, #10a37f 11%, transparent); font-size: 11px; font-weight: 600; letter-spacing: 0; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; animation: dsh-tiered-compaction-fade 4s cubic-bezier(.16, 1, .3, 1) forwards; }
 @keyframes dsh-tiered-compaction-fade { 0% { opacity: 0; transform: translateY(3px) scale(.98); } 8%, 78% { opacity: 1; transform: translateY(0) scale(1); } 100% { opacity: .45; transform: translateY(0) scale(1); } }
 .dsh-tiered-compaction__bar-fill--pulse { animation: dsh-tiered-compaction-aurora 1.6s linear infinite, dsh-tiered-compaction-pulse 1.1s cubic-bezier(.16, 1, .3, 1) 2 !important; }
@@ -884,6 +892,8 @@ window.__ModuleLoader__.load({
                 autoEnabled: typeof payload.autoEnabled === "boolean" ? payload.autoEnabled : null,
                 // 宿主 agent 状态：idle 时自动检查要等下条消息，不算故障
                 agentStatus: payload.agentStatus === "running" || payload.agentStatus === "idle" ? payload.agentStatus : null,
+                // 第 4 层摘要开始时刻；旧服务端没有该字段 → null（不显示）
+                summarizingSince: epochMsOf(payload.summarizingSince),
                 lastCompaction: lastCompactionOf(payload.lastCompaction),
             };
         }
@@ -985,10 +995,16 @@ window.__ModuleLoader__.load({
          *   - 其余（低压力且从没检查过）→ null。
          * @param {object} snapshot 渲染快照
          * @param {number} now Date.now()
-         * @returns {{kind: "stale"}|{kind: "idle"}|{kind: "recent", seconds: number}|null}
+         *   - 第 4 层摘要进行中 → {kind:"summarizing", seconds}（优先于以上各项）。
+         * @returns {{kind: "stale"}|{kind: "idle"}|{kind: "summarizing", seconds: number}|{kind: "recent", seconds: number}|null}
          */
         function autoHealthOf(snapshot, now) {
-            if (snapshot.phase !== PHASE_READY || snapshot.autoCheckKnown !== true) return null;
+            if (snapshot.phase !== PHASE_READY) return null;
+            // 摘要进行中优先：一次摘要可能超过 120 秒，期间不能再报「未运行」
+            if (snapshot.summarizingSince !== null && snapshot.summarizingSince !== undefined) {
+                return { kind: "summarizing", seconds: Math.max(0, Math.round((now - snapshot.summarizingSince) / 1000)) };
+            }
+            if (snapshot.autoCheckKnown !== true) return null;
             if (snapshot.autoEnabled === false) return null;
             const ratio = pressureRatioOf(snapshot);
             const at = snapshot.autoCheckedAt;
@@ -1000,10 +1016,21 @@ window.__ModuleLoader__.load({
             return null;
         }
 
+        /** 「正在摘要… Ns」：带转圈点的静态提示（设置页与 HUD 共用）。 */
+        function summarizingNodeOf(health, t, key, testId) {
+            return h(
+                "div",
+                { key, className: "dsh-tiered-compaction__summarizing", role: "status", "data-testid": testId },
+                h("span", { key: "dot", className: "dsh-tiered-compaction__summarizing-dot", "aria-hidden": "true" }),
+                tOf(t, "summarizingFor", { seconds: health.seconds }),
+            );
+        }
+
         /** 自动压缩健康 → vnode（设置页与 HUD 共用；compact 只影响 key/样式不影响文案）。 */
         function autoHealthNodeOf(snapshot, t, keyPrefix) {
             const health = autoHealthOf(snapshot, Date.now());
             if (health === null) return null;
+            if (health.kind === "summarizing") return summarizingNodeOf(health, t, `${keyPrefix}-auto`, "auto-summarizing");
             if (health.kind === "stale") {
                 return h(
                     "div",
@@ -2294,6 +2321,7 @@ window.__ModuleLoader__.load({
         function hudAutoWarningNodeOf(snapshot, t, now) {
             const health = autoHealthOf(snapshot, now);
             if (health === null || health.kind === "recent") return null;
+            if (health.kind === "summarizing") return summarizingNodeOf(health, t, "auto", "overlay-summarizing");
             // 空闲：只给一行静态提示，不用告警样式
             if (health.kind === "idle") {
                 return h(

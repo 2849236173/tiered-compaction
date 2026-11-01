@@ -471,10 +471,14 @@ test("C4 摘要等待期间 agentSignal 取消时返回 cancelled 且不提交�
         session,
         async runMaintenance(fn) { return fn(controller.signal); },
     };
+    session.id = "sess-a12-cancel";
     const pending = svc.compactNow(agent);
     await waitFor(() => typeof release === "function", 1000);
+    // 摘要进行中：状态载荷带开始时刻，界面据此显示「正在摘要… Ns」
+    assert.equal(typeof svc._statusPayload("sess-a12-cancel").summarizingSince, "number", "摘要期间有开始时刻");
     controller.abort(new Error("cancelled by test"));
     await assert.rejects(() => pending, (error) => error.code === "cancelled");
+    assert.equal(svc._statusPayload("sess-a12-cancel").summarizingSince, null, "失败/取消后清掉");
     assert.equal(session.events.some((event) => event.type === "compaction/summary"), false);
     assert.equal(session.events.some((event) => event.type === "user/message"), false);
 });

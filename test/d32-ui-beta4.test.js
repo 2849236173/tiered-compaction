@@ -286,6 +286,14 @@ test("D32-4 自动压缩健康：0.98 且从未检查 → 告警；最近检查 
     const running = beta4Payload({ pressure: 0.9, autoCheckedAt: Date.now() - 10 * 60 * 1000, agentStatus: "running" });
     assert.ok(byTestId((await mount(OVERLAY_SLOT, running)).tree, "overlay-auto-warning"), "运行中超时仍告警");
 
+    // 摘要进行中：优先显示「正在摘要… Ns」，即使超过 120 秒没检查也不报「未运行」
+    const summarizing = beta4Payload({ pressure: 0.95, autoCheckedAt: Date.now() - 10 * 60 * 1000, agentStatus: "running", summarizingSince: Date.now() - 23000 });
+    const sumHud = (await mount(OVERLAY_SLOT, summarizing)).tree;
+    assert.equal(byTestId(sumHud, "overlay-auto-warning"), null, "摘要中不告警");
+    assert.match(collectTextOf(byTestId(sumHud, "overlay-summarizing")), /正在摘要… 2[34]s/);
+    const sumSettings = (await mount(SETTINGS_SLOT, summarizing)).tree;
+    assert.match(collectTextOf(byTestId(sumSettings, "auto-summarizing")), /正在摘要…/);
+
     const disabled = beta4Payload({ pressure: 0.98, autoCheckedAt: null, autoEnabled: false });
     assert.equal(byTestId((await mount(SETTINGS_SLOT, disabled)).tree, "auto-warning"), null, "用户关了自动压缩不告警");
 

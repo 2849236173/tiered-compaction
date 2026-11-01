@@ -55,6 +55,8 @@ import {
     lastCompactionFor,
     markAgentStatus,
     markAutoCheck,
+    markSummarizing,
+    summarizingSinceOf,
     latestSession as sharedLatestSession,
     layerStatsSnapshot,
     recordCompaction,
@@ -961,6 +963,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
             autoEnabled: this.config?.auto ?? true,
             // "running" | "idle" | null（本进程还没收到过该会话的状态事件）
             agentStatus: agentStatusOf(session),
+            // 第 4 层摘要开始时刻（epoch ms）；没在摘要时为 null
+            summarizingSince: summarizingSinceOf(session),
         };
     }
 
@@ -1686,6 +1690,17 @@ export class TieredCompactionEngineService extends CompactionEngine {
             ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
         };
         const startEvent = session.append("compaction/start", lifecycle);
+        // 摘要进行中：状态 API 据此让界面显示「正在摘要… Ns」（一次摘要常要 45 秒到 2 分钟）
+        markSummarizing(session, Date.now());
+        try {
+            return await this._runTransactionBody(session, start, end, agent, signal, sourceCommandId, compactionId, lifecycle, startEvent);
+        } finally {
+            markSummarizing(session, null);
+        }
+    }
+
+    /** `_runTransaction` 的事务主体（拆出来只为让「摘要进行中」标记在 finally 里必然清掉）。 */
+    async _runTransactionBody(session, start, end, agent, signal, sourceCommandId, compactionId, lifecycle, startEvent) {
         // C9(c)（beta3 审计，对齐 basic closing 标志）：end 本身 append 失败时
         // 不能在 catch 里再写一枚 end
         let closing = false;

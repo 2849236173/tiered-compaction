@@ -193,6 +193,26 @@ export function markAgentStatus(session, status) {
 }
 
 /**
+ * 记下第 4 层摘要开始（传时间戳）或结束（传 null）。
+ * @param {object} session
+ * @param {number|null} at
+ */
+export function markSummarizing(session, at) {
+    const entry = entryFor(session);
+    if (entry !== undefined) entry.summarizingSince = at;
+}
+
+/**
+ * @param {object} session
+ * @returns {number|null} 摘要开始时刻；没在摘要时为 null
+ */
+export function summarizingSinceOf(session) {
+    const id = session?.id;
+    const entry = typeof id === "string" ? table().sessions.get(id) : undefined;
+    return entry !== undefined && entry.ref.deref() === session ? entry.summarizingSince ?? null : null;
+}
+
+/**
  * @param {object} session
  * @returns {"running"|"idle"|null} 未见过状态事件时为 null
  */
