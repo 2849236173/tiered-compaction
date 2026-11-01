@@ -55,6 +55,9 @@
 #>
 param(
     [string]$Profile = "desktop",
+    # beta8：同一套逻辑覆盖官方 standard / ptc / minimal 的压缩引擎（各自一个标记区块）
+    [ValidateSet("standard", "ptc", "minimal")]
+    [string]$Preset = "standard",
     [switch]$Apply,
     [string]$ArchiveDir = "",
     [string]$PluginName = ""
@@ -66,7 +69,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $generator = Join-Path $PSScriptRoot "gen-standard-tc.mjs"
 $outDir = Join-Path $PSScriptRoot "out"
-$outFile = Join-Path $outDir "preset-standard-tc.yml"
+$outFile = Join-Path $outDir "preset-$Preset-tc.yml"
 $profileDir = Join-Path $env:USERPROFILE ".dsh\profiles\$Profile"
 if (-not $ArchiveDir) { $ArchiveDir = Join-Path $env:USERPROFILE ".dsh\tiered-archive" }
 
@@ -95,7 +98,7 @@ Write-Host "      已写入 $dumpFile（$((Get-Content $dumpFile).Count) 行）"
 
 # ── 2) 生成 + 自检（Node 侧，失败即退且不写产物）──────────────
 Write-Host "[2/3] 生成 standard 覆盖块并自检 ..." -ForegroundColor Cyan
-$genArgs = @($dumpFile, $outFile, $ArchiveDir, "--profile-dir", $profileDir)
+$genArgs = @($dumpFile, $outFile, $ArchiveDir, "--profile-dir", $profileDir, "--preset", $Preset)
 if ($PluginName) { $genArgs += @("--plugin-name", $PluginName) }
 Push-Location $repoRoot
 try {
@@ -115,14 +118,20 @@ if ($Apply) {
     if (-not (Test-Path $patchPath)) { Write-Error "找不到 profile 补丁：$patchPath" }
 
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backup = "$patchPath.standard-tc-bak-$stamp"
+    $backup = "$patchPath.$Preset-tc-bak-$stamp"
     Copy-Item $patchPath $backup -Force
     Write-Host "      已备份 $backup"
 
     # 用 .NET 直读，避免 PS 版本差异带来的编码问题
     $patchText = [System.IO.File]::ReadAllText($patchPath, [System.Text.Encoding]::UTF8)
-    $beginMarker = '# ══ D17：standard 原地换压缩引擎'
-    $endMarker = '# ══ D17 区块结束 ══'
+    # standard 沿用历史标记（已写入 profile 的区块要能被识别替换）；其它 preset 各用独立标记
+    if ($Preset -eq "standard") {
+        $beginMarker = '# ══ D17：standard 原地换压缩引擎'
+        $endMarker = '# ══ D17 区块结束 ══'
+    } else {
+        $beginMarker = "# ══ D17：$Preset 原地换压缩引擎"
+        $endMarker = "# ══ D17-$Preset 区块结束 ══"
+    }
 
     $newBlock = $beginMarker + " ══`n" + ((Get-Content $outFile -Encoding UTF8) -join "`n") + "`n" + $endMarker + "`n"
 
@@ -140,7 +149,7 @@ if ($Apply) {
         if ($patchText.Contains($endMarker)) {
             $pattern = [regex]::Escape($beginMarker) + '[\s\S]*' + [regex]::Escape($endMarker) + '\r?\n?'
         } else {
-            $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?(\r?\n(?=- id: (?!preset-standard\b))|\r?\n?\z)'
+            $pattern = [regex]::Escape($beginMarker) + ('[\s\S]*?(\r?\n(?=- id: (?!preset-' + $Preset + '\b))|\r?\n?\z)')
         }
         # 「是否命中」看正则本身，不看替换前后是否相同：内容已是最新时替换结果等于原文，属正常幂等
         if (-not [System.Text.RegularExpressions.Regex]::IsMatch($patchText, $pattern)) {

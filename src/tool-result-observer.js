@@ -383,6 +383,10 @@ export class ToolResultObserver {
     async evictStaleToolResults(session) {
         const state = this.stateOf(session);
         const surface = session.surface?.nodes ?? [];
+        // beta8：保护最近 RECENT_TURNS_PROTECTED 轮的结果。
+        // 实测（2026-11-01）：压力持续 ≥80% 时每步都驱逐，本步刚读到的
+        // read/grep 结果在模型看到之前就被换成「请重跑」，模型重读 → 再被驱逐，死循环。
+        const latestTurn = latestTurnOf(session, surface);
         let evicted = 0;
         for (const seq of [...surface]) {
             // W8：遍历的是快照；每个 seq 写 prune 前都要复核它仍在**当前**表面上
@@ -399,6 +403,7 @@ export class ToolResultObserver {
             //
             // 两者语义不同：`done` = 已做过内容压缩；`evicted` = 已换成重跑提示。
             if (state.evicted.has(seq)) continue;
+            if (isRecentTurn(event, latestTurn)) continue;
             const text = textOfToolResult(event);
             if (text === null) continue;
             // P0-2（2026-10-27 系统审计）：必须用**内容判据**兜住重复驱逐。
@@ -516,4 +521,29 @@ export class ToolResultObserver {
         const text = textOfToolResult(event) ?? "";
         return Math.ceil(text.length / 4);
     }
+}
+
+/** beta8：第 3 层不驱逐最近几轮（含当前轮）的工具结果。 */
+export const RECENT_TURNS_PROTECTED = 2;
+
+function turnOf(event) {
+    const turn = event?.data?.turn;
+    return typeof turn === "number" && Number.isFinite(turn) ? turn : undefined;
+}
+
+/** 表面上最新的 turn 号；读不到时 undefined。 */
+export function latestTurnOf(session, surface) {
+    let latest;
+    for (let i = surface.length - 1; i >= 0; i--) {
+        const turn = turnOf(session.eventAt(surface[i]));
+        if (turn !== undefined) { latest = turn; break; }
+    }
+    return latest;
+}
+
+/** 事件属于最近 RECENT_TURNS_PROTECTED 轮时返回 true；读不到轮次时不保护（沿用旧行为）。 */
+export function isRecentTurn(event, latestTurn) {
+    const turn = turnOf(event);
+    if (turn === undefined || latestTurn === undefined) return false;
+    return turn > latestTurn - RECENT_TURNS_PROTECTED;
 }

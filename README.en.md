@@ -9,7 +9,7 @@ DSH's default compaction, once the context reaches the threshold, makes one LLM 
 
 This plugin splits compaction into four tiers. The first three tiers consume most of the volume at zero LLM cost; only when the threshold is actually reached does it spend one budget-reserved summarization.
 
-**Current preview: 0.4.0-beta.6 (beta / preview — not fully tested yet).** Automated tests pass, but real desktop UI behavior and the real LLM summarization flow have not been fully verified. Keep session backups before trying it.
+**Current preview: 0.4.0-beta.8 (beta / preview, not fully tested).** Automated tests pass. The HUD redesign, count backfill, and the official ptc / minimal preset overrides in this release have not been fully verified in the real desktop app. Keep session backups before trying it.
 
 > This is not a stable release. If you need a stable version, defer upgrading.
 
@@ -32,11 +32,25 @@ Three constraints run through all tiers:
 2. **Superseded references are recorded in the lineage table** — whenever content is superseded, an entry "original location → new location → superseder" is registered, auditable and traceable, never silently deleted.
 3. **The plugin itself has a circuit breaker and an arbiter** — a tier that fails consecutively is automatically degraded, skipped, and warned about without blocking the main flow; the arbiter guarantees each piece of content is handled by exactly one tier.
 
+## Which preset to use
+
+Each DSH session binds to one agent preset when it is created and keeps it. The compaction service lives inside the preset, so **whether all four tiers run depends on the session's preset**:
+
+| Preset | Tiers 1-2 (fold, spill) | Tiers 3-4 (evict, summary) | How to get it |
+|---|---|---|---|
+| `cordis` (desktop default) | ✅ | ✅ | Install the `tiered-cordis-preset` bundle |
+| `ptc-tc` | ✅ | ✅ | `tools/gen-ptc-tc.ps1 -Apply` |
+| `standard` (always used by Bot and group sessions) | ✅ | ✅ | `tools/gen-standard-tc.ps1 -Apply` |
+| Official `ptc`, `minimal` | ✅ | ✅ from 0.4.0-beta.8 | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`, `-Preset minimal -Apply` |
+| Any other preset not overridden | ✅ | ❌ (official compaction) | — |
+
+**Recommended**: pick `cordis` or `ptc-tc` for new sessions. After all the generators have run, every built-in preset gets all four tiers. Each generator edits only its own marked block in the profile patch; delete the block to restore the official preset. Existing sessions bound to an official preset before the override do not gain tiers 3-4; start a new session.
+
 ## Installation
 
 The plugin is pure ESM + JSDoc with no build chain, shipped straight from `src/` — no compilation needed before install.
 
-**Installing from npm is recommended** (clear version numbers, and `update` automatically upgrades to the latest stable version); use the GitHub route when npm network access is unavailable.
+Install from npm (clear version numbers, and `update` upgrades to the latest stable version).
 
 ### First, confirm which profile you use
 
@@ -58,36 +72,24 @@ Not sure which profiles you have: look at the folder names under `~/.dsh/profile
 ```powershell
 # Install from npm (recommended): no tag specified means the latest stable version
 dsh plugin --profile desktop add dsh-tiered-compaction
-
-# Or install from GitHub
-dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
 ```
 
 ### Web
 
 ```powershell
 dsh plugin --profile web add dsh-tiered-compaction
-
-# Or install from GitHub
-dsh plugin --profile web add "github:2849236173/tiered-compaction"
 ```
 
 ### headless (command line / scripts)
 
 ```powershell
 dsh plugin --profile headless add dsh-tiered-compaction
-
-# Or install from GitHub
-dsh plugin --profile headless add "github:2849236173/tiered-compaction"
 ```
 
 ### TUI (terminal interface)
 
 ```powershell
 dsh plugin --profile tui add dsh-tiered-compaction
-
-# Or install from GitHub
-dsh plugin --profile tui add "github:2849236173/tiered-compaction"
 ```
 
 ### Local development (code changes take effect immediately)
@@ -130,8 +132,7 @@ dsh plugin --profile web update dsh-tiered-compaction
 # headless / TUI work the same way, only replace --profile
 ```
 
-**Installed from npm**: `update` only upgrades to `latest` (stable version) and will not accidentally take a beta.
-**Installed from GitHub**: `update` upgrades to the latest commit on main.
+`update` only upgrades to `latest` (stable) and never installs a beta. To install a beta, name it: `dsh plugin --profile desktop add dsh-tiered-compaction@beta`.
 
 **After upgrading you must fully exit and restart DSH**, otherwise the old code still in memory keeps running.
 

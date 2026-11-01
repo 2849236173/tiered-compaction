@@ -47,6 +47,8 @@ const STRINGS = Object.freeze({
         l3Evicted: "软压力驱逐",
         l4Summaries: "有损摘要",
         foldShort: "折叠",
+        foldSpillShort: "折叠/落盘",
+        chipSaved: " · 省 {value}",
         spillShort: "落盘",
         evictShort: "驱逐",
         summaryShort: "摘要",
@@ -62,7 +64,15 @@ const STRINGS = Object.freeze({
         toneUnknown: "未知",
         pressurePrefix: "压力",
         hudCloseTitle: "关闭悬浮窗",
-        combinedCharsSaved: "L1+L2 合计（字符）省 ~{value}",
+        combinedCharsSaved: "折叠+落盘合计（字符）省 ~{value}",
+        toSummary: " · 距摘要 ≈ {value}",
+        summaryDue: " · 已到摘要线",
+        hudFooterSaved: "共省 ≈ {value}",
+        hudFooterLast: "上次摘要 {ago}",
+        agoMinutes: "{n} 分钟前",
+        agoHours: "{n} 小时前",
+        agoDays: "{n} 天前",
+        agoJustNow: "刚刚",
         tokensApprox: "≈ {value} tokens",
         processSummaries: "全进程 {count}",
         sessionScope: "本会话",
@@ -101,6 +111,8 @@ const STRINGS = Object.freeze({
         l3Evicted: "Soft-pressure eviction",
         l4Summaries: "Lossy summary",
         foldShort: "Fold",
+        foldSpillShort: "Fold/spill",
+        chipSaved: " · saved {value}",
         spillShort: "Spill",
         evictShort: "Evict",
         summaryShort: "Summary",
@@ -116,7 +128,15 @@ const STRINGS = Object.freeze({
         toneUnknown: "Unknown",
         pressurePrefix: "Pressure",
         hudCloseTitle: "Close HUD",
-        combinedCharsSaved: "L1+L2 combined (chars) ~{value} saved",
+        combinedCharsSaved: "Fold + spill combined (chars) ~{value} saved",
+        toSummary: " · ≈ {value} to summary",
+        summaryDue: " · at summary line",
+        hudFooterSaved: "Saved ≈ {value}",
+        hudFooterLast: "last summary {ago}",
+        agoMinutes: "{n} min ago",
+        agoHours: "{n} h ago",
+        agoDays: "{n} d ago",
+        agoJustNow: "just now",
         tokensApprox: "≈ {value} tokens",
         processSummaries: "process total {count}",
         sessionScope: "This session",
@@ -438,16 +458,16 @@ const CHIP_BUMP_MS = 1200;
 
 /** HUD 四层芯片：key → 显示名 + 悬停全称（STRINGS key）。数组顺序即 DOM 顺序。 */
 const HUD_CHIPS = [
-    { key: "l1", label: "L1", titleKey: "foldShort" },
-    { key: "l2", label: "L2", titleKey: "spillShort" },
-    { key: "l3", label: "L3", titleKey: "evictShort" },
-    { key: "l4", label: "L4", titleKey: "summaryShort" },
+    // beta8：用动作名代替 L1-L4；折叠与落盘合并（会话日志里分不出两层，重启回填后口径一致）
+    { key: "l12", titleKey: "foldSpillShort" },
+    { key: "l3", titleKey: "evictShort" },
+    { key: "l4", titleKey: "summaryShort" },
 ];
 
 /** HUD 拖动边距和估算尺寸：实际宽度由 CSS 限制，足以做安全边界校正。 */
 const HUD_EDGE_GAP = 12;
 const HUD_ESTIMATED_WIDTH = 224;
-const HUD_ESTIMATED_HEIGHT = 76;
+const HUD_ESTIMATED_HEIGHT = 110;
 
 /** 将 HUD 坐标限制在视口内；测试桩没有视口尺寸时保持原值。 */
 function clampHudPosition(left, top) {
@@ -531,9 +551,11 @@ const UI_CSS = `
 .dsh-tiered-compaction__hud-btn { flex: 0 0 auto; padding: 2px 5px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
 .dsh-tiered-compaction__hud-btn:hover { background: var(--dsw-alias-fill-tertiary, rgba(31, 35, 40, .08)); }
 .dsh-tiered-compaction__hud-usage { margin-top: 4px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; font-variant-numeric: tabular-nums; }
-.dsh-tiered-compaction__chips { display: flex; gap: 4px; margin-top: 7px; }
-.dsh-tiered-compaction__chip { flex: 1 1 0; min-width: 0; padding: 2px 4px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 6px; color: var(--dsw-alias-label-secondary, #58636e); font-size: 10px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-.dsh-tiered-compaction__chip b { color: var(--dsw-alias-label-tertiary, #7a8591); font-weight: 600; margin-right: 3px; }
+.dsh-tiered-compaction__chips { display: flex; flex-direction: column; gap: 2px; margin-top: 7px; }
+.dsh-tiered-compaction__chip { display: flex; align-items: baseline; min-width: 0; padding: 1px 2px; border-radius: 5px; color: var(--dsw-alias-label-secondary, #58636e); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__chip b { flex: 0 0 4.5em; color: var(--dsw-alias-label-tertiary, #7a8591); font-weight: 600; margin-right: 6px; }
+.dsh-tiered-compaction__chip-saved { color: var(--dsw-alias-label-tertiary, #7a8591); }
+.dsh-tiered-compaction__hud-footer { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dsh-tiered-compaction__chip--bump { animation: dsh-tiered-compaction-bump 1.2s ease-out; }
 @keyframes dsh-tiered-compaction-bump { 0% { background: color-mix(in srgb, var(--dsh-tiered-tone, #2f9e44) 35%, transparent); border-color: var(--dsh-tiered-tone, #2f9e44); } 100% { background: transparent; } }
 .dsh-tiered-compaction__alert { margin-top: 7px; padding: 5px 7px; border-radius: 7px; color: var(--dsw-alias-state-warning-primary, #b35c00); background: var(--dsw-alias-state-warning-tertiary, color-mix(in srgb, #f0a020 14%, transparent)); font-size: 11px; line-height: 1.4; }
@@ -999,10 +1021,9 @@ window.__ModuleLoader__.load({
          * @returns {{l1: number|null, l2: number|null, l3: number|null, l4: number|null}}
          */
         function chipCountsOf(layers) {
-            if (layers === null || layers === undefined) return { l1: null, l2: null, l3: null, l4: null };
+            if (layers === null || layers === undefined) return { l12: null, l3: null, l4: null };
             return {
-                l1: layers.l1Folded ?? layers.l12Processed,
-                l2: layers.spillCount,
+                l12: layers.l12Processed,
                 l3: layers.l3Evicted,
                 l4: layers.l4Summaries,
             };
@@ -2024,7 +2045,8 @@ window.__ModuleLoader__.load({
                 ),
                 ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false, pulse: showDrop }),
                 hudUsageNodeOf(snapshot, t),
-                hudChipsNodeOf(snapshot, now),
+                hudChipsNodeOf(snapshot, now, t),
+                hudFooterNodeOf(snapshot, t, now),
                 hudAutoWarningNodeOf(snapshot, t, now),
                 showDrop ? compactedToastNodeOf(drop, t) : null,
             );
@@ -2037,7 +2059,36 @@ window.__ModuleLoader__.load({
                 "div",
                 { key: "usage", className: "dsh-tiered-compaction__hud-usage", "data-testid": "overlay-usage" },
                 tOf(t, "usageTokens", { current: formatTokens(snapshot.currentTokens), window: formatTokens(snapshot.window) }),
+                toSummaryTextOf(snapshot, t),
             );
+        }
+
+        /** beta8：距第 4 层摘要线（82% 窗口）还剩多少 token；窗口未知时不显示。 */
+        function toSummaryTextOf(snapshot, t) {
+            if (!(snapshot.window > 0) || snapshot.autoEnabled === false) return null;
+            const left = Math.round(snapshot.window * PRESSURE_LOSSY_FLOOR_RATIO - snapshot.currentTokens);
+            return left <= 0 ? tOf(t, "summaryDue") : tOf(t, "toSummary", { value: formatTokens(left) });
+        }
+
+        /** beta8：相对时间（分钟粒度足够；未来时刻按刚刚处理）。 */
+        function agoTextOf(at, now, t) {
+            const minutes = Math.floor(Math.max(0, now - at) / 60000);
+            if (minutes < 1) return tOf(t, "agoJustNow");
+            if (minutes < 60) return tOf(t, "agoMinutes", { n: minutes });
+            const hours = Math.floor(minutes / 60);
+            return hours < 24 ? tOf(t, "agoHours", { n: hours }) : tOf(t, "agoDays", { n: Math.floor(hours / 24) });
+        }
+
+        /** beta8：HUD 底行「共省 ≈ 1.1M · 上次摘要 12 分钟前」；两项都缺时不渲染。 */
+        function hudFooterNodeOf(snapshot, t, now) {
+            if (snapshot.phase !== PHASE_READY) return null;
+            const parts = [];
+            const total = totalTokensSavedOf(snapshot.layers);
+            if (total !== null && total > 0) parts.push(tOf(t, "hudFooterSaved", { value: formatTokens(total) }));
+            const last = snapshot.lastCompaction;
+            if (last !== null && last !== undefined) parts.push(tOf(t, "hudFooterLast", { ago: agoTextOf(last.at, now, t) }));
+            if (parts.length === 0) return null;
+            return h("div", { key: "footer", className: "dsh-tiered-compaction__hud-footer", "data-testid": "overlay-footer" }, parts.join(" · "));
         }
 
         /**
@@ -2045,7 +2096,14 @@ window.__ModuleLoader__.load({
          * 为什么用 aria-label 不用 title：title 里的「驱逐/摘要」会被当成刻度线
          * 语义标签（d25 按 title 数刻度线），芯片不该混进去。
          */
-        function hudChipsNodeOf(snapshot, now) {
+        /** beta8：芯片后缀「 · 省 268k」；读不到节省量时不显示。 */
+        function chipSavedNoteOf(layers, key, t) {
+            const value = key === "l12" ? layers.l12TokensSaved : key === "l3" ? layers.l3TokensSaved : layers.l4TokensSaved;
+            if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+            return h("span", { className: "dsh-tiered-compaction__chip-saved" }, tOf(t, "chipSaved", { value: formatTokens(value) }));
+        }
+
+        function hudChipsNodeOf(snapshot, now, t) {
             if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
             const counts = chipCountsOf(snapshot.layers);
             return h(
@@ -2064,8 +2122,9 @@ window.__ModuleLoader__.load({
                                 ? "dsh-tiered-compaction__chip dsh-tiered-compaction__chip--bump"
                                 : "dsh-tiered-compaction__chip",
                         },
-                        h("b", null, chip.label),
+                        h("b", null, tOf(t, chip.titleKey)),
                         counts[chip.key] === null ? STRINGS.zh.missingValue : String(counts[chip.key]),
+                        chipSavedNoteOf(snapshot.layers, chip.key, t),
                     );
                 }),
             );

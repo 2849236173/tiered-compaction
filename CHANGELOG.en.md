@@ -6,6 +6,22 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.8] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — fixes tier-3 evicting fresh results and counts resetting on restart, redesigns the HUD, and lets the official ptc / minimal presets run all four tiers. The HUD and the preset overrides have not been fully verified in the real desktop app.
+
+### Fixed
+
+- **Tier 3 evicted tool results the model had just read**: above 80% pressure, eviction could remove `read` / `grep` results from the current turn. Tool results from the latest 2 turns are now protected. When the turn cannot be read, the old behavior applies.
+- **Counts reset to 0 on every restart**: per-session counts lived only in memory. They are now backfilled from the session log the first time a session is seen: summary count and savings, eviction count and savings, and the combined fold/spill count and savings. Records written by the official pruner are not counted. The log does not distinguish folding from spilling, so only their total is backfilled.
+- **False "pressure ≥80% but tier 3 never evicted" health warning after restart**: sessions not yet registered by the observer are now backfilled from the log too.
+
+### Changed
+
+- **HUD**: L1–L4 are replaced by three rows, "Fold/spill", "Evict", and "Summary", each showing the total count and approximate tokens saved (e.g. `Evict 476 · saved 316k`). The usage line adds "≈ N to summary", and a new footer shows "Saved ≈ N · last summary N min ago". "L1+L2 combined" on the settings page is renamed "Fold + spill combined".
+- **Presets**: `tools/gen-standard-tc.ps1` gains `-Preset standard|ptc|minimal` to swap the compaction engine of the official ptc and minimal presets in place. Each preset has its own marked block in the profile patch; delete the block to roll back.
+- **README**: removed the GitHub install route and added a "Which preset to use" section.
+
 ## [0.4.0-beta.7] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested yet)** — fixes whole-turn failures during the compaction commit step.
