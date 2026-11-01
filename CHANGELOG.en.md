@@ -6,6 +6,18 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-11-01
+
+**Release tier: stable** — includes the idle false-alarm fix from 0.4.1-beta.1 and adds summary progress. All automated tests pass (364 tests, 363 pass, 1 real-session check skipped by design).
+
+### Added
+
+- **Summary progress**: a tier-4 summary often takes 45 seconds to 2 minutes, and the HUD used to show nothing meanwhile. The status API now returns `summarizingSince`, and the HUD and settings page show "Summarizing… Ns". The "auto compaction not running" alert is suppressed during a summary. The marker clears on success, failure, or cancellation.
+
+### Docs
+
+- README rewritten: install, enabling all four tiers, the HUD, configuration, and known limits only, with a HUD screenshot up top.
+
 ## [0.4.1-beta.1] - 2026-11-01
 
 **Release tier: beta (not fully tested)** — fixes the HUD falsely reporting "auto compaction not running" while the session is idle. Automated tests pass; not yet verified in the real desktop app.

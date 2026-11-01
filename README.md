@@ -1,323 +1,99 @@
-**简体中文** | [![English](https://img.shields.io/badge/docs-English-blue)](README.en.md)
-
+**简体中文** | [English](README.en.md)
 
 # tiered-compaction
 
-**DSH 分层上下文压缩插件** —— 用四层递进替代一次摘要。
+DSH 的分层上下文压缩插件。前三层不调用 LLM，只有压力真正到阈值时才做一次摘要。
 
-DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历史。做法简单，但代价明确：每次压缩都是一次完整 LLM 调用；摘要受输出 token 上限约束；长内容的中段最先丢。
+![悬浮窗效果](https://raw.githubusercontent.com/2849236173/tiered-compaction/main/docs/images/hud.png)
 
-本插件把压缩拆成四层，前三层零 LLM 成本吃掉大部分体积，只有真正触阈值才动用一次带预算预留的摘要。
+当前正式版：**0.4.1**
 
-**当前正式版：0.4.0（正式版 / 稳定版）**。自动化测试全部通过，悬浮窗新界面已在真实桌面端验收。npm 的 `latest` 标签指向这个版本，直接安装即可。
+## 它做什么
 
-**当前尝新版：0.4.1-beta.1（beta，未完全测试通过）**，修复悬浮窗在会话空闲时误报「自动压缩未运行」。安装：`dsh-tiered-compaction@beta`。
-
-## 四层管线
-
-| 层 | 做什么 | 成本 |
+| 层 | 做法 | 成本 |
 |---|---|---|
-| **1 · 无损折叠** | 连续重复行（≥3 次）折叠为「首行 + `…[folded Nx]`」，附逆变换记录 | 零 LLM |
-| **2 · 落盘** | 超过 8KB（UTF-8 字节）的工具输出整体存档，上下文只留头尾预览 + 路径 + SHA-256 | 零 LLM |
-| **3 · 软压力** | 70% 窗口插入提醒；80% 按优先级驱逐可重放内容 | 零 LLM |
-| **4 · 有损摘要** | 到阈值才调 LLM 摘要，预算提前预留，摘要前全量存档 | 1 次 LLM |
+| 1 · 折叠 | 连续重复 3 次以上的行折叠成一行 | 不调用 LLM |
+| 2 · 落盘 | 超过 8 KB 的工具输出存到磁盘，上下文只留预览和路径 | 不调用 LLM |
+| 3 · 驱逐 | 压力到 70% 提醒收束；到 80% 移除旧的可重跑工具结果 | 不调用 LLM |
+| 4 · 摘要 | 压力到阈值（约 82%）时调用 LLM 摘要较早的历史 | 1 次 LLM |
 
-另有**旁路**：目标切换清理——显式宣告新目标时，把旧目标的 todo/goal/plan 打包成结构化胶囊，过程内容归档，零 LLM。
-
-## 为什么敢做有损操作
-
-三条约束贯穿所有层：
-
-1. **每层留恢复机制** —— 折叠有逆变换记录；落盘有 SHA-256 与完整文件；驱逐项记原始位置（`read`/`grep`/`glob` 重跑即恢复）；摘要前全量存档。
-2. **被取代引用记谱系** —— 任何内容被取代都登记「原位置 → 新位置 → 取代者」，可审计可回溯，不静默删。
-3. **自身有熔断与仲裁** —— 单层连续失败自动降级跳过并告警，主流程不被阻断；仲裁器保证一份内容只归一层处理。
-
-## 选哪个预设
-
-DSH 的每个会话在创建时绑定一个 agent 预设（preset），之后不能更换。压缩服务装在预设内部，所以**四层能不能全开取决于会话用的是哪个预设**：
-
-| 预设 | 第 1-2 层（折叠、落盘） | 第 3-4 层（驱逐、摘要） | 怎么得到 |
-|---|---|---|---|
-| `cordis`（桌面端默认） | ✅ | ✅ | 安装 `tiered-cordis-preset` bundle |
-| `ptc-tc` | ✅ | ✅ | `tools/gen-ptc-tc.ps1 -Apply` |
-| `standard`（Bot 和群会话固定用它） | ✅ | ✅ | `tools/gen-standard-tc.ps1 -Apply` |
-| 官方 `ptc`、`minimal` | ✅ | 0.4.0-beta.8 起 ✅ | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`、`-Preset minimal -Apply` |
-| 其它未覆盖的预设 | ✅ | ❌（仍是官方压缩） | — |
-
-**推荐**：新会话选 `cordis` 或 `ptc-tc`；四个生成器都跑过之后，内置预设都能用全四层。生成器只在 profile 补丁里改动各自的标记区块，删掉区块就能恢复官方预设。已经绑定官方预设的旧会话，在覆盖生效前不会补上第 3-4 层，需要新开会话。
-
-## 两种工作模式
-
-| 模式 | 怎么装 | 层 1-2（折叠+落盘） | 层 3-4（软压力+摘要） |
-|---|---|---|---|
-| **默认安装（root 旁路）** | 按下面「安装」章节装完即用，不改任何 preset | ✅ 所有会话生效 | ❌ 官方 basic 继续负责压缩 |
-| **preset 模式** | 用 `tools/gen-ptc-tc.ps1` / `gen-standard-tc.ps1` 生成并落地 preset（默认配置、`ptc-tc`；Bot 会话用的 `standard` 由脚本原地重写） | ✅ | ✅ 四层全开 |
-
-两条模式的关键差异来自 DSH 的 preset 隔离（realm）：每个会话只认自己 preset 内部的 compaction 服务，root 平面的插件接管对 preset 会话零效果且零报错。所以：
-
-- **只想给所有会话省上下文、不动压缩策略** → 默认安装就够（零维护成本）；
-- **要完整的四层管线（含 20k 预算预留的有损摘要）** → 用 preset 模式，但只覆盖生成/重写过的那几个 preset，其余 preset 的会话仍是层 1-2。
-
-使用 preset 模式须知：
-
-- **preset 是会话创建时终身绑定的**——新建会话自动吃当前默认 preset 的能力；已存在且绑定官方 preset 的存量会话中途无法补层 3-4，只能新开会话。
-- **DSH 升级后 preset 会漂移**——`ptc-tc` 是官方 ptc 的副本，升级后须重跑生成脚本重同步（脚本自检会 diff 官方与副本，差异超出预期清单即报错不落地）。preset 定义删除会让绑定它的存量会话 resume 报 not-found——即使全面回退也建议保留定义。
+被处理过的内容都能找回：落盘和摘要前的原文保存在 `~/.dsh/tiered-archive`，可以用 `tiered_restore` 工具读回；被驱逐的工具结果重跑原命令即可恢复。
 
 ## 安装
 
-插件是纯 ESM + JSDoc，无构建链，`src/` 直出，安装前无需编译。
-
-从 npm 安装（版本号清晰，`update` 能升到最新稳定版）。
-
-### 先确认你用哪个 profile
-
-DSH 每个运行形态对应一个 profile 名，装到哪个 profile 就只在那个形态生效。**你平时怎么启动 DSH，就用哪个名字**：
-
-| 你怎么用 DSH | profile 名 | 复制这条命令 |
-|---|---|---|
-| 桌面客户端（Windows/macOS 应用） | `desktop` | 见下方桌面端 |
-| 浏览器里打开的 Web 版 | `web` | 见下方 Web 端 |
-| 命令行 / 脚本调用（headless） | `headless` | 见下方 headless |
-| 终端交互界面（TUI） | `tui` | 见下方 TUI |
-
-不确定自己有哪些 profile：看 `~/.dsh/profiles/` 下的文件夹名（Windows 是 `C:\Users\<你>\.dsh\profiles\`）。
-
-> 想一次装进多个形态，就把下面命令各跑一遍，把 `--profile` 换成对应的名字。
-
-### 桌面端（最常用）
-
 ```powershell
-# 从 npm 装（推荐）：不指定 tag 就是最新稳定版
 dsh plugin --profile desktop add dsh-tiered-compaction
 ```
 
-### Web 端
+装完重启 DSH 即可，不用改配置。Web 版、命令行、TUI 把 `desktop` 换成 `web`、`headless`、`tui`。
+
+## 让四层全部生效
+
+DSH 的每个会话在创建时绑定一个预设，之后不能更换。只装插件时，所有会话都有第 1、2 层，第 3、4 层还是官方压缩。要四层全开，需要把预设换成本插件的版本：
+
+| 预设 | 怎么开启 |
+|---|---|
+| `cordis`（桌面端默认） | 安装 `tiered-cordis-preset` bundle |
+| `ptc-tc` | `tools/gen-ptc-tc.ps1 -Apply` |
+| `standard`（Bot 和群聊使用） | `tools/gen-standard-tc.ps1 -Apply` |
+| 官方 `ptc`、`minimal` | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`，`minimal` 同理 |
+
+改完之后**新开的会话**才生效，已有会话保持原样。DSH 升级后要重跑一次生成器。
+
+## 悬浮窗
+
+- 大号百分比是当前上下文占窗口的比例，右上角是实际 token 用量和距下次摘要还差多少。
+- 三张卡片分别是折叠/落盘、驱逐、摘要的次数和省下的 token。
+- 摘要进行中会显示「正在摘要… Ns」。
+- 会话空闲时，压缩要等你发下一条消息才会触发，悬浮窗会提示「下条消息时自动压缩」。
+
+设置页里有同样的信息和更详细的分层统计。
+
+## 更新和卸载
 
 ```powershell
-dsh plugin --profile web add dsh-tiered-compaction
+dsh plugin --profile desktop update dsh-tiered-compaction   # 升到最新正式版
+dsh plugin --profile desktop add dsh-tiered-compaction@beta # 装尝新版
+dsh plugin --profile desktop remove dsh-tiered-compaction   # 卸载，官方压缩自动恢复
 ```
 
-### headless（命令行 / 脚本）
+更新后要完全退出 DSH 再打开。
 
-```powershell
-dsh plugin --profile headless add dsh-tiered-compaction
-```
+## 配置
 
-### TUI（终端界面）
-
-```powershell
-dsh plugin --profile tui add dsh-tiered-compaction
-```
-
-### 本地开发（改代码即生效）
-
-想在本地改插件源码、并且改完重启就生效，用软链方式装——把路径换成你的仓库位置：
-
-```powershell
-# 桌面端为例；其它形态把 desktop 换成 web / headless / tui
-dsh plugin --profile desktop add "D:\你的路径\tiered-compaction"
-```
-
-### 装完做什么
-
-**重启 DSH 即可，无需改任何配置。**
-
-插件自带的 patch 在挂载时做两件事：停用官方 `dsh-compaction-basic`（让出 `compaction` 服务位），插入并启用本插件。存档目录默认 `~/.dsh/tiered-archive`，不存在时自动创建。
-
-装好的标志——启动日志里能看到这两行：
-
-```
-dsh-tiered-compaction 已接管 compaction 服务位（enabled=true，archiveDir=...）
-dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
-```
-
-### 更新到新版本
-
-装过一次之后，**重复执行 `add` 不会更新**——`add` 不是升级命令。pnpm 会把 git 依赖的 commit hash 写进 `pnpm-lock.yaml`，只要那条记录还在，它就认为「已满足」，直接跳过：
-
-```
-Already up to date
-```
-
-正确的升级命令是 `update`：
-
-```powershell
-# 桌面端
-dsh plugin --profile desktop update dsh-tiered-compaction
-
-# Web 端
-dsh plugin --profile web update dsh-tiered-compaction
-
-# headless / TUI 同理，只换 --profile
-```
-
-`update` 只升到 `latest`（稳定版），不会装上 beta。要装 beta，指定版本：`dsh plugin --profile desktop add dsh-tiered-compaction@beta`。
-
-**升级后必须完全退出并重启 DSH**，否则跑的还是内存里的旧代码。
-
-#### 单写者守卫（0.4.0 起，自动生效）
-
-本插件从 0.4.0 起内置**进程级单写者守卫**：同一个 DSH 进程里，无论插件被
-装配几处（比如根平面 + preset 各挂一次），只有第一个实例会真正注册观察者、
-写归档；其余实例自动降级为「纯自检服务」（不写盘），并在启动日志鸣笛：
-
-```
-dsh-tiered-compaction：单写者守卫生效——……本实例降级为不写盘的自检服务
-```
-
-看到这行说明你重复挂载了：功能无损（你的会话仍被第一个实例正常压缩），
-但建议按上文方法收敛挂载点，消除歧义。
-
-两个已知边界：
-
-- **多副本并存也受保护**：守卫用 `Symbol.for` 全局座位表，哪怕 tarball 和
-  link 目录两份代码同时被加载，也共享同一张座位表。
-- **跨进程不归它管**：同一台机器开两个 DSH 进程、共用同一个 sessions
-  目录的场景，守卫无能为力（那是宿主层面的部署话题）——请避免让多个
-  DSH 实例共享同一会话存储。
-
-守卫带有配套 tripwire 测试（`test/d24-single-writer.test.js`）：万一未来
-某个版本意外丢失守卫，`pnpm test` 会当场红灯，问题藏不住。
-
-如果 `update` 之后版本没变（多见于改过仓库名或换过安装来源），用「卸载再装」强制重新解析：
-
-```powershell
-dsh plugin --profile desktop remove dsh-tiered-compaction
-dsh plugin --profile desktop add dsh-tiered-compaction
-```
-
-怎么确认升级成功：看实际加载的版本号。
-
-```powershell
-# 桌面端；其它形态把 desktop 换成 web / headless / tui
-$base = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules"
-foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
-    $f = Join-Path $base "$name\package.json"
-    if (Test-Path $f) { "$name → $((Get-Content $f -Raw | ConvertFrom-Json).version)" }
-}
-```
-
-输出形如 `dsh-tiered-compaction → 0.4.0`，那就是当前生效的版本。
-
-> **注意**：DSH 不会主动提示有新版本。想知道有没有更新，从 npm 装的可以跑 `npm view dsh-tiered-compaction version` 对比；也可以看仓库的 [CHANGELOG](CHANGELOG.md)。
-
-### 包名必须与已装包一致（换安装来源后必读）
-
-preset 行里的 `name:` 是**包名**：宿主拿它去 `profile/node_modules` 里解析模块。名字对不上时不会明说，只会得到：
-
-```
-tiered-compaction (@local/dsh-tiered-compaction): never started
-```
-
-后面跟着该会话 resume 失败（`gateway/internal: resume failed for session ...`）。真因是模块解析不到，被 loader 吞成一句 `logger.error`。
-
-本插件自 0.2.0 起包名是 **`dsh-tiered-compaction`（无 scope）**：npm 装、tarball 装、本地 `link:` 装，落地的都是同名的 `node_modules/dsh-tiered-compaction`。**不要写 `@local/...`** —— npm 上没有这个 scope，写了必然解析不到。
-
-生成器（`tools/gen-standard-tc.*`、`tools/gen-ptc-tc.*`）已改为从已装包推导包名，并在写回后自动跑一次自检。手工改过配置、或想确认现状时：
-
-```powershell
-node tools/check-install.mjs --profile desktop
-```
-
-输出里每行都是 `✔ 包名 → 实际路径` 才算正常；出现 `✖` 就先修名字，再重启 DSH。
-
-### 卸载
-
-```powershell
-dsh plugin --profile desktop remove dsh-tiered-compaction
-```
-
-卸载后官方 `dsh-compaction-basic` **自动恢复**——因为停用它的 patch 属于本插件包，随包一起移除。重启即回到官方压缩，不需要手工改回配置。
-
-（只想临时换回官方压缩、但保留插件：把 patch 里两个开关互换即可，不过这种情况卸载更简单。）
-
-## preset 多 realm 部署（0.4.0-beta.3）
-
-多 realm 下，每个 realm 各有一份 compaction 服务，但全进程只有一份 observer。root 挂载不填 `scopeId`；preset 中每个插件条目必须填唯一且稳定的 `scopeId`，例如 `standard`、`ptc-tc` 或 `cordis`。同一个 scope 重复挂载会被拒绝，避免双写。
-
-```yaml
-# root 挂载：不设置 scopeId
-- id: tiered-compaction
-  name: dsh-tiered-compaction
-  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive }
-
-# preset realm 内挂载：scopeId 必须与 realm 对应
-- id: tiered-compaction
-  name: dsh-tiered-compaction
-  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive, scopeId: standard }
-```
-
-`tools/gen-standard-tc.*` 与 `tools/gen-ptc-tc.*` 会分别生成 `scopeId: standard` 和 `scopeId: ptc-tc`，且合并已有 config。先用 `--diff-only` 检查，再决定是否应用；不要把不同 preset 配成同一个 scope。
-
-默认 cordis preset 的替换包是独立的本地 bundle `tiered-cordis-preset`，其条目使用 `scopeId: cordis`。在 DSH Plugin Manager 中从工作区安装该 bundle；它会**整份覆盖**默认 cordis preset 插件清单，升级 DSH 后需检查同步。新建会话后生效，现有会话仍使用其创建时绑定的 preset。
-
-## 配置（全部可选）
-
-
-装完即用，以下字段仅在需要自定义时才填：
-
-```yaml
-- id: tiered-compaction
-  config:
-    enabled: true                        # 默认 true
-    auto: true                           # 默认 true；false 时不注册自动钩子
-    archiveDir: ~/.dsh/tiered-archive    # 默认值，可改
-    scopeId: standard                   # preset realm 用；root 挂载不填
-    summaryTarget:                       # 摘要用哪个模型，不填则跟随当前会话
-      provider: deepseek-official
-      model: deepseek-chat
-    modelPolicies: {}                    # 按模型覆盖阈值与重试次数
-```
+全部可选，不填就用默认值。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `enabled` | `true` | 是否接管压缩服务位 |
-| `archiveDir` | `~/.dsh/tiered-archive` | 落盘与摘要存档目录，自动创建 |
-| `auto` | `true` | 是否自动触发（压力/溢出）；设为 `false` 可关闭自动钩子 |
-| `scopeId` | 不填 | preset realm 的唯一标识；root 不填，不同 realm 不可重复 |
-| `summaryTarget` | 会话路由 | 摘要用的 provider/model |
-| `modelPolicies` | `{}` | 按模型覆盖阈值、重试次数等 |
+| `enabled` | `true` | 是否接管压缩 |
+| `auto` | `true` | 是否自动压缩；`false` 时只能手动 `/compact` |
+| `archiveDir` | `~/.dsh/tiered-archive` | 存档目录 |
+| `summaryTarget` | 跟随会话 | 摘要用的 `provider` 和 `model` |
+| `modelPolicies` | 无 | 按模型覆盖阈值和重试次数 |
+| `scopeId` | 不填 | 预设里挂载时用，生成器会自动填 |
 
-## 运行状态
+## 确认它在工作
 
-日常不需要关注。想看它是否在正常工作，在宿主日志里搜 `tiered-compaction`：
+在宿主日志里搜 `tiered-compaction 健康`：
 
 ```
-tiered-compaction 健康 window=1000000 pressure=12.7% l12=107/31repl/0fail l3=0evict spill=29 status=ok
+tiered-compaction 健康 window=262144 pressure=57.3% ... status=ok
 ```
 
-`status=ok` 即正常；出现 `status=warn` 表示自检发现了异常（窗口读数为 0、前两层有失败但零成功、压力 ≥80% 却零动作、`summaryTarget` 只配一半）。
-
-压力到 82% 左右会触发一次摘要压缩，日志里会有 `compaction/summary` 记录。
-
-## 开发
-
-```bash
-node --test test/*.test.js              # 全量用例
-node scripts/verify-e2e.mjs <会话文件>    # 端到端链路（需真实会话，验证 KV 前缀等价）
-```
-
-端到端脚本验证的是「摘要请求是否为正常对话请求的严格前缀」——相同即必然命中 provider 的 KV 缓存。会话文件在 `~/.dsh/sessions/<工作区>/<会话ID>/session.v4.jsonl.zstd`。
+`status=ok` 表示正常，`status=warn` 后面会写明发现了什么问题。
 
 ## 已知限制
 
-- **宿主版本绑定**：契约层对齐 DSH 0.2.x 的 `CompactionEngine` 接口，宿主大版本升级后需重新核对方法面。
-- **只处理纯文本工具结果**：含图片或附件的富块一律跳过，避免破坏结构。
-- **压力读数依赖 `request/context` 事件**：部分 provider 不吐该事件，缺失时压力判定退回保守路径。
-- **落盘预览是固定预算**：预览 5120 字符（头尾 4:1）。超大输出必然有信息损失——原文完整保存在存档里，随上下文给出路径与 SHA-256，可随时回读。
+- 含图片或附件的工具结果不处理。
+- 落盘预览固定 5120 字符，完整原文在存档里。
+- 按 DSH 0.2.x 的压缩接口实现，DSH 大版本升级后需要重新核对。
 
-## 文档
+## 更多文档
 
-| 文档 | 内容 |
-|---|---|
-| [docs/架构与设计理念.md](docs/架构与设计理念.md) | 架构总览、设计取舍、降级设计、已知边界 |
-| [架构图](docs/架构图.html) | 四层管线交互式图（浏览器打开） |
-| [docs/第1层-无损折叠.md](docs/第1层-无损折叠.md) | 折叠算法、逆变换、可逆性保证 |
-| [docs/第2层-落盘.md](docs/第2层-落盘.md) | 存档、预览预算、SHA-256 校验 |
-| [docs/第3层-软压力.md](docs/第3层-软压力.md) | 提醒与驱逐的优先级规则 |
-| [docs/第4层-有损摘要.md](docs/第4层-有损摘要.md) | 摘要输入结构、KV 缓存复用、预算预留 |
-| [docs/数据结构.md](docs/数据结构.md) | 事件、谱系表、存档记录 |
+- [架构与设计理念](docs/架构与设计理念.md)，[架构图](docs/架构图.html)
+- 各层细节：[第 1 层](docs/第1层-无损折叠.md)、[第 2 层](docs/第2层-落盘.md)、[第 3 层](docs/第3层-软压力.md)、[第 4 层](docs/第4层-有损摘要.md)
+- [更新记录](CHANGELOG.md)
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+MIT

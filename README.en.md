@@ -1,287 +1,99 @@
-English | [![简体中文](https://img.shields.io/badge/docs-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-blue)](README.md)
-
+[简体中文](README.md) | **English**
 
 # tiered-compaction
 
-**DSH tiered context compaction plugin** — replaces a single summarization with a four-tier progressive pipeline.
+A tiered context compaction plugin for DSH. The first three tiers make no LLM calls; a summary runs only when pressure actually reaches the threshold.
 
-DSH's default compaction, once the context reaches the threshold, makes one LLM summarization call and replaces the whole history with it. Simple, but the costs are clear: every compaction is a full LLM call; the summary is constrained by the output token cap; the middle of long content is lost first.
+![HUD preview](https://raw.githubusercontent.com/2849236173/tiered-compaction/main/docs/images/hud.png)
 
-This plugin splits compaction into four tiers. The first three tiers consume most of the volume at zero LLM cost; only when the threshold is actually reached does it spend one budget-reserved summarization.
+Current stable release: **0.4.1**
 
-**Current stable release: 0.4.0 (stable).** All automated tests pass and the new HUD has been accepted in the real desktop app. The npm `latest` tag points to this version; install it directly.
+## What it does
 
-**Current beta: 0.4.1-beta.1 (beta, not fully tested)** — fixes the HUD falsely reporting "auto compaction not running" while the session is idle. Install with `dsh-tiered-compaction@beta`.
-
-## Four-tier pipeline
-
-| Tier | What it does | Cost |
+| Tier | How | Cost |
 |---|---|---|
-| **1 · Lossless folding** | Consecutive duplicate lines (≥3 times) are folded into "first line + `…[folded Nx]`", with an inverse transform record attached | Zero LLM |
-| **2 · Spill to disk** | Tool output over 8KB (UTF-8 bytes) is archived in full; the context keeps only head/tail previews + path + SHA-256 | Zero LLM |
-| **3 · Soft pressure** | Reminder inserted at 70% window; at 80%, replayable content is evicted by priority | Zero LLM |
-| **4 · Lossy summarization** | LLM summarization only at the threshold, with budget reserved in advance and a full archive before summarizing | 1 LLM call |
+| 1 · Fold | Lines repeated 3 or more times in a row collapse into one | No LLM |
+| 2 · Spill | Tool output over 8 KB goes to disk; the context keeps a preview and the path | No LLM |
+| 3 · Evict | At 70% pressure, a reminder; at 80%, old re-runnable tool results are removed | No LLM |
+| 4 · Summarize | At the threshold (about 82%), the LLM summarizes older history | 1 LLM call |
 
-There is also a **bypass**: goal-switch cleanup — when a new goal is explicitly declared, the old goal's todo/goal/plan are packed into a structured capsule and process content is archived, at zero LLM cost.
+Nothing is lost for good: spilled output and pre-summary history are archived in `~/.dsh/tiered-archive` and can be read back with the `tiered_restore` tool. Evicted tool results come back by re-running the original command.
 
-## Why lossy operations are safe here
-
-Three constraints run through all tiers:
-
-1. **Every tier keeps a recovery mechanism** — folding has an inverse transform record; spilling has SHA-256 and the full file; evicted items record their original location (a rerun of `read`/`grep`/`glob` restores them); a full archive is made before summarization.
-2. **Superseded references are recorded in the lineage table** — whenever content is superseded, an entry "original location → new location → superseder" is registered, auditable and traceable, never silently deleted.
-3. **The plugin itself has a circuit breaker and an arbiter** — a tier that fails consecutively is automatically degraded, skipped, and warned about without blocking the main flow; the arbiter guarantees each piece of content is handled by exactly one tier.
-
-## Which preset to use
-
-Each DSH session binds to one agent preset when it is created and keeps it. The compaction service lives inside the preset, so **whether all four tiers run depends on the session's preset**:
-
-| Preset | Tiers 1-2 (fold, spill) | Tiers 3-4 (evict, summary) | How to get it |
-|---|---|---|---|
-| `cordis` (desktop default) | ✅ | ✅ | Install the `tiered-cordis-preset` bundle |
-| `ptc-tc` | ✅ | ✅ | `tools/gen-ptc-tc.ps1 -Apply` |
-| `standard` (always used by Bot and group sessions) | ✅ | ✅ | `tools/gen-standard-tc.ps1 -Apply` |
-| Official `ptc`, `minimal` | ✅ | ✅ from 0.4.0-beta.8 | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`, `-Preset minimal -Apply` |
-| Any other preset not overridden | ✅ | ❌ (official compaction) | — |
-
-**Recommended**: pick `cordis` or `ptc-tc` for new sessions. After all the generators have run, every built-in preset gets all four tiers. Each generator edits only its own marked block in the profile patch; delete the block to restore the official preset. Existing sessions bound to an official preset before the override do not gain tiers 3-4; start a new session.
-
-## Installation
-
-The plugin is pure ESM + JSDoc with no build chain, shipped straight from `src/` — no compilation needed before install.
-
-Install from npm (clear version numbers, and `update` upgrades to the latest stable version).
-
-### First, confirm which profile you use
-
-Each DSH runtime mode corresponds to one profile name; installing into a profile makes it take effect only in that mode. **Whichever way you normally start DSH, that is the name to use**:
-
-| How you use DSH | Profile name | Copy this command |
-|---|---|---|
-| Desktop client (Windows/macOS app) | `desktop` | See desktop below |
-| Web version opened in a browser | `web` | See Web below |
-| Command line / script invocation (headless) | `headless` | See headless below |
-| Terminal interactive interface (TUI) | `tui` | See TUI below |
-
-Not sure which profiles you have: look at the folder names under `~/.dsh/profiles/` (on Windows, `C:\Users\<you>\.dsh\profiles\`).
-
-> To install into several modes at once, run each of the commands below once per mode, replacing `--profile` with the corresponding name.
-
-### Desktop (most common)
+## Install
 
 ```powershell
-# Install from npm (recommended): no tag specified means the latest stable version
 dsh plugin --profile desktop add dsh-tiered-compaction
 ```
 
-### Web
+Restart DSH. No configuration needed. For the web app, CLI, or TUI, replace `desktop` with `web`, `headless`, or `tui`.
 
-```powershell
-dsh plugin --profile web add dsh-tiered-compaction
-```
+## Enable all four tiers
 
-### headless (command line / scripts)
+Each DSH session binds to a preset when it is created and keeps it. With the plugin alone, every session gets tiers 1 and 2, while tiers 3 and 4 stay with the official compaction. To get all four, switch the preset to this plugin's version:
 
-```powershell
-dsh plugin --profile headless add dsh-tiered-compaction
-```
-
-### TUI (terminal interface)
-
-```powershell
-dsh plugin --profile tui add dsh-tiered-compaction
-```
-
-### Local development (code changes take effect immediately)
-
-To modify the plugin source locally and have changes take effect after a restart, install via a symlink — replace the path with your repository location:
-
-```powershell
-# Desktop as an example; for other modes replace desktop with web / headless / tui
-dsh plugin --profile desktop add "D:\你的路径\tiered-compaction"
-```
-
-**Just restart DSH — no configuration changes needed.**
-
-The plugin's bundled patch does two things at mount time: disable the official `dsh-compaction-basic` (yielding the `compaction` service slot), and insert and enable this plugin. The archive directory defaults to `~/.dsh/tiered-archive` and is created automatically if it does not exist.
-
-Signs of a successful install — these two lines appear in the startup log:
-
-```
-dsh-tiered-compaction 已接管 compaction 服务位（enabled=true，archiveDir=...）
-dsh-tiered-compaction 观察者已注册（工具结果 → 第 1-2 层）
-```
-
-### Updating to a new version
-
-After the first install, **running `add` again does not update** — `add` is not an upgrade command. pnpm writes the git dependency's commit hash into `pnpm-lock.yaml`; as long as that record exists, it considers the requirement "satisfied" and skips directly:
-
-```
-Already up to date
-```
-
-The correct upgrade command is `update`:
-
-```powershell
-# Desktop
-dsh plugin --profile desktop update dsh-tiered-compaction
-
-# Web
-dsh plugin --profile web update dsh-tiered-compaction
-
-# headless / TUI work the same way, only replace --profile
-```
-
-`update` only upgrades to `latest` (stable) and never installs a beta. To install a beta, name it: `dsh plugin --profile desktop add dsh-tiered-compaction@beta`.
-
-**After upgrading you must fully exit and restart DSH**, otherwise the old code still in memory keeps running.
-
-#### Single-writer guard (since 0.4.0, automatic)
-
-Since 0.4.0 this plugin ships a **process-level single-writer guard**: no
-matter how many places the plugin gets mounted in one DSH process (e.g. root
-plane plus a preset), only the first instance registers observers and writes
-archives; every later instance demotes itself to a passive self-check service
-(no disk writes) and logs:
-
-```
-dsh-tiered-compaction: single-writer guard active — ... demoted to passive self-check
-```
-
-Seeing that line means you double-mounted: functionality is unaffected (your
-sessions are still compacted by the first instance), but you should collapse
-the mounts as described above to remove ambiguity.
-
-Two known boundaries:
-
-- **Duplicate copies are still protected**: the guard uses a `Symbol.for`
-  global seat table, so even a tarball copy and a linked checkout loading
-  simultaneously share one registry.
-- **Cross-process is out of scope**: running two DSH processes on one machine
-  sharing one sessions directory is beyond this guard (that is host-level
-  deployment territory) — do not share one session store across DSH instances.
-
-The guard ships with a companion tripwire test (`test/d24-single-writer.test.js`):
-should a future release accidentally lose the guard, `pnpm test` fails loudly.
-
-If the version did not change after `update` (common when the repository was renamed or the install source was switched), force a re-resolution with "uninstall then install":
-
-```powershell
-dsh plugin --profile desktop remove dsh-tiered-compaction
-dsh plugin --profile desktop add dsh-tiered-compaction
-```
-
-How to confirm the upgrade succeeded: check the version actually loaded.
-
-```powershell
-# Desktop; for other modes replace desktop with web / headless / tui
-$base = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules"
-foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
-    $f = Join-Path $base "$name\package.json"
-    if (Test-Path $f) { "$name → $((Get-Content $f -Raw | ConvertFrom-Json).version)" }
-}
-```
-
-Output like `dsh-tiered-compaction → 0.4.0` means that is the currently active version.
-
-> **Note**: DSH does not proactively notify you of new versions. To find out whether an update exists, if you installed from npm you can run `npm view dsh-tiered-compaction version` and compare; you can also check the repository's [CHANGELOG](CHANGELOG.md).
-
-### Uninstall
-
-```powershell
-dsh plugin --profile desktop remove dsh-tiered-compaction
-```
-
-After uninstalling, the official `dsh-compaction-basic` **is restored automatically** — the patch that disabled it belongs to this plugin package and is removed along with it. A restart returns you to the official compaction; no manual config rollback needed.
-
-(If you only want to switch back to the official compaction temporarily while keeping the plugin: swap the two switches in the patch — though in that case uninstalling is simpler.)
-
-## Multi-realm preset deployment (0.4.0-beta.3)
-
-In a multi-realm setup, each realm has its own compaction service while the process has only one observer. Leave `scopeId` unset for the root mount; every preset entry must use a unique, stable `scopeId`, such as `standard`, `ptc-tc`, or `cordis`. A duplicate scope is rejected to prevent double writes.
-
-```yaml
-# Root mount: no scopeId
-- id: tiered-compaction
-  name: dsh-tiered-compaction
-  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive }
-
-# Preset realm mount: scopeId identifies the realm
-- id: tiered-compaction
-  name: dsh-tiered-compaction
-  config: { enabled: true, archiveDir: ~/.dsh/tiered-archive, scopeId: standard }
-```
-
-`tools/gen-standard-tc.*` and `tools/gen-ptc-tc.*` emit `scopeId: standard` and `scopeId: ptc-tc`, and merge existing config. Run `--diff-only` first; do not use the same scope for different presets.
-
-The default cordis preset replacement is the separate local `tiered-cordis-preset` bundle, whose entry uses `scopeId: cordis`. Install that bundle through DSH Plugin Manager from the workspace. It **replaces the entire** default cordis preset plugin list, so review and synchronize it after DSH upgrades. It takes effect for new sessions; existing sessions keep the preset bound when they were created.
-
-## Configuration (all optional)
-
-Works immediately after install; the fields below only need to be filled in when customization is required:
-
-```yaml
-- id: tiered-compaction
-  config:
-    enabled: true                        # Default true
-    auto: true                           # Default true; false disables automatic hooks
-    archiveDir: ~/.dsh/tiered-archive    # Default value, editable
-    scopeId: standard                    # For a preset realm; omit for root
-    summaryTarget:                       # Model used for summarization; if empty, follows the current session
-      provider: deepseek-official
-      model: deepseek-chat
-    modelPolicies: {}                    # Per-model overrides of thresholds and retry counts
-```
-
-| Field | Default | Description |
-|---|---|---|
-| `enabled` | `true` | Whether to take over the compaction service slot |
-| `archiveDir` | `~/.dsh/tiered-archive` | Directory for spill and summary archives, created automatically |
-| `auto` | `true` | Whether to trigger automatically (pressure / overflow); `false` disables automatic hooks |
-| `scopeId` | unset | Unique preset-realm identifier; omit for root and do not reuse across realms |
-| `summaryTarget` | Session routing | provider/model used for summarization |
-| `modelPolicies` | `{}` | Per-model overrides of thresholds, retry counts, etc. |
-
-## Runtime status
-
-No need to watch it day to day. To check whether it is working normally, search the host log for `tiered-compaction`:
-
-```
-tiered-compaction 健康 window=1000000 pressure=12.7% l12=107/31repl/0fail l3=0evict spill=29 status=ok
-```
-
-`status=ok` means normal; `status=warn` means the self-check found an anomaly (window reading is 0, the first two tiers have failures with zero successes, pressure ≥80% with zero action, or `summaryTarget` configured only halfway).
-
-At around 82% pressure a summary compaction is triggered, and a `compaction/summary` record appears in the log.
-
-## Development
-
-```bash
-node --test test/*.test.js              # Full test suite
-node scripts/verify-e2e.mjs <会话文件>    # End-to-end pipeline (requires a real session; verifies KV prefix equivalence)
-```
-
-The end-to-end script verifies "whether the summary request is a strict prefix of a normal conversation request" — if identical, it is guaranteed to hit the provider's KV cache. Session files are at `~/.dsh/sessions/<workspace>/<sessionID>/session.v4.jsonl.zstd`.
-
-## Known limitations
-
-- **Host version binding**: the contract layer aligns with DSH 0.2.x's `CompactionEngine` interface; after a host major version upgrade, the method surface must be re-verified.
-- **Handles plain-text tool results only**: rich blocks containing images or attachments are always skipped, to avoid breaking structure.
-- **Pressure reading depends on the `request/context` event**: some providers do not emit this event; when missing, pressure determination falls back to a conservative path.
-- **The spill preview has a fixed budget**: the preview is 5120 characters (head/tail 4:1). Very large output necessarily loses information — the original is fully preserved in the archive, with its path and SHA-256 given alongside the context, so it can be read back at any time.
-
-## Documentation
-
-| Document | Content |
+| Preset | How |
 |---|---|
-| [docs/架构与设计理念.md](architecture.md) | Architecture overview, design trade-offs, degradation design, known boundaries |
-| [架构图](docs/架构图.html) | Interactive diagram of the four-tier pipeline (open in a browser) |
-| [docs/第1层-无损折叠.md](docs/第1层-无损折叠.md) | Folding algorithm, inverse transform, reversibility guarantee |
-| [docs/第2层-落盘.md](docs/第2层-落盘.md) | Archiving, preview budget, SHA-256 verification |
-| [docs/第3层-软压力.md](docs/第3层-软压力.md) | Priority rules for reminders and eviction |
-| [docs/第4层-有损摘要.md](docs/第4层-有损摘要.md) | Summary input structure, KV cache reuse, budget reservation |
-| [docs/数据结构.md](data-structures.md) | Events, lineage table, archive records |
+| `cordis` (desktop default) | Install the `tiered-cordis-preset` bundle |
+| `ptc-tc` | `tools/gen-ptc-tc.ps1 -Apply` |
+| `standard` (used by Bots and group chats) | `tools/gen-standard-tc.ps1 -Apply` |
+| Official `ptc`, `minimal` | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`, same for `minimal` |
+
+Only **new sessions** pick up the change; existing sessions keep their preset. Re-run the generators after upgrading DSH.
+
+## HUD
+
+- The large percentage is how much of the window the context uses. Top right shows the actual token count and how far the next summary is.
+- The three cards count fold/spill, eviction, and summary runs, with the tokens each saved.
+- While a summary runs, the HUD shows "Summarizing… Ns".
+- When the session is idle, compaction waits for your next message, and the HUD says so.
+
+The settings page shows the same information plus per-tier statistics.
+
+## Update and uninstall
+
+```powershell
+dsh plugin --profile desktop update dsh-tiered-compaction   # latest stable
+dsh plugin --profile desktop add dsh-tiered-compaction@beta # beta
+dsh plugin --profile desktop remove dsh-tiered-compaction   # uninstall; official compaction comes back
+```
+
+Fully quit and reopen DSH after updating.
+
+## Configuration
+
+All optional.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Take over compaction |
+| `auto` | `true` | Compact automatically; with `false`, only manual `/compact` |
+| `archiveDir` | `~/.dsh/tiered-archive` | Archive directory |
+| `summaryTarget` | Session's model | `provider` and `model` used for summaries |
+| `modelPolicies` | none | Per-model threshold and retry overrides |
+| `scopeId` | unset | Used when mounted inside a preset; the generators fill it in |
+
+## Check that it works
+
+Search the host log for `tiered-compaction 健康`:
+
+```
+tiered-compaction 健康 window=262144 pressure=57.3% ... status=ok
+```
+
+`status=ok` means healthy. `status=warn` is followed by what went wrong.
+
+## Known limits
+
+- Tool results containing images or attachments are left alone.
+- Spill previews are fixed at 5120 characters; the full text is in the archive.
+- Built against the DSH 0.2.x compaction interface; recheck after a major DSH upgrade.
+
+## More
+
+- [Architecture](docs/architecture.md)
+- Tier details: [1](docs/tier1-lossless-folding.md), [2](docs/tier2-spill-to-disk.md), [3](docs/tier3-soft-pressure.md), [4](docs/tier4-lossy-summarization.md)
+- [Changelog](CHANGELOG.en.md)
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT
