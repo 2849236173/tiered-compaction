@@ -6,6 +6,17 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.11] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — fixes `<style>` removal during host hot-replacement that stripped all HUD styles and animations, and upgrades the token usage bar with an aurora gradient, mirror shimmer, and leading spark orb. Not yet fully verified in the real desktop app.
+
+### Fixed
+
+- **Missing styles and animations after host hot-reload**: `ensureUiStyles()` is now called idempotently in `factory`, `OverlayHud`, and `StatusPanel` so `<style>` is immediately restored if `removeOwnedStyles` removes it.
+
+### Changed
+
+- **Aurora token progress bar and lighting effects**: added a flowing multi-stop aurora gradient, mirror shimmer sweep, and pulsing leading spark orb to the token bar, plus a top aurora accent line on the HUD and cards.
 ## [0.4.0-beta.10] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested)** — refines the HUD surface material, unified three-column stats well, and progress-bar shimmer animations, and fixes hot-reload style updates. Not yet fully verified in the real desktop app.
