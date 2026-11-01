@@ -6,6 +6,16 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.12] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — HUD typography and motion polish. Not yet fully verified in the real desktop app.
+
+### Changed
+
+- **Typography**: Segoe UI Variable / Segoe UI with Microsoft YaHei UI fallback, `font-synthesis: none`, only real 400/600/700 weights, minimum size raised from 10px to 11px.
+- **Color**: the large percentage is now flowing gradient text tinted by tier; card numbers use the Display face.
+- **Motion**: percentage and card counts pop in when they change; a mouse-following spotlight on the HUD; removed root `overflow: hidden` so bar glow is no longer clipped.
+
 ## [0.4.0-beta.11] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested)** — fixes `<style>` removal during host hot-replacement that stripped all HUD styles and animations, and upgrades the token usage bar with an aurora gradient, mirror shimmer, and leading spark orb. Not yet fully verified in the real desktop app.

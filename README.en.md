@@ -9,7 +9,7 @@ DSH's default compaction, once the context reaches the threshold, makes one LLM 
 
 This plugin splits compaction into four tiers. The first three tiers consume most of the volume at zero LLM cost; only when the threshold is actually reached does it spend one budget-reserved summarization.
 
-**Current preview: 0.4.0-beta.11 (beta / preview, not fully tested).** Automated tests pass. This release only restyles the HUD; the new style, plus the beta.8 count backfill and official ptc / minimal preset overrides, have not been fully verified in the real desktop app. Keep session backups before trying it.
+**Current preview: 0.4.0-beta.12 (beta / preview, not fully tested).** Automated tests pass. This release only restyles the HUD; the new style, plus the beta.8 count backfill and official ptc / minimal preset overrides, have not been fully verified in the real desktop app. Keep session backups before trying it.
 
 > This is not a stable release. If you need a stable version, defer upgrading.
 
