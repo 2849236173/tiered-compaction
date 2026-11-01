@@ -48,7 +48,7 @@ const STRINGS = Object.freeze({
         l4Summaries: "有损摘要",
         foldShort: "折叠",
         foldSpillShort: "折叠/落盘",
-        chipSaved: " · 省 {value}",
+        chipSaved: "省 {value}",
         spillShort: "落盘",
         evictShort: "驱逐",
         summaryShort: "摘要",
@@ -65,8 +65,8 @@ const STRINGS = Object.freeze({
         pressurePrefix: "压力",
         hudCloseTitle: "关闭悬浮窗",
         combinedCharsSaved: "折叠+落盘合计（字符）省 ~{value}",
-        toSummary: " · 距摘要 ≈ {value}",
-        summaryDue: " · 已到摘要线",
+        toSummary: "距摘要 ≈ {value}",
+        summaryDue: "已到摘要线",
         hudFooterSaved: "共省 ≈ {value}",
         hudFooterLast: "上次摘要 {ago}",
         agoMinutes: "{n} 分钟前",
@@ -112,7 +112,7 @@ const STRINGS = Object.freeze({
         l4Summaries: "Lossy summary",
         foldShort: "Fold",
         foldSpillShort: "Fold/spill",
-        chipSaved: " · saved {value}",
+        chipSaved: "saved {value}",
         spillShort: "Spill",
         evictShort: "Evict",
         summaryShort: "Summary",
@@ -129,8 +129,8 @@ const STRINGS = Object.freeze({
         pressurePrefix: "Pressure",
         hudCloseTitle: "Close HUD",
         combinedCharsSaved: "Fold + spill combined (chars) ~{value} saved",
-        toSummary: " · ≈ {value} to summary",
-        summaryDue: " · at summary line",
+        toSummary: "≈ {value} to summary",
+        summaryDue: "at summary line",
         hudFooterSaved: "Saved ≈ {value}",
         hudFooterLast: "last summary {ago}",
         agoMinutes: "{n} min ago",
@@ -394,14 +394,15 @@ const HUD_BASE_STYLE = {
     position: "fixed",
     zIndex: OVERLAY_Z_INDEX,
     display: "block",
-    width: "min(224px, calc(100vw - 24px))",
+    width: "min(232px, calc(100vw - 24px))",
     minWidth: "0",
-    padding: "10px 11px",
-    border: ".5px solid var(--dsw-alias-border-l2, #e2e6ea)",
-    borderRadius: "12px",
+    padding: "11px 12px",
+    border: "1px solid var(--dsw-alias-border-l2, #e2e6ea)",
+    borderRadius: "13px",
     color: "var(--dsw-alias-label-primary, #1f2328)",
     backgroundColor: "var(--dsw-alias-bg-module-platform, rgba(255, 255, 255, .96))",
-    boxShadow: "0 8px 28px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 18%, transparent)",
+    boxShadow: "0 10px 28px -4px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 14%, transparent), 0 2px 6px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 6%, transparent)",
+    backdropFilter: "blur(16px) saturate(1.4)",
     cursor: "move",
     userSelect: "none",
     touchAction: "none",
@@ -414,6 +415,7 @@ const HUD_DOT_STYLE = {
     height: "7px",
     borderRadius: "50%",
     backgroundColor: "var(--dsh-tiered-tone, var(--dsw-alias-label-tertiary, #7a8591))",
+    boxShadow: "0 0 0 2.5px color-mix(in srgb, var(--dsh-tiered-tone, var(--dsw-alias-label-tertiary, #7a8591)) 20%, transparent)",
 };
 
 /** HUD 文本允许收缩，避免英文长词撑破窗口。 */
@@ -466,8 +468,8 @@ const HUD_CHIPS = [
 
 /** HUD 拖动边距和估算尺寸：实际宽度由 CSS 限制，足以做安全边界校正。 */
 const HUD_EDGE_GAP = 12;
-const HUD_ESTIMATED_WIDTH = 224;
-const HUD_ESTIMATED_HEIGHT = 110;
+const HUD_ESTIMATED_WIDTH = 232;
+const HUD_ESTIMATED_HEIGHT = 150;
 
 /** 将 HUD 坐标限制在视口内；测试桩没有视口尺寸时保持原值。 */
 function clampHudPosition(left, top) {
@@ -486,14 +488,19 @@ function clampHudPosition(left, top) {
 /** 关闭按钮：贴右，无边框，保持 HUD 的紧凑观感。 */
 const HUD_CLOSE_STYLE = {
     flex: "0 0 auto",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "18px",
+    height: "18px",
     marginLeft: "auto",
-    padding: "2px 5px",
+    padding: "0",
     border: "0",
-    borderRadius: "6px",
+    borderRadius: "5px",
     background: "transparent",
-    color: "inherit",
+    color: "var(--dsw-alias-label-tertiary, #7a8591)",
     cursor: "pointer",
-    fontSize: "15px",
+    fontSize: "14px",
     lineHeight: "1",
 };
 
@@ -541,21 +548,32 @@ const UI_CSS = `
 .dsh-tiered-compaction__stat-value { margin-top: 7px; color: var(--dsw-alias-label-primary, #1f2328); font-size: 22px; font-weight: 650; letter-spacing: -.02em; line-height: 1; }
 .dsh-tiered-compaction__stat-note { min-height: 17px; margin-top: 7px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; overflow-wrap: anywhere; }
 .dsh-tiered-compaction__empty { display: flex; align-items: center; gap: 9px; padding: 14px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 11px; color: var(--dsw-alias-label-tertiary, #7a8591); background: var(--dsw-alias-bg-module-platform, #fff); font-size: 12px; }
-.dsh-tiered-compaction__hud { width: min(224px, calc(100vw - 24px)); min-width: 0; padding: 10px 11px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 12px; color: var(--dsw-alias-label-primary, #1f2328); background: var(--dsw-alias-bg-module-platform, rgba(255,255,255,.96)); box-shadow: 0 8px 28px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 18%, transparent); cursor: move; user-select: none; touch-action: none; }
-.dsh-tiered-compaction__hud-head { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 8px; }
-.dsh-tiered-compaction__hud-title { min-width: 0; color: var(--dsw-alias-label-secondary, #58636e); font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-tiered-compaction__hud { width: min(232px, calc(100vw - 24px)); min-width: 0; padding: 11px 12px; border: 1px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 13px; color: var(--dsw-alias-label-primary, #1f2328); background: var(--dsw-alias-bg-module-platform, rgba(255,255,255,.96)); box-shadow: 0 10px 28px -4px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 14%, transparent), 0 2px 6px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 6%, transparent); backdrop-filter: blur(16px) saturate(1.4); -webkit-backdrop-filter: blur(16px) saturate(1.4); cursor: move; user-select: none; touch-action: none; }
+.dsh-tiered-compaction__hud-head { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 9px; }
+.dsh-tiered-compaction__hud-title { min-width: 0; color: var(--dsw-alias-label-secondary, #525c68); font-size: 11px; font-weight: 600; letter-spacing: -.01em; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-tiered-compaction__hud-status { min-width: 0; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-tiered-compaction__hud:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 2px; }
 .dsh-tiered-compaction__hud button:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 1px; }
-.dsh-tiered-compaction__hud .dsh-tiered-compaction__legend { margin-top: 3px; }
-.dsh-tiered-compaction__hud-btn { flex: 0 0 auto; padding: 2px 5px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
-.dsh-tiered-compaction__hud-btn:hover { background: var(--dsw-alias-fill-tertiary, rgba(31, 35, 40, .08)); }
-.dsh-tiered-compaction__hud-usage { margin-top: 4px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; font-variant-numeric: tabular-nums; }
-.dsh-tiered-compaction__chips { display: flex; flex-direction: column; gap: 2px; margin-top: 7px; }
-.dsh-tiered-compaction__chip { display: flex; align-items: baseline; min-width: 0; padding: 1px 2px; border-radius: 5px; color: var(--dsw-alias-label-secondary, #58636e); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dsh-tiered-compaction__chip b { flex: 0 0 4.5em; color: var(--dsw-alias-label-tertiary, #7a8591); font-weight: 600; margin-right: 6px; }
-.dsh-tiered-compaction__chip-saved { color: var(--dsw-alias-label-tertiary, #7a8591); }
-.dsh-tiered-compaction__hud-footer { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track { height: 10px !important; margin-top: 0 !important; margin-bottom: 0 !important; background: transparent !important; border-radius: 0 !important; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track-fill { top: 2px !important; height: 6px !important; border-radius: 999px !important; background: var(--dsw-alias-fill-tertiary, color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 9%, transparent)) !important; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-fill { top: 2px !important; height: 6px !important; border-radius: 999px !important; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track > div[title] { top: .5px !important; height: 9px !important; width: 1.5px !important; transform: translateX(-50%) !important; border-radius: 1px !important; background: color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 42%, var(--dsw-alias-bg-module-platform, #ffffff)) !important; box-shadow: 0 0 0 1px var(--dsw-alias-bg-module-platform, rgba(255, 255, 255, .92)) !important; z-index: 2; }
+.dsh-tiered-compaction__hud-btn { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-tertiary, #7a8591); cursor: pointer; font-size: 14px; line-height: 1; transition: background-color .15s ease, color .15s ease; }
+.dsh-tiered-compaction__hud-btn:hover { background: var(--dsw-alias-fill-tertiary, rgba(31, 35, 40, .08)) !important; color: var(--dsw-alias-label-primary, #1f2328) !important; }
+.dsh-tiered-compaction__hud-hero { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; margin-bottom: 7px; }
+.dsh-tiered-compaction__hud-pct { flex: 0 0 auto; font-size: 27px; font-weight: 700; letter-spacing: -.04em; line-height: 1; font-variant-numeric: tabular-nums; }
+.dsh-tiered-compaction__hud-usage { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10.5px; line-height: 1.2; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dsh-tiered-compaction__hud-tokens { color: var(--dsw-alias-label-secondary, #525c68); font-weight: 550; }
+.dsh-tiered-compaction__hud-to-summary { color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; }
+.dsh-tiered-compaction__hud-due { color: var(--dsh-tiered-tone, inherit); font-weight: 600; font-size: 10px; }
+.dsh-tiered-compaction__chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 8px; }
+.dsh-tiered-compaction__chip { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 6px 7px; border: 1px solid color-mix(in srgb, var(--dsw-alias-border-l2, #e2e6ea) 70%, transparent); border-radius: 8px; background: var(--dsw-alias-fill-quaternary, color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 3%, transparent)); color: var(--dsw-alias-label-primary, #1f2328); font-size: 14.5px; font-weight: 680; letter-spacing: -.02em; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+.dsh-tiered-compaction__chip b { color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; font-weight: 500; letter-spacing: 0; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__chip-saved { color: color-mix(in srgb, var(--dsw-alias-label-secondary, #58636e) 82%, var(--dsw-alias-state-business-primary, #176b61)); font-size: 10px; font-weight: 500; letter-spacing: 0; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__hud-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid color-mix(in srgb, var(--dsw-alias-border-l2, #e2e6ea) 70%, transparent); color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; line-height: 1.25; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__hud-footer-saved { color: var(--dsw-alias-label-secondary, #525c68); font-weight: 550; }
+.dsh-tiered-compaction__hud-footer-sep { width: 0; font-size: 0; opacity: 0; overflow: hidden; }
+.dsh-tiered-compaction__hud-footer-last { margin-left: auto; color: var(--dsw-alias-label-tertiary, #7a8591); overflow: hidden; text-overflow: ellipsis; }
 .dsh-tiered-compaction__chip--bump { animation: dsh-tiered-compaction-bump 1.2s ease-out; }
 @keyframes dsh-tiered-compaction-bump { 0% { background: color-mix(in srgb, var(--dsh-tiered-tone, #2f9e44) 35%, transparent); border-color: var(--dsh-tiered-tone, #2f9e44); } 100% { background: transparent; } }
 .dsh-tiered-compaction__alert { margin-top: 7px; padding: 5px 7px; border-radius: 7px; color: var(--dsw-alias-state-warning-primary, #b35c00); background: var(--dsw-alias-state-warning-tertiary, color-mix(in srgb, #f0a020 14%, transparent)); font-size: 11px; line-height: 1.4; }
@@ -1717,6 +1735,36 @@ window.__ModuleLoader__.load({
                     : { ...BAR_FILL_STYLE, width: "0%" };
 
             const markNodes = PRESSURE_MARKS.map((mark) => renderPressureMark(mark, t));
+            // beta9：HUD 紧凑版把大号压力值放在条上方，右侧挂用量（options.aside）
+            if (options.compact) {
+                return h(
+                    "div",
+                    { key: "pressure-bar", className: "dsh-tiered-compaction__bar", "data-testid": "pressure-bar" },
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__hud-hero" },
+                        h(
+                            "span",
+                            { key: "pressure-value", "data-testid": "pressure-inline-value", className: "dsh-tiered-compaction__hud-pct", style: { color: options.valueColor } },
+                            valueText,
+                        ),
+                        options.aside ?? null,
+                    ),
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__bar-track", style: BAR_STYLE },
+                        h("div", { className: "dsh-tiered-compaction__bar-track-fill", style: BAR_TRACK_STYLE }),
+                        h("div", {
+                            className: options.pulse === true
+                                ? "dsh-tiered-compaction__bar-fill dsh-tiered-compaction__bar-fill--pulse"
+                                : "dsh-tiered-compaction__bar-fill",
+                            "data-testid": "pressure-fill",
+                            style: fillStyle,
+                        }),
+                        markNodes,
+                    ),
+                );
+            }
             return h(
                 "div",
                 { key: "pressure-bar", className: "dsh-tiered-compaction__bar", "data-testid": "pressure-bar" },
@@ -2009,7 +2057,10 @@ window.__ModuleLoader__.load({
                         style: { ...HUD_DOT_STYLE, backgroundColor: tone.color },
                     }),
                     h("span", { className: "dsh-tiered-compaction__hud-title" }, tOf(t, PANEL_TITLE_KEY)),
-                    h("span", { className: "dsh-tiered-compaction__hud-status" }, statusText),
+                    // beta9：状态正常时不占标题栏，只在读取中/不可用/非 ok 时显示
+                    snapshot.phase === PHASE_READY && snapshot.status === "ok"
+                        ? null
+                        : h("span", { key: "status", className: "dsh-tiered-compaction__hud-status" }, statusText),
                     h(
                         "button",
                         {
@@ -2019,7 +2070,7 @@ window.__ModuleLoader__.load({
                             className: "dsh-tiered-compaction__hud-btn",
                             "aria-label": tOf(t, "hudCollapseTitle"),
                             title: tOf(t, "hudCollapseTitle"),
-                            style: { ...HUD_CLOSE_STYLE, marginLeft: "auto", fontSize: "13px" },
+                            style: { ...HUD_CLOSE_STYLE, marginLeft: "auto", fontSize: "13px", paddingBottom: "2px" },
                             onClick: () => updateHud({ collapsed: true }),
                             onMouseDown: stopPropagationOf,
                             onPointerDown: stopPropagationOf,
@@ -2032,9 +2083,10 @@ window.__ModuleLoader__.load({
                             key: "close",
                             type: "button",
                             "data-testid": "overlay-close",
+                            className: "dsh-tiered-compaction__hud-btn",
                             "aria-label": tOf(t, "hudCloseTitle"),
                             title: tOf(t, "hudCloseTitle"),
-                            style: { ...HUD_CLOSE_STYLE, marginLeft: "0" },
+                            style: { ...HUD_CLOSE_STYLE, marginLeft: "-4px", fontSize: "15px" },
                             onClick: closeHud,
                             // 按下若冒泡到 HUD 就会开始拖动，这里截断
                             onMouseDown: stopPropagationOf,
@@ -2043,8 +2095,7 @@ window.__ModuleLoader__.load({
                         "×",
                     ),
                 ),
-                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false, pulse: showDrop }),
-                hudUsageNodeOf(snapshot, t),
+                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false, pulse: showDrop, aside: hudUsageNodeOf(snapshot, t) }),
                 hudChipsNodeOf(snapshot, now, t),
                 hudFooterNodeOf(snapshot, t, now),
                 hudAutoWarningNodeOf(snapshot, t, now),
@@ -2058,16 +2109,17 @@ window.__ModuleLoader__.load({
             return h(
                 "div",
                 { key: "usage", className: "dsh-tiered-compaction__hud-usage", "data-testid": "overlay-usage" },
-                tOf(t, "usageTokens", { current: formatTokens(snapshot.currentTokens), window: formatTokens(snapshot.window) }),
-                toSummaryTextOf(snapshot, t),
+                h("span", { key: "tokens", className: "dsh-tiered-compaction__hud-tokens" }, tOf(t, "usageTokens", { current: formatTokens(snapshot.currentTokens), window: formatTokens(snapshot.window) })),
+                toSummaryNodeOf(snapshot, t),
             );
         }
 
         /** beta8：距第 4 层摘要线（82% 窗口）还剩多少 token；窗口未知时不显示。 */
-        function toSummaryTextOf(snapshot, t) {
+        function toSummaryNodeOf(snapshot, t) {
             if (!(snapshot.window > 0) || snapshot.autoEnabled === false) return null;
             const left = Math.round(snapshot.window * PRESSURE_LOSSY_FLOOR_RATIO - snapshot.currentTokens);
-            return left <= 0 ? tOf(t, "summaryDue") : tOf(t, "toSummary", { value: formatTokens(left) });
+            const text = left <= 0 ? tOf(t, "summaryDue") : tOf(t, "toSummary", { value: formatTokens(left) });
+            return h("span", { key: "to-summary", className: left <= 0 ? "dsh-tiered-compaction__hud-due" : "dsh-tiered-compaction__hud-to-summary" }, text);
         }
 
         /** beta8：相对时间（分钟粒度足够；未来时刻按刚刚处理）。 */
@@ -2088,6 +2140,15 @@ window.__ModuleLoader__.load({
             const last = snapshot.lastCompaction;
             if (last !== null && last !== undefined) parts.push(tOf(t, "hudFooterLast", { ago: agoTextOf(last.at, now, t) }));
             if (parts.length === 0) return null;
+            if (parts.length === 2) {
+                return h(
+                    "div",
+                    { key: "footer", className: "dsh-tiered-compaction__hud-footer", "data-testid": "overlay-footer" },
+                    h("span", { key: "saved", className: "dsh-tiered-compaction__hud-footer-saved" }, parts[0]),
+                    h("span", { key: "sep", className: "dsh-tiered-compaction__hud-footer-sep", "aria-hidden": "true" }, " · "),
+                    h("span", { key: "last", className: "dsh-tiered-compaction__hud-footer-last" }, parts[1]),
+                );
+            }
             return h("div", { key: "footer", className: "dsh-tiered-compaction__hud-footer", "data-testid": "overlay-footer" }, parts.join(" · "));
         }
 

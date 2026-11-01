@@ -426,9 +426,9 @@ test("D32-9 beta8 HUD：芯片带节省量，用量行带距摘要线余量，�
     await flush();
     const hud = env.react.render(Overlay, {});
     const chips = collectTextOf(byTestId(hud, "overlay-chips"));
-    assert.match(chips, /驱逐4 · 省 66\.1k/);
-    assert.match(chips, /摘要1 · 省 120k/);
+    assert.match(chips, /驱逐4省 66\.1k/);
+    assert.match(chips, /摘要1省 120k/);
     // 82% × 1M − 500k = 320k
-    assert.match(collectTextOf(byTestId(hud, "overlay-usage")), /距摘要 ≈ 320k/);
+    assert.match(collectTextOf(byTestId(hud, "overlay-usage")), /tokens距摘要 ≈ 320k/);
     assert.equal(collectTextOf(byTestId(hud, "overlay-footer")), "共省 ≈ 206k · 上次摘要 12 分钟前");
 });

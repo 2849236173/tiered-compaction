@@ -6,6 +6,14 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.9] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — HUD appearance only; data and compaction logic are unchanged. The new style has not been fully verified under the desktop app's dark theme.
+
+### Changed
+
+- **HUD layout**: a larger pressure percentage above the bar with usage and "≈ N to summary" on the right; the three counters are now side-by-side cards (name, count, tokens saved); the footer shows total saved on the left and the last summary on the right.
+- **Details**: removed the extra grey band under the bar; thinner outlined tick marks so the 80% and 82% lines are distinguishable; collapse and close buttons share one size with hover feedback; "Status ok" is hidden from the title bar when status is normal.
 ## [0.4.0-beta.8] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested)** — fixes tier-3 evicting fresh results and counts resetting on restart, redesigns the HUD, and lets the official ptc / minimal presets run all four tiers. The HUD and the preset overrides have not been fully verified in the real desktop app.
