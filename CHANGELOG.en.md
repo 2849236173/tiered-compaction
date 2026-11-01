@@ -6,6 +6,14 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.7] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested yet)** — fixes whole-turn failures during the compaction commit step.
+
+### Fixed
+
+- **Compaction failed with `format v4 message requires a producer-owned source kind`, taking the turn down with it**: same root cause as beta.6. The plugin imported `compactCheckpointSource` from `@deepseek-ai/dsh-compaction` without declaring that dependency, so Node resolved it upward; on some machines that lands on a copy in `~/.dsh/profiles/node_modules` linked to the global CLI dsh (0.1.0-rc.7). That copy tags the checkpoint message as `{kind:"plugin",plugin:"compact"}`, while the desktop host (0.2.1-rc.2) only accepts `{kind:"compact-checkpoint"}` under session format v4, so the write was rejected, the compaction transaction failed, and the turn failed with it. The plugin now ships its own implementation and picks the shape from the session's `session.header.version`: `compact-checkpoint` for v4 and later, `plugin`/`compact` for older formats. It depends on no install path and is not bound to one host generation. Added a regression test.
+
 ## [0.4.0-beta.6] - 2026-11-01
 
 **Release tier: beta / preview (not fully tested yet)** — fixes the layer-4 pressure summary never succeeding in beta.4/beta.5; layer-4 summaries in the real desktop app are not yet verified.

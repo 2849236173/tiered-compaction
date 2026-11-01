@@ -6,6 +6,14 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0-beta.7] - 2026-11-01
+
+**档位：beta / 尝新版（未完全测试通过）** —— 修复了压缩提交阶段整轮对话失败的问题。
+
+### 修复
+
+- **压缩报 `format v4 message requires a producer-owned source kind`，整轮对话失败**：与 beta.6 同源。插件从 `@deepseek-ai/dsh-compaction` 导入 `compactCheckpointSource`，但本包不声明这个依赖，运行时按 Node 规则向上解析，在部分机器上落到 `~/.dsh/profiles/node_modules` 里指向全局 CLI 版 dsh（0.1.0-rc.7）的副本。它给检查点消息打的是 `{kind:"plugin",plugin:"compact"}`，而桌面宿主（0.2.1-rc.2）的会话格式 v4 只接受 `{kind:"compact-checkpoint"}`，写入被拒，压缩事务失败，这一轮对话也跟着失败。现在插件自带实现，并按当前会话的 `session.header.version` 选择写法：v4 及以上写 `compact-checkpoint`，更早的格式写 `plugin`/`compact`。不依赖任何安装路径，也不绑定某一代宿主。补了回归测试。
+
 ## [0.4.0-beta.6] - 2026-11-01
 
 **档位：beta / 尝新版（未完全测试通过）** —— 修复了 beta.4/beta.5 第 4 层压力摘要从不成功的问题；真实桌面上的第 4 层摘要尚待验证。
