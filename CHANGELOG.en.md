@@ -6,7 +6,107 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-11-01
+
+**Release tier: stable** — rolls up every change from 0.4.0-beta.1 to beta.12. All automated tests pass (363 tests, 362 passed, 1 real-session check skipped by design), and the new HUD has been accepted in the real desktop app. See the beta entries below for details.
+
+### Highlights
+
+- Fixes for tier counts, event pairing, single-writer and multi-realm isolation (beta.3 to beta.8).
+- One-step swap of the official standard / ptc / minimal presets onto this plugin.
+- Redesigned settings page and HUD: aurora progress bar, gradient numbers, real-weight font stack, style self-healing after hot reload (beta.9 to beta.12).
+
+### Fixed
+
+- **Restored the beta.2 session repair script**: `docs/修复/fix-compaction-turn.mjs` is back to the rewrite that honors the host first-frame contract, with its contract test `test/repair-tool-contract.test.js` (9 tests). Both had stayed on the `fix/repair-tool-contract` branch since beta.2.
+
+## [0.4.0-beta.12] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — HUD typography and motion polish. Not yet fully verified in the real desktop app.
+
+### Changed
+
+- **Typography**: Segoe UI Variable / Segoe UI with Microsoft YaHei UI fallback, `font-synthesis: none`, only real 400/600/700 weights, minimum size raised from 10px to 11px.
+- **Color**: the large percentage is now flowing gradient text tinted by tier; card numbers use the Display face.
+- **Motion**: percentage and card counts pop in when they change; a mouse-following spotlight on the HUD; removed root `overflow: hidden` so bar glow is no longer clipped.
+
+## [0.4.0-beta.11] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — fixes `<style>` removal during host hot-replacement that stripped all HUD styles and animations, and upgrades the token usage bar with an aurora gradient, mirror shimmer, and leading spark orb. Not yet fully verified in the real desktop app.
+
+### Fixed
+
+- **Missing styles and animations after host hot-reload**: `ensureUiStyles()` is now called idempotently in `factory`, `OverlayHud`, and `StatusPanel` so `<style>` is immediately restored if `removeOwnedStyles` removes it.
+
+### Changed
+
+- **Aurora token progress bar and lighting effects**: added a flowing multi-stop aurora gradient, mirror shimmer sweep, and pulsing leading spark orb to the token bar, plus a top aurora accent line on the HUD and cards.
+## [0.4.0-beta.10] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — refines the HUD surface material, unified three-column stats well, and progress-bar shimmer animations, and fixes hot-reload style updates. Not yet fully verified in the real desktop app.
+
+### Fixed
+
+- **Hot-reload stale styles**: `ensureUiStyles()` now updates the existing `<style>` element in place instead of returning early.
+- **Dark-mode white halo and light-mode opaque grey background**: replaced the inline `--dsw-alias-bg-module-platform` fill and `--dsw-alias-label-primary` shadow with translucent `--dsw-specific-input-major` glass and `--dsw-menu-backdrop-filter`.
+
+### Changed
+
+- **Unified inset stats well and animations**: merged the three counters into a single hairline-divided inset well, visually hid the `tiered-compaction ` package prefix in the HUD header, and added spring fill-in, liquid shimmer, status-dot ripple, and top indicator bar animations.
+## [0.4.0-beta.9] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — HUD appearance only; data and compaction logic are unchanged. The new style has not been fully verified under the desktop app's dark theme.
+
+### Changed
+
+- **HUD layout**: a larger pressure percentage above the bar with usage and "≈ N to summary" on the right; the three counters are now side-by-side cards (name, count, tokens saved); the footer shows total saved on the left and the last summary on the right.
+- **Details**: removed the extra grey band under the bar; thinner outlined tick marks so the 80% and 82% lines are distinguishable; collapse and close buttons share one size with hover feedback; "Status ok" is hidden from the title bar when status is normal.
+## [0.4.0-beta.8] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested)** — fixes tier-3 evicting fresh results and counts resetting on restart, redesigns the HUD, and lets the official ptc / minimal presets run all four tiers. The HUD and the preset overrides have not been fully verified in the real desktop app.
+
+### Fixed
+
+- **Tier 3 evicted tool results the model had just read**: above 80% pressure, eviction could remove `read` / `grep` results from the current turn. Tool results from the latest 2 turns are now protected. When the turn cannot be read, the old behavior applies.
+- **Counts reset to 0 on every restart**: per-session counts lived only in memory. They are now backfilled from the session log the first time a session is seen: summary count and savings, eviction count and savings, and the combined fold/spill count and savings. Records written by the official pruner are not counted. The log does not distinguish folding from spilling, so only their total is backfilled.
+- **False "pressure ≥80% but tier 3 never evicted" health warning after restart**: sessions not yet registered by the observer are now backfilled from the log too.
+
+### Changed
+
+- **HUD**: L1–L4 are replaced by three rows, "Fold/spill", "Evict", and "Summary", each showing the total count and approximate tokens saved (e.g. `Evict 476 · saved 316k`). The usage line adds "≈ N to summary", and a new footer shows "Saved ≈ N · last summary N min ago". "L1+L2 combined" on the settings page is renamed "Fold + spill combined".
+- **Presets**: `tools/gen-standard-tc.ps1` gains `-Preset standard|ptc|minimal` to swap the compaction engine of the official ptc and minimal presets in place. Each preset has its own marked block in the profile patch; delete the block to roll back.
+- **README**: removed the GitHub install route and added a "Which preset to use" section.
+
+## [0.4.0-beta.7] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested yet)** — fixes whole-turn failures during the compaction commit step.
+
+### Fixed
+
+- **Compaction failed with `format v4 message requires a producer-owned source kind`, taking the turn down with it**: same root cause as beta.6. The plugin imported `compactCheckpointSource` from `@deepseek-ai/dsh-compaction` without declaring that dependency, so Node resolved it upward; on some machines that lands on a copy in `~/.dsh/profiles/node_modules` linked to the global CLI dsh (0.1.0-rc.7). That copy tags the checkpoint message as `{kind:"plugin",plugin:"compact"}`, while the desktop host (0.2.1-rc.2) only accepts `{kind:"compact-checkpoint"}` under session format v4, so the write was rejected, the compaction transaction failed, and the turn failed with it. The plugin now ships its own implementation and picks the shape from the session's `session.header.version`: `compact-checkpoint` for v4 and later, `plugin`/`compact` for older formats. It depends on no install path and is not bound to one host generation. Added a regression test.
+
+## [0.4.0-beta.6] - 2026-11-01
+
+**Release tier: beta / preview (not fully tested yet)** — fixes the layer-4 pressure summary never succeeding in beta.4/beta.5; layer-4 summaries in the real desktop app are not yet verified.
+
+### Fixed
+
+- **Layer-4 pressure summary failed with `Cannot read properties of undefined (reading '<seq>')`**: the plugin imported the tool-pairing checks from `@deepseek-ai/dsh-compaction` without declaring that dependency, so Node resolved it upward. On some machines that lands on a copy in `~/.dsh/profiles/node_modules` linked to the global CLI dsh (0.1.0-rc.7), which reads `session.events[seq]`; the desktop host's (0.2.1-rc.2) Session has no `events`, so every call threw, the hook degraded, and no automatic summary ever ran. The plugin now ships its own pairing check that only uses `session.eventAt`, present in both host generations. Added a regression test and confirmed the rc.7 implementation throws the same error on the same session shape.
+
+
+**Release tier: beta / preview (not fully tested yet)** — diagnostic build: logging only, no compaction logic changes.
+
+### Known issue (under investigation)
+
+- With beta.4 in the real desktop app, layers 1-3 and the automatic check run, but the layer-4 pressure summary fails above ~82% with `pressure 钩子失败，继续步进：Cannot read properties of undefined (reading '<seq>')`, where the seq is the system message at the head of the surface. The failure never blocks the turn, but no automatic layer-4 summary happens; run `/compact` manually under high pressure. Replaying the session snapshot offline with the host's real `Session` does not reproduce it.
+
+### Changed
+
+- When the pressure hook fails, the first 6 stack frames are also logged at warn level (the host log drops debug), to locate the issue above.
+
 ## [0.4.0-beta.4] - 2026-10-31
+
+> ⚠️ Known issue: the layer-4 pressure summary fails in the real host; see 0.4.0-beta.5.
 
 **Release tier: beta / preview (not fully tested yet)** — automated tests pass; the automatic compaction hook fix has a regression test against real cordis proxies, but the real desktop environment and the new UI are not yet verified. **beta.3 users should upgrade.**
 

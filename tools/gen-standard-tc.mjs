@@ -27,7 +27,11 @@ import yaml from "js-yaml";
 import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "./lib/plugin-name.mjs";
 
 /** D2：本 preset 的 realm 标识，写进引擎 config.scopeId（单写者守卫按它分座）。 */
-const SCOPE_ID = "standard";
+// beta8：--preset standard|ptc|minimal（默认 standard），同一套逻辑覆盖任一官方 preset
+const PRESET = (() => { const i = process.argv.indexOf("--preset"); return i > 0 ? process.argv[i + 1] : "standard"; })();
+if (!["standard", "ptc", "minimal"].includes(PRESET)) { console.error(`--preset 只能是 standard/ptc/minimal，实际 ${PRESET}`); process.exit(2); }
+const SCOPE_ID = PRESET;
+const DESCRIPTION = `基于官方 ${PRESET}，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开`;
 
 /** `!!js` 自定义标量：构造成 { __js: 源码 }，与现有 gen-ptc-tc 保持一致。 */
 const JS_TYPE = new yaml.Type("tag:yaml.org,2002:js", {
@@ -54,15 +58,15 @@ if (!archiveDir) {
 /** 从 dump 中切出 preset-standard 顶层条目并解析为对象。 */
 function loadPreset(dumpText, ids) {
     const lines = dumpText.split(/\r?\n/);
-    const start = lines.findIndex((l) => l === "- id: preset-standard");
-    if (start < 0) throw new Error("dump 里找不到顶层条目 '- id: preset-standard'");
+    const start = lines.findIndex((l) => l === `- id: preset-${PRESET}`);
+    if (start < 0) throw new Error(`dump 里找不到顶层条目 '- id: preset-${PRESET}'`);
     let end = start + 1;
     while (end < lines.length && !/^- id: /.test(lines[end])) end += 1;
     // 顶层条目内容缩进 2，去掉后作为对象根
     const body = lines.slice(start + 1, end).map((l) => l.replace(/^ {2}/, ""));
-    const entry = yaml.load(["id: preset-standard", ...body].join("\n"), { schema: SCHEMA });
+    const entry = yaml.load([`id: preset-${PRESET}`, ...body].join("\n"), { schema: SCHEMA });
     if (entry.config.id !== ids) {
-        throw new Error(`preset-standard 的 config.id 应为 ${ids}`);
+        throw new Error(`preset-${PRESET} 的 config.id 应为 ${ids}`);
     }
     return { entry, span: [start, end - 1] };
 }
@@ -84,7 +88,7 @@ function buildStandardTc(standard, pluginName) {
     // config.id 原样保留（"standard"），不改名。
     // 一句话描述（typert.host.js schema 可选字段，预设列表 UI 显示）；
     // standard 原本无 description，新增属预期差异（见下方 expected 清单）。
-    tc.config.description = "基于官方 standard，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开";
+    tc.config.description = DESCRIPTION;
 
     const group = tc.config.plugins.find((p) => p.id === "compaction");
     if (!group) throw new Error("standard 里找不到 id=compaction 的组");
@@ -155,7 +159,7 @@ try {
 }
 console.log(`插件包名: ${pluginName}`);
 
-const { entry: standard, span } = loadPreset(dumpText, "standard");
+const { entry: standard, span } = loadPreset(dumpText, PRESET);
 const { entry: tc, alreadyApplied } = buildStandardTc(standard, pluginName);
 
 /* ---------------- 自检：差异必须恰好是「引擎替换 + config.id 改名」 ---------------- */
@@ -181,7 +185,7 @@ for (const d of raw) {
 }
 
 const expected = [
-    { path: "(root).config.description", to: "基于官方 standard，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开" },
+    { path: "(root).config.description", to: DESCRIPTION },
     { path: `${base}.id`, to: "tiered-compaction" },
     { path: `${base}.name`, to: pluginName },
 ];
@@ -222,7 +226,7 @@ else {
 }
 // description 护栏：宿主列表 UI 依赖它显示介绍（PO 单 #1）。
 // 放在 alreadyApplied 分支之外，重复 Apply 时也校验最终形态。
-if (tc.config?.description !== "基于官方 standard，仅换装 tiered-compaction 四层压缩引擎，层 1-4 全开") {
+if (tc.config?.description !== DESCRIPTION) {
     problems.push(`config.description 应为一句话介绍，实际 ${JSON.stringify(tc.config?.description)}`);
 }
 
@@ -243,7 +247,7 @@ for (const d of flat) {
     if (!allowed.has(d.path)) problems.push(`出现预期之外的差异 ${d.path}`);
 }
 
-console.log("=== 差异明细（standard → standard-tc）===");
+console.log(`=== 差异明细（${PRESET} → ${PRESET}-tc）===`);
 flat.forEach((d) => console.log(`  ${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`));
 console.log(`  展开后差异条数: ${flat.length}`);
 
@@ -270,13 +274,13 @@ const header = [
     "# 为什么不用 selectedDefault: ds-bot 创建 Bot/群会话时硬编码 agentPreset: 'standard'",
     "#   （src/host/roster.js:36-41），改 default 对 Bot 会话无效，只能直接改 standard 本身。",
     "# 为什么整块重写 config: patch 的 - id 只在顶层按 id 定位，preset 内的嵌套条目改不到；",
-    "#   写 - id: preset-standard + config: 是整体替换，必须吐完整 plugins。",
-    "# config.id 保持 standard 不变——改名会让 ds-bot 与存量会话全部 not-found。",
-    "# 回退：删掉本段即可恢复原 standard（本段是唯一改动处）。",
+    `#   写 - id: preset-${PRESET} + config: 是整体替换，必须吐完整 plugins。`,
+    `# config.id 保持 ${PRESET} 不变——改名会让 ds-bot 与存量会话全部 not-found。`,
+    `# 回退：删掉本段即可恢复原 ${PRESET}（本段是唯一改动处）。`,
 ];
 
 // 只输出 id + config：name/order 等其余顶层字段沿用原条目（整体替换 config，不替换整条）
-const body = yaml.dump([{ id: "preset-standard", config: tc.config }], {
+const body = yaml.dump([{ id: `preset-${PRESET}`, config: tc.config }], {
     lineWidth: -1,
     noRefs: true,
     schema: SCHEMA,
@@ -286,5 +290,5 @@ assertNoStaleScopeNames(body, pluginName);
 writeFileSync(outPath, header.join("\n") + "\n" + body, "utf8");
 
 console.log(`\n=== 自检通过${alreadyApplied ? "（检测到已应用过，产物已按目标形态重建）" : ""}，产物已写入 ${outPath} ===`);
-console.log(`    preset-standard 原块位置: dump 行 ${span[0] + 1} ~ ${span[1] + 1}`);
+console.log(`    preset-${PRESET} 原块位置: dump 行 ${span[0] + 1} ~ ${span[1] + 1}`);
 process.exit(0);

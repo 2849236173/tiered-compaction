@@ -47,6 +47,8 @@ const STRINGS = Object.freeze({
         l3Evicted: "软压力驱逐",
         l4Summaries: "有损摘要",
         foldShort: "折叠",
+        foldSpillShort: "折叠/落盘",
+        chipSaved: "省 {value}",
         spillShort: "落盘",
         evictShort: "驱逐",
         summaryShort: "摘要",
@@ -62,7 +64,15 @@ const STRINGS = Object.freeze({
         toneUnknown: "未知",
         pressurePrefix: "压力",
         hudCloseTitle: "关闭悬浮窗",
-        combinedCharsSaved: "L1+L2 合计（字符）省 ~{value}",
+        combinedCharsSaved: "折叠+落盘合计（字符）省 ~{value}",
+        toSummary: "距摘要 ≈ {value}",
+        summaryDue: "已到摘要线",
+        hudFooterSaved: "共省 ≈ {value}",
+        hudFooterLast: "上次摘要 {ago}",
+        agoMinutes: "{n} 分钟前",
+        agoHours: "{n} 小时前",
+        agoDays: "{n} 天前",
+        agoJustNow: "刚刚",
         tokensApprox: "≈ {value} tokens",
         processSummaries: "全进程 {count}",
         sessionScope: "本会话",
@@ -101,6 +111,8 @@ const STRINGS = Object.freeze({
         l3Evicted: "Soft-pressure eviction",
         l4Summaries: "Lossy summary",
         foldShort: "Fold",
+        foldSpillShort: "Fold/spill",
+        chipSaved: "saved {value}",
         spillShort: "Spill",
         evictShort: "Evict",
         summaryShort: "Summary",
@@ -116,7 +128,15 @@ const STRINGS = Object.freeze({
         toneUnknown: "Unknown",
         pressurePrefix: "Pressure",
         hudCloseTitle: "Close HUD",
-        combinedCharsSaved: "L1+L2 combined (chars) ~{value} saved",
+        combinedCharsSaved: "Fold + spill combined (chars) ~{value} saved",
+        toSummary: "≈ {value} to summary",
+        summaryDue: "at summary line",
+        hudFooterSaved: "Saved ≈ {value}",
+        hudFooterLast: "last summary {ago}",
+        agoMinutes: "{n} min ago",
+        agoHours: "{n} h ago",
+        agoDays: "{n} d ago",
+        agoJustNow: "just now",
         tokensApprox: "≈ {value} tokens",
         processSummaries: "process total {count}",
         sessionScope: "This session",
@@ -196,10 +216,10 @@ const PRESSURE_TONE_UNKNOWN = "unknown";
  * 显示词按 locale 从 STRINGS 取（任务 #7），三者同源于此表。
  */
 const PRESSURE_TONES = Object.freeze({
-    [PRESSURE_TONE_CALM]: { color: "#2f9e44", key: "toneCalm" },
-    [PRESSURE_TONE_REMIND]: { color: "#f0a020", key: "toneRemind" },
-    [PRESSURE_TONE_EVICT]: { color: "#e8590c", key: "toneEvict" },
-    [PRESSURE_TONE_UNKNOWN]: { color: "#868e96", key: "toneUnknown" },
+    [PRESSURE_TONE_CALM]: { color: "#10a37f", key: "toneCalm" },
+    [PRESSURE_TONE_REMIND]: { color: "#d97706", key: "toneRemind" },
+    [PRESSURE_TONE_EVICT]: { color: "#dc2626", key: "toneEvict" },
+    [PRESSURE_TONE_UNKNOWN]: { color: "#81858c", key: "toneUnknown" },
 });
 
 /**
@@ -374,14 +394,8 @@ const HUD_BASE_STYLE = {
     position: "fixed",
     zIndex: OVERLAY_Z_INDEX,
     display: "block",
-    width: "min(224px, calc(100vw - 24px))",
+    width: "min(258px, calc(100vw - 24px))",
     minWidth: "0",
-    padding: "10px 11px",
-    border: ".5px solid var(--dsw-alias-border-l2, #e2e6ea)",
-    borderRadius: "12px",
-    color: "var(--dsw-alias-label-primary, #1f2328)",
-    backgroundColor: "var(--dsw-alias-bg-module-platform, rgba(255, 255, 255, .96))",
-    boxShadow: "0 8px 28px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 18%, transparent)",
     cursor: "move",
     userSelect: "none",
     touchAction: "none",
@@ -421,7 +435,12 @@ const HUD_PILL_STYLE = {
 const HUD_CAPSULE_OVERRIDE_STYLE = {
     width: "auto",
     padding: "0",
+    border: "0",
     borderRadius: "999px",
+    background: "transparent",
+    boxShadow: "none",
+    backdropFilter: "none",
+    WebkitBackdropFilter: "none",
     cursor: "default",
 };
 
@@ -438,16 +457,16 @@ const CHIP_BUMP_MS = 1200;
 
 /** HUD 四层芯片：key → 显示名 + 悬停全称（STRINGS key）。数组顺序即 DOM 顺序。 */
 const HUD_CHIPS = [
-    { key: "l1", label: "L1", titleKey: "foldShort" },
-    { key: "l2", label: "L2", titleKey: "spillShort" },
-    { key: "l3", label: "L3", titleKey: "evictShort" },
-    { key: "l4", label: "L4", titleKey: "summaryShort" },
+    // beta8：用动作名代替 L1-L4；折叠与落盘合并（会话日志里分不出两层，重启回填后口径一致）
+    { key: "l12", titleKey: "foldSpillShort" },
+    { key: "l3", titleKey: "evictShort" },
+    { key: "l4", titleKey: "summaryShort" },
 ];
 
 /** HUD 拖动边距和估算尺寸：实际宽度由 CSS 限制，足以做安全边界校正。 */
 const HUD_EDGE_GAP = 12;
-const HUD_ESTIMATED_WIDTH = 224;
-const HUD_ESTIMATED_HEIGHT = 76;
+const HUD_ESTIMATED_WIDTH = 258;
+const HUD_ESTIMATED_HEIGHT = 164;
 
 /** 将 HUD 坐标限制在视口内；测试桩没有视口尺寸时保持原值。 */
 function clampHudPosition(left, top) {
@@ -466,19 +485,24 @@ function clampHudPosition(left, top) {
 /** 关闭按钮：贴右，无边框，保持 HUD 的紧凑观感。 */
 const HUD_CLOSE_STYLE = {
     flex: "0 0 auto",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "18px",
+    height: "18px",
     marginLeft: "auto",
-    padding: "2px 5px",
+    padding: "0",
     border: "0",
-    borderRadius: "6px",
+    borderRadius: "5px",
     background: "transparent",
-    color: "inherit",
+    color: "var(--dsw-alias-label-tertiary, #7a8591)",
     cursor: "pointer",
-    fontSize: "15px",
+    fontSize: "14px",
     lineHeight: "1",
 };
 
 /** 所有样式都带插件前缀，跟随宿主 Design Tokens，不污染聊天和设置页。 */
-const UI_STYLE_ID = "tiered-compaction-ui-v2";
+const UI_STYLE_ID = "tiered-compaction-ui-v5";
 const UI_CSS = `
 .dsh-tiered-compaction {
     box-sizing: border-box;
@@ -489,7 +513,7 @@ const UI_CSS = `
     font: inherit;
     line-height: 1.45;
 }
-.dsh-tiered-compaction *, .dsh-tiered-compaction *::before, .dsh-tiered-compaction *::after { box-sizing: border-box; }
+.dsh-tiered-compaction *, .dsh-tiered-compaction *::before, .dsh-tiered-compaction *::after, .dsh-tiered-compaction__hud *, .dsh-tiered-compaction__hud *::before, .dsh-tiered-compaction__hud *::after { box-sizing: border-box; }
 .dsh-tiered-compaction__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .dsh-tiered-compaction__identity { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
 .dsh-tiered-compaction__mark { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px; color: var(--dsw-alias-state-business-primary, #176b61); background: var(--dsw-alias-state-business-tertiary, color-mix(in srgb, currentColor 12%, transparent)); font-size: 17px; }
@@ -505,8 +529,10 @@ const UI_CSS = `
 .dsh-tiered-compaction__status-line { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--dsw-alias-label-secondary, #58636e); font-size: 13px; }
 .dsh-tiered-compaction__status-line strong { color: var(--dsw-alias-label-primary, #1f2328); font-weight: 560; overflow-wrap: anywhere; }
 .dsh-tiered-compaction__bar { min-width: 0; }
-.dsh-tiered-compaction__bar-track { border-radius: 999px; background: var(--dsw-alias-fill-tertiary, color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 10%, transparent)); }
-.dsh-tiered-compaction__bar-fill { border-radius: 999px; background: var(--dsh-tiered-tone, var(--dsw-alias-state-business-primary, #4a9eda)); transition: width .22s ease, background-color .22s ease; }
+.dsh-tiered-compaction__bar-track { border-radius: 999px; background: transparent; }
+.dsh-tiered-compaction__bar-fill { position: relative; border-radius: 999px; background-image: linear-gradient(90deg, #00f5d4 0%, #3b82f6 25%, #8b5cf6 50%, #ec4899 75%, #00f5d4 100%) !important; background-size: 240% 100% !important; box-shadow: 0 0 12px rgba(59, 130, 246, .48), 0 0 20px rgba(139, 92, 246, .28) !important; animation: dsh-tiered-compaction-aurora 3s linear infinite, dsh-tiered-compaction-bar-grow .65s cubic-bezier(.16, 1, .3, 1) !important; transition: width .52s cubic-bezier(.16, 1, .3, 1) !important; }
+.dsh-tiered-compaction__bar-fill::before { content: ""; position: absolute; inset: 0; border-radius: 999px; background: linear-gradient(110deg, transparent 20%, rgba(255, 255, 255, .75) 48%, #ffffff 50%, rgba(255, 255, 255, .75) 52%, transparent 80%); background-size: 200% 100%; animation: dsh-tiered-compaction-shimmer 2s cubic-bezier(.4, 0, .2, 1) infinite; pointer-events: none; }
+.dsh-tiered-compaction__bar-fill::after { content: ""; position: absolute; right: -1px; top: 50%; width: 7px; height: 7px; border-radius: 50%; transform: translateY(-50%); background: #ffffff; box-shadow: 0 0 6px 1.5px #ffffff, 0 0 12px 3px #8b5cf6, 0 0 18px 5px var(--dsh-tiered-tone, #06b6d4); animation: dsh-tiered-compaction-spark 1.2s ease-in-out infinite alternate; pointer-events: none; }
 .dsh-tiered-compaction__legend { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; line-height: 1.4; }
 .dsh-tiered-compaction__marks { display: inline-flex; flex-wrap: wrap; gap: 5px 10px; min-width: 0; }
 .dsh-tiered-compaction__mark-label { white-space: nowrap; }
@@ -521,29 +547,80 @@ const UI_CSS = `
 .dsh-tiered-compaction__stat-value { margin-top: 7px; color: var(--dsw-alias-label-primary, #1f2328); font-size: 22px; font-weight: 650; letter-spacing: -.02em; line-height: 1; }
 .dsh-tiered-compaction__stat-note { min-height: 17px; margin-top: 7px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 10px; overflow-wrap: anywhere; }
 .dsh-tiered-compaction__empty { display: flex; align-items: center; gap: 9px; padding: 14px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 11px; color: var(--dsw-alias-label-tertiary, #7a8591); background: var(--dsw-alias-bg-module-platform, #fff); font-size: 12px; }
-.dsh-tiered-compaction__hud { width: min(224px, calc(100vw - 24px)); min-width: 0; padding: 10px 11px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 12px; color: var(--dsw-alias-label-primary, #1f2328); background: var(--dsw-alias-bg-module-platform, rgba(255,255,255,.96)); box-shadow: 0 8px 28px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 18%, transparent); cursor: move; user-select: none; touch-action: none; }
+.dsh-tiered-compaction__hud { position: fixed; width: min(258px, calc(100vw - 24px)); min-width: 0; padding: 13px 13px 12px; font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-synthesis: none; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; font-kerning: normal;  border: .5px solid var(--dsw-alias-border-l2, rgba(15, 17, 21, .10)); border-radius: var(--dsw-radius-lg, 16px); color: var(--dsw-alias-label-primary, #0f1115); background: color-mix(in srgb, var(--dsw-specific-input-major, #ffffff) 88%, rgba(248, 250, 252, .80)); box-shadow: inset 0 .5px 0 0 rgba(255, 255, 255, .95), 0 12px 32px -6px rgba(15, 17, 21, .09), 0 3px 10px -2px rgba(15, 17, 21, .04); backdrop-filter: var(--dsw-menu-backdrop-filter, blur(36px) saturate(160%)); -webkit-backdrop-filter: var(--dsw-menu-backdrop-filter, blur(36px) saturate(160%)); cursor: move; user-select: none; touch-action: none; transform-origin: bottom right; animation: dsh-tiered-compaction-hud-in .32s cubic-bezier(.16, 1, .3, 1); transition: box-shadow .24s ease, border-color .24s ease, background-color .24s ease; }
+.dsh-tiered-compaction__hud::before { content: ""; position: absolute; left: 10%; right: 10%; top: 0; height: 2px; border-radius: 999px; background: linear-gradient(90deg, transparent 0%, #00f5d4 20%, #3b82f6 42%, #8b5cf6 62%, #ec4899 82%, transparent 100%); background-size: 200% 100%; opacity: .88; animation: dsh-tiered-compaction-aurora 3.4s linear infinite; pointer-events: none; }
+.dsh-tiered-compaction__hud[data-testid="overlay-capsule"]::before { display: none; }
+.dsh-tiered-compaction__hud:hover { border-color: color-mix(in srgb, #8b5cf6 28%, var(--dsw-alias-border-l3, rgba(15, 17, 21, .14))); box-shadow: inset 0 .5px 0 0 #ffffff, 0 16px 38px -6px rgba(15, 17, 21, .12), 0 4px 14px -2px rgba(139, 92, 246, .08); }
+.dsh-tiered-compaction__hud:active { box-shadow: inset 0 .5px 0 0 rgba(255, 255, 255, .9), 0 18px 42px -4px rgba(15, 17, 21, .15), 0 6px 14px -2px rgba(15, 17, 21, .07); }
+body[data-ds-dark-theme] .dsh-tiered-compaction__hud, [data-ds-dark-theme] .dsh-tiered-compaction__hud { border-color: rgba(255, 255, 255, .10); background: color-mix(in srgb, var(--dsw-specific-input-major, #2c2c2e) 86%, rgba(22, 22, 25, .80)); box-shadow: inset 0 .5px 0 0 rgba(255, 255, 255, .09), 0 16px 38px -6px rgba(0, 0, 0, .54), 0 4px 14px -2px rgba(139, 92, 246, .14); }
+body[data-ds-dark-theme] .dsh-tiered-compaction__hud:hover, [data-ds-dark-theme] .dsh-tiered-compaction__hud:hover { border-color: color-mix(in srgb, #8b5cf6 36%, rgba(255, 255, 255, .16)); box-shadow: inset 0 .5px 0 0 rgba(255, 255, 255, .12), 0 20px 44px -6px rgba(0, 0, 0, .62), 0 6px 18px -2px rgba(139, 92, 246, .22); }
 .dsh-tiered-compaction__hud-head { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 8px; }
-.dsh-tiered-compaction__hud-title { min-width: 0; color: var(--dsw-alias-label-secondary, #58636e); font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsh-tiered-compaction__hud-status { min-width: 0; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsh-tiered-compaction__hud:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 2px; }
-.dsh-tiered-compaction__hud button:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #176b61)); outline-offset: 1px; }
-.dsh-tiered-compaction__hud .dsh-tiered-compaction__legend { margin-top: 3px; }
-.dsh-tiered-compaction__hud-btn { flex: 0 0 auto; padding: 2px 5px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
-.dsh-tiered-compaction__hud-btn:hover { background: var(--dsw-alias-fill-tertiary, rgba(31, 35, 40, .08)); }
-.dsh-tiered-compaction__hud-usage { margin-top: 4px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; font-variant-numeric: tabular-nums; }
-.dsh-tiered-compaction__chips { display: flex; gap: 4px; margin-top: 7px; }
-.dsh-tiered-compaction__chip { flex: 1 1 0; min-width: 0; padding: 2px 4px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 6px; color: var(--dsw-alias-label-secondary, #58636e); font-size: 10px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-.dsh-tiered-compaction__chip b { color: var(--dsw-alias-label-tertiary, #7a8591); font-weight: 600; margin-right: 3px; }
-.dsh-tiered-compaction__chip--bump { animation: dsh-tiered-compaction-bump 1.2s ease-out; }
-@keyframes dsh-tiered-compaction-bump { 0% { background: color-mix(in srgb, var(--dsh-tiered-tone, #2f9e44) 35%, transparent); border-color: var(--dsh-tiered-tone, #2f9e44); } 100% { background: transparent; } }
-.dsh-tiered-compaction__alert { margin-top: 7px; padding: 5px 7px; border-radius: 7px; color: var(--dsw-alias-state-warning-primary, #b35c00); background: var(--dsw-alias-state-warning-tertiary, color-mix(in srgb, #f0a020 14%, transparent)); font-size: 11px; line-height: 1.4; }
-.dsh-tiered-compaction__auto-hint { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #7a8591); font-size: 11px; }
-.dsh-tiered-compaction__toast { margin-top: 7px; padding: 5px 7px; border-radius: 7px; color: var(--dsw-alias-state-success-primary, #2b7a3d); background: var(--dsw-alias-state-success-tertiary, color-mix(in srgb, #2f9e44 14%, transparent)); font-size: 11px; line-height: 1.4; animation: dsh-tiered-compaction-fade 4s ease forwards; }
-@keyframes dsh-tiered-compaction-fade { 0%, 80% { opacity: 1; } 100% { opacity: .35; } }
-.dsh-tiered-compaction__bar-fill--pulse { animation: dsh-tiered-compaction-pulse 1.2s ease-out 2; }
-@keyframes dsh-tiered-compaction-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--dsh-tiered-tone, #2f9e44) 60%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
-.dsh-tiered-compaction__pill, .dsh-tiered-compaction__capsule { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 999px; color: var(--dsw-alias-label-primary, #1f2328); background: var(--dsw-alias-bg-module-platform, rgba(255,255,255,.96)); box-shadow: 0 4px 14px color-mix(in srgb, var(--dsw-alias-label-primary, #1f2328) 14%, transparent); cursor: pointer; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
-.dsh-tiered-compaction__capsule-pct { color: var(--dsh-tiered-tone, inherit); font-weight: 600; }
+.dsh-tiered-compaction__hud-dot { position: relative; box-shadow: 0 0 8px var(--dsh-tiered-tone, #10a37f); }
+.dsh-tiered-compaction__hud-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--dsh-tiered-tone, #10a37f); opacity: 0; pointer-events: none; animation: dsh-tiered-compaction-dot-ripple 2.2s cubic-bezier(0, 0, .2, 1) infinite; }
+.dsh-tiered-compaction__hud-title { min-width: 0; color: var(--dsw-alias-label-secondary, #61666b); font-size: 12px; font-weight: 600; letter-spacing: 0; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-tiered-compaction__hud-title-pkg { display: inline-block; width: 0; font-size: 0; opacity: 0; overflow: hidden; vertical-align: baseline; }
+.dsh-tiered-compaction__hud-status { min-width: 0; color: var(--dsw-alias-label-tertiary, #81858c); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-tiered-compaction__hud:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6)); outline-offset: 2px; }
+.dsh-tiered-compaction__hud button:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6)); outline-offset: 1px; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track { height: 12px !important; margin-top: 0 !important; margin-bottom: 0 !important; background: transparent !important; border-radius: 0 !important; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track-fill { top: 2px !important; height: 8px !important; border-radius: 999px !important; background: rgba(15, 17, 21, .08) !important; box-shadow: inset 0 1px 2px rgba(15, 17, 21, .10) !important; overflow: hidden; }
+body[data-ds-dark-theme] .dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track-fill, [data-ds-dark-theme] .dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track-fill { background: rgba(255, 255, 255, .10) !important; box-shadow: inset 0 1px 2px rgba(0, 0, 0, .42) !important; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-fill { top: 2px !important; height: 8px !important; border-radius: 999px !important; overflow: visible !important; transform-origin: left center; background-image: linear-gradient(90deg, #00f5d4 0%, #3b82f6 25%, #8b5cf6 50%, #ec4899 75%, #00f5d4 100%) !important; background-size: 240% 100% !important; box-shadow: 0 0 12px rgba(59, 130, 246, .52), 0 0 22px rgba(139, 92, 246, .32), inset 0 1px 0 rgba(255, 255, 255, .45) !important; animation: dsh-tiered-compaction-aurora 2.8s linear infinite, dsh-tiered-compaction-bar-grow .65s cubic-bezier(.16, 1, .3, 1) !important; transition: width .52s cubic-bezier(.16, 1, .3, 1) !important; }
+.dsh-tiered-compaction__hud[data-tone="remind"] .dsh-tiered-compaction__bar-fill { background-image: linear-gradient(90deg, #10b981 0%, #06b6d4 22%, #6366f1 45%, #ec4899 68%, #f59e0b 88%, #10b981 100%) !important; box-shadow: 0 0 13px rgba(236, 72, 153, .48), 0 0 22px rgba(245, 158, 11, .36), inset 0 1px 0 rgba(255, 255, 255, .45) !important; }
+.dsh-tiered-compaction__hud[data-tone="evict"] .dsh-tiered-compaction__bar-fill { background-image: linear-gradient(90deg, #f59e0b 0%, #ec4899 28%, #8b5cf6 52%, #ef4444 76%, #ff0055 92%, #f59e0b 100%) !important; box-shadow: 0 0 14px rgba(239, 68, 68, .58), 0 0 24px rgba(236, 72, 153, .40), inset 0 1px 0 rgba(255, 255, 255, .45) !important; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track > div[title] { top: .5px !important; height: 11px !important; width: 1.5px !important; transform: translateX(-50%) !important; border-radius: 999px !important; background: rgba(15, 17, 21, .42) !important; box-shadow: 0 0 0 1px rgba(255, 255, 255, .88) !important; z-index: 3; transition: transform .18s ease, background-color .18s ease; }
+.dsh-tiered-compaction__hud .dsh-tiered-compaction__bar:hover .dsh-tiered-compaction__bar-track > div[title] { transform: translateX(-50%) scaleY(1.16) !important; }
+body[data-ds-dark-theme] .dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track > div[title], [data-ds-dark-theme] .dsh-tiered-compaction__hud .dsh-tiered-compaction__bar-track > div[title] { background: rgba(255, 255, 255, .68) !important; box-shadow: 0 0 0 1px rgba(24, 24, 27, .88) !important; }
+.dsh-tiered-compaction__hud-btn { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 19px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-tertiary, #81858c); cursor: pointer; font-size: 13.5px; line-height: 1; transition: background-color .16s ease, color .16s ease, transform .14s cubic-bezier(.22, 1, .36, 1); }
+.dsh-tiered-compaction__hud-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, .08)) !important; color: var(--dsw-alias-label-primary, #0f1115) !important; transform: scale(1.06); }
+.dsh-tiered-compaction__hud-btn:active { transform: scale(.90); }
+.dsh-tiered-compaction__hud-hero { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; margin-bottom: 8px; }
+.dsh-tiered-compaction__hud-pct { flex: 0 0 auto; font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; font-size: 26px; font-weight: 700; letter-spacing: -.02em; line-height: 1; font-variant-numeric: tabular-nums; transition: color .28s ease, transform .24s cubic-bezier(.16, 1, .3, 1); }
+.dsh-tiered-compaction__hud-pct-num { display: inline-block; background-image: linear-gradient(100deg, var(--dsh-tiered-tone, #10a37f) 0%, #3b82f6 30%, #8b5cf6 55%, #ec4899 78%, var(--dsh-tiered-tone, #10a37f) 100%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 8px color-mix(in srgb, #8b5cf6 30%, transparent)); animation: dsh-tiered-compaction-aurora 4s linear infinite, dsh-tiered-compaction-pct-pop .55s cubic-bezier(.34, 1.56, .64, 1); }
+@keyframes dsh-tiered-compaction-pct-pop { 0% { transform: translateY(5px) scale(.86); opacity: 0; } 100% { transform: none; opacity: 1; } }
+body .dsh-tiered-compaction__hud[data-testid="overlay-hud"] { background-image: radial-gradient(200px circle at var(--tc-mx, 88%) var(--tc-my, -20%), var(--tc-spot, rgba(139, 92, 246, .10)), transparent 70%); }
+body[data-ds-dark-theme] .dsh-tiered-compaction__hud, [data-ds-dark-theme] .dsh-tiered-compaction__hud { --tc-spot: rgba(139, 92, 246, .22); }
+.dsh-tiered-compaction__chip-num { display: inline-block; animation: dsh-tiered-compaction-pct-pop .5s cubic-bezier(.34, 1.56, .64, 1) backwards; }
+.dsh-tiered-compaction__hud-usage { display: flex; flex-direction: column; align-items: flex-end; gap: 2.5px; min-width: 0; color: var(--dsw-alias-label-tertiary, #81858c); font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dsh-tiered-compaction__hud-tokens { color: var(--dsw-alias-label-primary, #0f1115); font-weight: 600; letter-spacing: .01em; }
+.dsh-tiered-compaction__hud-to-summary { display: inline-flex; align-items: center; padding: 1.5px 6.5px; border-radius: 999px; border: .5px solid color-mix(in srgb, #8b5cf6 24%, transparent); background: linear-gradient(90deg, rgba(6, 182, 212, .08), rgba(139, 92, 246, .10), rgba(236, 72, 153, .08)); color: var(--dsw-alias-label-secondary, #61666b); font-size: 11px; font-weight: 400; }
+.dsh-tiered-compaction__hud-due { display: inline-flex; align-items: center; padding: 1.5px 6.5px; border-radius: 999px; background: color-mix(in srgb, var(--dsh-tiered-tone, #dc2626) 16%, transparent); color: var(--dsh-tiered-tone, inherit); font-weight: 600; font-size: 11px; }
+.dsh-tiered-compaction__chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
+.dsh-tiered-compaction__chip { position: relative; display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 7px 7.5px; border: .5px solid var(--dsw-alias-border-l2, rgba(15, 17, 21, .075)); border-radius: 10px; background: rgba(255, 255, 255, .68); box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .92), 0 2px 6px -1px rgba(15, 17, 21, .03); color: var(--dsw-alias-label-primary, #0f1115); font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; font-size: 16px; font-weight: 600; letter-spacing: -.01em; line-height: 1.15; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; animation: dsh-tiered-compaction-chip-in .36s cubic-bezier(.16, 1, .3, 1) backwards; transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s cubic-bezier(.22, 1, .36, 1); }
+.dsh-tiered-compaction__chip:nth-child(2) { animation-delay: .04s; }
+.dsh-tiered-compaction__chip:nth-child(3) { animation-delay: .08s; }
+.dsh-tiered-compaction__chip::before { content: ""; position: absolute; left: 14%; right: 14%; top: 0; height: 1.5px; border-radius: 999px; background: linear-gradient(90deg, #06b6d4, #8b5cf6, #ec4899); transform: scaleX(.35); opacity: .42; transition: transform .22s cubic-bezier(.16, 1, .3, 1), opacity .22s ease; }
+body[data-ds-dark-theme] .dsh-tiered-compaction__chip, [data-ds-dark-theme] .dsh-tiered-compaction__chip { background: rgba(255, 255, 255, .048); border-color: rgba(255, 255, 255, .08); box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .06); }
+.dsh-tiered-compaction__chip:hover { transform: translateY(-1.5px); background: rgba(255, 255, 255, .92); border-color: rgba(139, 92, 246, .28); box-shadow: inset 0 .5px 0 #ffffff, 0 6px 14px -3px rgba(139, 92, 246, .12); }
+.dsh-tiered-compaction__chip:hover::before { transform: scaleX(1); opacity: .95; }
+body[data-ds-dark-theme] .dsh-tiered-compaction__chip:hover, [data-ds-dark-theme] .dsh-tiered-compaction__chip:hover { background: rgba(255, 255, 255, .085); border-color: rgba(139, 92, 246, .38); box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .10), 0 6px 14px -3px rgba(139, 92, 246, .22); }
+.dsh-tiered-compaction__chip b { color: var(--dsw-alias-label-tertiary, #81858c); font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 11px; font-weight: 400; letter-spacing: 0; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__chip-saved { color: color-mix(in srgb, #10a37f 72%, var(--dsw-alias-label-secondary, #61666b)); font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__hud-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 9px; padding-top: 7.5px; border-top: .5px solid var(--dsw-alias-border-l1, rgba(15, 17, 21, .07)); color: var(--dsw-alias-label-tertiary, #81858c); font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__hud-footer-saved { color: var(--dsw-alias-label-secondary, #61666b); font-weight: 600; }
+.dsh-tiered-compaction__hud-footer-sep { width: 0; font-size: 0; opacity: 0; overflow: hidden; }
+.dsh-tiered-compaction__hud-footer-last { margin-left: auto; color: var(--dsw-alias-label-tertiary, #81858c); overflow: hidden; text-overflow: ellipsis; }
+.dsh-tiered-compaction__chip--bump { animation: dsh-tiered-compaction-bump 1.15s cubic-bezier(.16, 1, .3, 1); }
+.dsh-tiered-compaction__chip--bump::before { transform: scaleX(1); opacity: 1; }
+@keyframes dsh-tiered-compaction-bump { 0% { background: color-mix(in srgb, #8b5cf6 18%, transparent); border-color: #8b5cf6; box-shadow: 0 0 12px rgba(139, 92, 246, .28); } 30% { transform: translateY(-1.5px) scale(1.03); } 100% { transform: translateY(0) scale(1); } }
+.dsh-tiered-compaction__alert { margin-top: 7px; padding: 5.5px 7.5px; border-radius: 8px; border: .5px solid color-mix(in srgb, #d97706 26%, transparent); color: var(--dsw-alias-state-warn-label, #b45309); background: color-mix(in srgb, #d97706 10%, transparent); font-size: 11px; line-height: 1.35; animation: dsh-tiered-compaction-hud-in .24s cubic-bezier(.16, 1, .3, 1); }
+.dsh-tiered-compaction__auto-hint { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #81858c); font-size: 11px; }
+.dsh-tiered-compaction__toast { margin-top: 7px; padding: 5.5px 7.5px; border-radius: 8px; border: .5px solid color-mix(in srgb, #10a37f 28%, transparent); color: color-mix(in srgb, #10a37f 84%, var(--dsw-alias-label-primary, #0f1115)); background: color-mix(in srgb, #10a37f 11%, transparent); font-size: 11px; font-weight: 600; letter-spacing: 0; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; animation: dsh-tiered-compaction-fade 4s cubic-bezier(.16, 1, .3, 1) forwards; }
+@keyframes dsh-tiered-compaction-fade { 0% { opacity: 0; transform: translateY(3px) scale(.98); } 8%, 78% { opacity: 1; transform: translateY(0) scale(1); } 100% { opacity: .45; transform: translateY(0) scale(1); } }
+.dsh-tiered-compaction__bar-fill--pulse { animation: dsh-tiered-compaction-aurora 1.6s linear infinite, dsh-tiered-compaction-pulse 1.1s cubic-bezier(.16, 1, .3, 1) 2 !important; }
+@keyframes dsh-tiered-compaction-pulse { 0% { box-shadow: 0 0 0 0 rgba(139, 92, 246, .65), 0 0 18px rgba(6, 182, 212, .65); filter: brightness(1.22); } 100% { box-shadow: 0 0 0 8px transparent, 0 0 12px rgba(59, 130, 246, .48); filter: brightness(1); } }
+@keyframes dsh-tiered-compaction-aurora { 0% { background-position: 0% 50%; } 100% { background-position: 240% 50%; } }
+@keyframes dsh-tiered-compaction-bar-grow { 0% { transform: scaleX(0); opacity: .5; } 100% { transform: scaleX(1); opacity: 1; } }
+@keyframes dsh-tiered-compaction-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes dsh-tiered-compaction-spark { 0% { transform: translateY(-50%) scale(.88); opacity: .85; } 100% { transform: translateY(-50%) scale(1.18); opacity: 1; } }
+@keyframes dsh-tiered-compaction-hud-in { 0% { opacity: 0; transform: translateY(6px) scale(.96); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes dsh-tiered-compaction-chip-in { 0% { opacity: 0; transform: translateY(4px); } 100% { opacity: 1; transform: translateY(0); } }
+@keyframes dsh-tiered-compaction-dot-ripple { 0% { transform: scale(1); opacity: .65; } 75%, 100% { transform: scale(2.6); opacity: 0; } }
+.dsh-tiered-compaction__pill, .dsh-tiered-compaction__capsule { display: inline-flex; align-items: center; gap: 7px; padding: 5.5px 11px; border: .5px solid var(--dsw-alias-border-l2, rgba(15, 17, 21, .09)); border-radius: 999px; color: var(--dsw-alias-label-primary, #0f1115); background: color-mix(in srgb, var(--dsw-specific-input-major, #ffffff) 88%, rgba(248, 250, 252, .80)); box-shadow: inset 0 .5px 0 0 rgba(255, 255, 255, .92), 0 8px 22px -4px rgba(15, 17, 21, .10), 0 2px 5px rgba(15, 17, 21, .04); backdrop-filter: var(--dsw-menu-backdrop-filter, blur(32px) saturate(160%)); -webkit-backdrop-filter: var(--dsw-menu-backdrop-filter, blur(32px) saturate(160%)); cursor: pointer; font: inherit; font-size: 11.5px; font-variant-numeric: tabular-nums; transform-origin: bottom right; animation: dsh-tiered-compaction-hud-in .26s cubic-bezier(.16, 1, .3, 1); transition: transform .18s cubic-bezier(.16, 1, .3, 1), box-shadow .18s ease, border-color .18s ease; }
+.dsh-tiered-compaction__pill:hover, .dsh-tiered-compaction__capsule:hover { transform: translateY(-1.5px) scale(1.02); border-color: color-mix(in srgb, var(--dsh-tiered-tone, #10a37f) 32%, var(--dsw-alias-border-l2, rgba(15, 17, 21, .14))); box-shadow: inset 0 .5px 0 0 #ffffff, 0 10px 26px -4px rgba(15, 17, 21, .14); }
+.dsh-tiered-compaction__pill:active, .dsh-tiered-compaction__capsule:active { transform: translateY(0) scale(.97); }
+body[data-ds-dark-theme] .dsh-tiered-compaction__pill, body[data-ds-dark-theme] .dsh-tiered-compaction__capsule, [data-ds-dark-theme] .dsh-tiered-compaction__pill, [data-ds-dark-theme] .dsh-tiered-compaction__capsule { border-color: rgba(255, 255, 255, .10); background: color-mix(in srgb, var(--dsw-specific-input-major, #2c2c2e) 86%, rgba(22, 22, 25, .80)); box-shadow: inset 0 .5px 0 0 rgba(255, 255, 255, .09), 0 10px 26px -4px rgba(0, 0, 0, .50), 0 2px 6px rgba(0, 0, 0, .30); }
+.dsh-tiered-compaction__capsule-pct { font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; color: var(--dsh-tiered-tone, inherit); font-weight: 700; letter-spacing: -.02em; }
 .dsh-tiered-compaction__total { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 9px; padding: 11px 14px; border: .5px solid var(--dsw-alias-border-l2, #e2e6ea); border-radius: 11px; background: var(--dsw-alias-bg-module-platform, #fff); font-size: 12px; }
 .dsh-tiered-compaction__total strong { color: var(--dsw-alias-label-primary, #1f2328); font-size: 16px; font-weight: 650; }
 .dsh-tiered-compaction__total span { color: var(--dsw-alias-label-tertiary, #7a8591); }
@@ -569,15 +646,26 @@ const UI_CSS = `
     .dsh-tiered-compaction__stat-label { min-height: 46px; }
 }
 @media (prefers-reduced-motion: reduce) {
-    .dsh-tiered-compaction__bar-fill { transition: none; }
-    .dsh-tiered-compaction__bar-fill--pulse, .dsh-tiered-compaction__chip--bump, .dsh-tiered-compaction__toast { animation: none; }
+    .dsh-tiered-compaction__hud, .dsh-tiered-compaction__bar-fill, .dsh-tiered-compaction__chip, .dsh-tiered-compaction__pill, .dsh-tiered-compaction__capsule, .dsh-tiered-compaction__hud-btn { transition: none !important; animation: none !important; }
+    .dsh-tiered-compaction__bar-fill--pulse, .dsh-tiered-compaction__chip--bump, .dsh-tiered-compaction__toast, .dsh-tiered-compaction__hud-dot, .dsh-tiered-compaction__hud-pct-num, .dsh-tiered-compaction__chip-num { animation: none !important; }
 }
 `;
 
-/** 宿主已有 renderer 样式时只补一次插件私有样式；测试桩没有 DOM API 时安全跳过。 */
+/** 宿主已有 renderer 样式时只补一次插件私有样式；若已存在旧样式节点则原地更新文本，保证热加载立即生效。 */
 function ensureUiStyles() {
     if (typeof document === "undefined" || typeof document.createElement !== "function") return;
-    if (typeof document.querySelector === "function" && document.querySelector(`style[data-plugin-css="${UI_STYLE_ID}"]`)) return;
+    if (typeof document.querySelector === "function") {
+        const existing =
+            document.querySelector(`style[data-plugin="${MODULE_ID}"]`) ??
+            document.querySelector(`style[data-plugin-css="${UI_STYLE_ID}"]`) ??
+            document.querySelector('style[data-plugin-css^="tiered-compaction-ui"]');
+        if (existing) {
+            existing.dataset.plugin = MODULE_ID;
+            existing.dataset.pluginCss = UI_STYLE_ID;
+            if (existing.textContent !== UI_CSS) existing.textContent = UI_CSS;
+            return;
+        }
+    }
     const style = document.createElement("style");
     style.dataset.plugin = MODULE_ID;
     style.dataset.pluginCss = UI_STYLE_ID;
@@ -586,9 +674,20 @@ function ensureUiStyles() {
     if (parent && typeof parent.appendChild === "function") parent.appendChild(style);
 }
 
+/** 鼠标跟随聚光灯：只写 CSS 变量，不触发 React 重渲。 */
+function trackSpotlight(event) {
+    const el = event?.currentTarget;
+    if (!el || typeof el.getBoundingClientRect !== "function" || !el.style) return;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    el.style.setProperty("--tc-mx", `${(((event.clientX - rect.left) / rect.width) * 100).toFixed(1)}%`);
+    el.style.setProperty("--tc-my", `${(((event.clientY - rect.top) / rect.height) * 100).toFixed(1)}%`);
+}
+
 window.__ModuleLoader__.load({
     id: MODULE_ID,
     factory(require) {
+        ensureUiStyles();
         const React = require("react");
         const h = React.createElement;
 
@@ -999,10 +1098,9 @@ window.__ModuleLoader__.load({
          * @returns {{l1: number|null, l2: number|null, l3: number|null, l4: number|null}}
          */
         function chipCountsOf(layers) {
-            if (layers === null || layers === undefined) return { l1: null, l2: null, l3: null, l4: null };
+            if (layers === null || layers === undefined) return { l12: null, l3: null, l4: null };
             return {
-                l1: layers.l1Folded ?? layers.l12Processed,
-                l2: layers.spillCount,
+                l12: layers.l12Processed,
                 l3: layers.l3Evicted,
                 l4: layers.l4Summaries,
             };
@@ -1696,6 +1794,36 @@ window.__ModuleLoader__.load({
                     : { ...BAR_FILL_STYLE, width: "0%" };
 
             const markNodes = PRESSURE_MARKS.map((mark) => renderPressureMark(mark, t));
+            // beta9：HUD 紧凑版把大号压力值放在条上方，右侧挂用量（options.aside）
+            if (options.compact) {
+                return h(
+                    "div",
+                    { key: "pressure-bar", className: "dsh-tiered-compaction__bar", "data-testid": "pressure-bar" },
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__hud-hero" },
+                        h(
+                            "span",
+                            { key: "pressure-value", "data-testid": "pressure-inline-value", className: "dsh-tiered-compaction__hud-pct", style: { color: options.valueColor } },
+                            h("span", { key: valueText, className: "dsh-tiered-compaction__hud-pct-num" }, valueText),
+                        ),
+                        options.aside ?? null,
+                    ),
+                    h(
+                        "div",
+                        { className: "dsh-tiered-compaction__bar-track", style: BAR_STYLE },
+                        h("div", { className: "dsh-tiered-compaction__bar-track-fill", style: BAR_TRACK_STYLE }),
+                        h("div", {
+                            className: options.pulse === true
+                                ? "dsh-tiered-compaction__bar-fill dsh-tiered-compaction__bar-fill--pulse"
+                                : "dsh-tiered-compaction__bar-fill",
+                            "data-testid": "pressure-fill",
+                            style: fillStyle,
+                        }),
+                        markNodes,
+                    ),
+                );
+            }
             return h(
                 "div",
                 { key: "pressure-bar", className: "dsh-tiered-compaction__bar", "data-testid": "pressure-bar" },
@@ -1770,6 +1898,7 @@ window.__ModuleLoader__.load({
          * 所有内容使用宿主 Design Tokens；非 ready 相位不出假数字。
          */
         function StatusPanel(props) {
+            ensureUiStyles();
             const t = typeof props.t === "function" ? props.t : null;
             // useHudState 必须在 useStatusSnapshot 之前（见 useHudState 注释）
             const [hudState, setHudState] = useHudState();
@@ -1865,6 +1994,7 @@ window.__ModuleLoader__.load({
          * 关闭后返回 null：槽位仍注册着，但不出任何 DOM。
          */
         function OverlayHud(props) {
+            ensureUiStyles();
             const t = typeof props?.t === "function" ? props.t : null;
             // useHudState 必须在 useStatusSnapshot 之前（见 useHudState 注释）
             const [state, setHudState] = useHudState();
@@ -1952,7 +2082,7 @@ window.__ModuleLoader__.load({
                             onMouseDown: stopPropagationOf,
                             onPointerDown: stopPropagationOf,
                         },
-                        h("span", { "aria-hidden": "true", style: { ...HUD_DOT_STYLE, backgroundColor: tone.color } }),
+                        h("span", { "aria-hidden": "true", className: "dsh-tiered-compaction__hud-dot", style: { ...HUD_DOT_STYLE, backgroundColor: tone.color } }),
                         h("span", { className: "dsh-tiered-compaction__capsule-pct" }, pressureText),
                     ),
                 );
@@ -1976,6 +2106,7 @@ window.__ModuleLoader__.load({
                     className: "dsh-tiered-compaction__hud",
                     style: { ...hudPositionStyleOf(state), "--dsh-tiered-tone": tone.color },
                     [dragChannel().down]: beginDrag,
+                    onMouseMove: trackSpotlight,
                 },
                 h(
                     "div",
@@ -1984,11 +2115,29 @@ window.__ModuleLoader__.load({
                         key: "tone-dot",
                         "data-testid": "overlay-status-dot",
                         "data-tone": toneKey,
+                        className: "dsh-tiered-compaction__hud-dot",
                         title: tOf(t, tone.key),
                         style: { ...HUD_DOT_STYLE, backgroundColor: tone.color },
                     }),
-                    h("span", { className: "dsh-tiered-compaction__hud-title" }, tOf(t, PANEL_TITLE_KEY)),
-                    h("span", { className: "dsh-tiered-compaction__hud-status" }, statusText),
+                    h(
+                        "span",
+                        { className: "dsh-tiered-compaction__hud-title" },
+                        (() => {
+                            const fullTitle = tOf(t, PANEL_TITLE_KEY);
+                            const prefix = "tiered-compaction ";
+                            if (typeof fullTitle === "string" && fullTitle.startsWith(prefix) && fullTitle.length > prefix.length) {
+                                return [
+                                    h("span", { key: "pkg", className: "dsh-tiered-compaction__hud-title-pkg" }, prefix),
+                                    fullTitle.slice(prefix.length),
+                                ];
+                            }
+                            return fullTitle;
+                        })(),
+                    ),
+                    // beta9：状态正常时不占标题栏，只在读取中/不可用/非 ok 时显示
+                    snapshot.phase === PHASE_READY && snapshot.status === "ok"
+                        ? null
+                        : h("span", { key: "status", className: "dsh-tiered-compaction__hud-status" }, statusText),
                     h(
                         "button",
                         {
@@ -1998,7 +2147,7 @@ window.__ModuleLoader__.load({
                             className: "dsh-tiered-compaction__hud-btn",
                             "aria-label": tOf(t, "hudCollapseTitle"),
                             title: tOf(t, "hudCollapseTitle"),
-                            style: { ...HUD_CLOSE_STYLE, marginLeft: "auto", fontSize: "13px" },
+                            style: { ...HUD_CLOSE_STYLE, marginLeft: "auto", fontSize: "13px", paddingBottom: "3px" },
                             onClick: () => updateHud({ collapsed: true }),
                             onMouseDown: stopPropagationOf,
                             onPointerDown: stopPropagationOf,
@@ -2011,9 +2160,10 @@ window.__ModuleLoader__.load({
                             key: "close",
                             type: "button",
                             "data-testid": "overlay-close",
+                            className: "dsh-tiered-compaction__hud-btn",
                             "aria-label": tOf(t, "hudCloseTitle"),
                             title: tOf(t, "hudCloseTitle"),
-                            style: { ...HUD_CLOSE_STYLE, marginLeft: "0" },
+                            style: { ...HUD_CLOSE_STYLE, marginLeft: "-4px", fontSize: "15px" },
                             onClick: closeHud,
                             // 按下若冒泡到 HUD 就会开始拖动，这里截断
                             onMouseDown: stopPropagationOf,
@@ -2022,9 +2172,9 @@ window.__ModuleLoader__.load({
                         "×",
                     ),
                 ),
-                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false, pulse: showDrop }),
-                hudUsageNodeOf(snapshot, t),
-                hudChipsNodeOf(snapshot, now),
+                ...panelBodyOf(snapshot, { compact: true, valueColor: tone.color, t, showStatus: false, pulse: showDrop, aside: hudUsageNodeOf(snapshot, t) }),
+                hudChipsNodeOf(snapshot, now, t),
+                hudFooterNodeOf(snapshot, t, now),
                 hudAutoWarningNodeOf(snapshot, t, now),
                 showDrop ? compactedToastNodeOf(drop, t) : null,
             );
@@ -2036,8 +2186,47 @@ window.__ModuleLoader__.load({
             return h(
                 "div",
                 { key: "usage", className: "dsh-tiered-compaction__hud-usage", "data-testid": "overlay-usage" },
-                tOf(t, "usageTokens", { current: formatTokens(snapshot.currentTokens), window: formatTokens(snapshot.window) }),
+                h("span", { key: "tokens", className: "dsh-tiered-compaction__hud-tokens" }, tOf(t, "usageTokens", { current: formatTokens(snapshot.currentTokens), window: formatTokens(snapshot.window) })),
+                toSummaryNodeOf(snapshot, t),
             );
+        }
+
+        /** beta8：距第 4 层摘要线（82% 窗口）还剩多少 token；窗口未知时不显示。 */
+        function toSummaryNodeOf(snapshot, t) {
+            if (!(snapshot.window > 0) || snapshot.autoEnabled === false) return null;
+            const left = Math.round(snapshot.window * PRESSURE_LOSSY_FLOOR_RATIO - snapshot.currentTokens);
+            const text = left <= 0 ? tOf(t, "summaryDue") : tOf(t, "toSummary", { value: formatTokens(left) });
+            return h("span", { key: "to-summary", className: left <= 0 ? "dsh-tiered-compaction__hud-due" : "dsh-tiered-compaction__hud-to-summary" }, text);
+        }
+
+        /** beta8：相对时间（分钟粒度足够；未来时刻按刚刚处理）。 */
+        function agoTextOf(at, now, t) {
+            const minutes = Math.floor(Math.max(0, now - at) / 60000);
+            if (minutes < 1) return tOf(t, "agoJustNow");
+            if (minutes < 60) return tOf(t, "agoMinutes", { n: minutes });
+            const hours = Math.floor(minutes / 60);
+            return hours < 24 ? tOf(t, "agoHours", { n: hours }) : tOf(t, "agoDays", { n: Math.floor(hours / 24) });
+        }
+
+        /** beta8：HUD 底行「共省 ≈ 1.1M · 上次摘要 12 分钟前」；两项都缺时不渲染。 */
+        function hudFooterNodeOf(snapshot, t, now) {
+            if (snapshot.phase !== PHASE_READY) return null;
+            const parts = [];
+            const total = totalTokensSavedOf(snapshot.layers);
+            if (total !== null && total > 0) parts.push(tOf(t, "hudFooterSaved", { value: formatTokens(total) }));
+            const last = snapshot.lastCompaction;
+            if (last !== null && last !== undefined) parts.push(tOf(t, "hudFooterLast", { ago: agoTextOf(last.at, now, t) }));
+            if (parts.length === 0) return null;
+            if (parts.length === 2) {
+                return h(
+                    "div",
+                    { key: "footer", className: "dsh-tiered-compaction__hud-footer", "data-testid": "overlay-footer" },
+                    h("span", { key: "saved", className: "dsh-tiered-compaction__hud-footer-saved" }, parts[0]),
+                    h("span", { key: "sep", className: "dsh-tiered-compaction__hud-footer-sep", "aria-hidden": "true" }, " · "),
+                    h("span", { key: "last", className: "dsh-tiered-compaction__hud-footer-last" }, parts[1]),
+                );
+            }
+            return h("div", { key: "footer", className: "dsh-tiered-compaction__hud-footer", "data-testid": "overlay-footer" }, parts.join(" · "));
         }
 
         /**
@@ -2045,7 +2234,14 @@ window.__ModuleLoader__.load({
          * 为什么用 aria-label 不用 title：title 里的「驱逐/摘要」会被当成刻度线
          * 语义标签（d25 按 title 数刻度线），芯片不该混进去。
          */
-        function hudChipsNodeOf(snapshot, now) {
+        /** beta8：芯片后缀「 · 省 268k」；读不到节省量时不显示。 */
+        function chipSavedNoteOf(layers, key, t) {
+            const value = key === "l12" ? layers.l12TokensSaved : key === "l3" ? layers.l3TokensSaved : layers.l4TokensSaved;
+            if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+            return h("span", { className: "dsh-tiered-compaction__chip-saved" }, tOf(t, "chipSaved", { value: formatTokens(value) }));
+        }
+
+        function hudChipsNodeOf(snapshot, now, t) {
             if (snapshot.phase !== PHASE_READY || snapshot.layers === null) return null;
             const counts = chipCountsOf(snapshot.layers);
             return h(
@@ -2064,8 +2260,13 @@ window.__ModuleLoader__.load({
                                 ? "dsh-tiered-compaction__chip dsh-tiered-compaction__chip--bump"
                                 : "dsh-tiered-compaction__chip",
                         },
-                        h("b", null, chip.label),
-                        counts[chip.key] === null ? STRINGS.zh.missingValue : String(counts[chip.key]),
+                        h("b", null, tOf(t, chip.titleKey)),
+                        h(
+                            "span",
+                            { key: String(counts[chip.key]), className: "dsh-tiered-compaction__chip-num" },
+                            counts[chip.key] === null ? STRINGS.zh.missingValue : String(counts[chip.key]),
+                        ),
+                        chipSavedNoteOf(snapshot.layers, chip.key, t),
                     );
                 }),
             );

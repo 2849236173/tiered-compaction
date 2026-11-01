@@ -98,16 +98,16 @@ function makeRealisticSession() {
 }
 
 /** 按真实结构造一对 tool/call + tool/result（result 上**没有**工具名）。 */
-function appendToolPair(session, { callId, name, text }) {
+function appendToolPair(session, { callId, name, text, turn = 1 }) {
     session.append("tool/call", {
-        turn: 1,
+        turn,
         step: 1,
         callId,
         name,
         arguments: JSON.stringify({ file_path: "src/x.js" }),
     });
     session.append("tool/result", {
-        turn: 1,
+        turn,
         step: 1,
         message: {
             role: "tool",
@@ -143,6 +143,8 @@ test("真实事件结构下（result 不带工具名），第 3 层必须能认�
     // 压力 83.9% 却驱逐数为 0 的真因。先跑一遍第 1-2 层复现该前提。
     const source = session.eventAt(session.surface.nodes[0]);
     await service.observer.handleEvent(session, source);
+    // beta8：最近 2 轮受保护，追加到第 3 轮后 turn 1 的结果才可驱逐
+    session.append("user/message", { turn: 3, content: [{ type: "text", text: "继续" }] });
 
     await service.compactIfNeeded({ session }, "pressure", undefined);
 
@@ -186,4 +188,25 @@ test("非可重放工具（如 pwsh）不得被驱逐——认名单必须准，
         before,
         "pwsh 结果不可靠重放（有副作用），绝不能当易失内容驱逐",
     );
+});
+
+test("beta8 第 3 层不驱逐最近 2 轮的工具结果（防止刚读到就被驱逐、模型反复重读）", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "evictrecent-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const ctx = makeCtx(9000);
+    await apply(ctx, { enabled: true, archiveDir: dir, auto: false });
+    const service = ctx.get("compaction");
+    const session = makeRealisticSession();
+    appendToolPair(session, { callId: "c-old", name: "read", text: "旧内容".repeat(300), turn: 1 });
+    appendToolPair(session, { callId: "c-prev", name: "read", text: "上一轮内容".repeat(300), turn: 4 });
+    appendToolPair(session, { callId: "c-now", name: "read", text: "本轮内容".repeat(300), turn: 5 });
+    const { evicted } = await service.observer.evictStaleToolResults(session);
+    assert.equal(evicted, 1, "只应驱逐 turn 1 那条");
+    const texts = session.surface.nodes
+        .map((seq) => session.eventAt(seq))
+        .filter((e) => e.type === "tool/result")
+        .map((e) => e.data.message.content.map((b) => b.text ?? "").join(""));
+    assert.ok(texts.some((x) => x.includes("本轮内容")), "本轮结果必须保留");
+    assert.ok(texts.some((x) => x.includes("上一轮内容")), "上一轮结果必须保留");
+    assert.ok(!texts.some((x) => x.includes("旧内容")), "turn 1 结果应被驱逐");
 });

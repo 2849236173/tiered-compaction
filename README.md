@@ -9,9 +9,7 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 
 本插件把压缩拆成四层，前三层零 LLM 成本吃掉大部分体积，只有真正触阈值才动用一次带预算预留的摘要。
 
-**当前尝新版：0.4.0-beta.4（beta / 尝新版，未完全测试通过）**。自动化测试通过，但真实桌面 UI 与真实 LLM 摘要链路尚未完成验证；反馈问题前请保留会话备份。
-
-> beta 版不是正式稳定版。只想使用稳定版本的用户请暂缓升级。
+**当前正式版：0.4.0（正式版 / 稳定版）**。自动化测试全部通过，悬浮窗新界面已在真实桌面端验收。npm 的 `latest` 标签指向这个版本，直接安装即可。
 
 ## 四层管线
 
@@ -31,6 +29,20 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 1. **每层留恢复机制** —— 折叠有逆变换记录；落盘有 SHA-256 与完整文件；驱逐项记原始位置（`read`/`grep`/`glob` 重跑即恢复）；摘要前全量存档。
 2. **被取代引用记谱系** —— 任何内容被取代都登记「原位置 → 新位置 → 取代者」，可审计可回溯，不静默删。
 3. **自身有熔断与仲裁** —— 单层连续失败自动降级跳过并告警，主流程不被阻断；仲裁器保证一份内容只归一层处理。
+
+## 选哪个预设
+
+DSH 的每个会话在创建时绑定一个 agent 预设（preset），之后不能更换。压缩服务装在预设内部，所以**四层能不能全开取决于会话用的是哪个预设**：
+
+| 预设 | 第 1-2 层（折叠、落盘） | 第 3-4 层（驱逐、摘要） | 怎么得到 |
+|---|---|---|---|
+| `cordis`（桌面端默认） | ✅ | ✅ | 安装 `tiered-cordis-preset` bundle |
+| `ptc-tc` | ✅ | ✅ | `tools/gen-ptc-tc.ps1 -Apply` |
+| `standard`（Bot 和群会话固定用它） | ✅ | ✅ | `tools/gen-standard-tc.ps1 -Apply` |
+| 官方 `ptc`、`minimal` | ✅ | 0.4.0-beta.8 起 ✅ | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`、`-Preset minimal -Apply` |
+| 其它未覆盖的预设 | ✅ | ❌（仍是官方压缩） | — |
+
+**推荐**：新会话选 `cordis` 或 `ptc-tc`；四个生成器都跑过之后，内置预设都能用全四层。生成器只在 profile 补丁里改动各自的标记区块，删掉区块就能恢复官方预设。已经绑定官方预设的旧会话，在覆盖生效前不会补上第 3-4 层，需要新开会话。
 
 ## 两种工作模式
 
@@ -53,7 +65,7 @@ DSH 默认压缩在上下文到阈值时调一次 LLM 摘要、整段换掉历�
 
 插件是纯 ESM + JSDoc，无构建链，`src/` 直出，安装前无需编译。
 
-**推荐从 npm 装**（版本号清晰、`update` 能自动升到最新稳定版）；没有 npm 网络条件时用 GitHub 路线。
+从 npm 安装（版本号清晰，`update` 能升到最新稳定版）。
 
 ### 先确认你用哪个 profile
 
@@ -75,36 +87,24 @@ DSH 每个运行形态对应一个 profile 名，装到哪个 profile 就只在�
 ```powershell
 # 从 npm 装（推荐）：不指定 tag 就是最新稳定版
 dsh plugin --profile desktop add dsh-tiered-compaction
-
-# 或从 GitHub 装
-dsh plugin --profile desktop add "github:2849236173/tiered-compaction"
 ```
 
 ### Web 端
 
 ```powershell
 dsh plugin --profile web add dsh-tiered-compaction
-
-# 或从 GitHub 装
-dsh plugin --profile web add "github:2849236173/tiered-compaction"
 ```
 
 ### headless（命令行 / 脚本）
 
 ```powershell
 dsh plugin --profile headless add dsh-tiered-compaction
-
-# 或从 GitHub 装
-dsh plugin --profile headless add "github:2849236173/tiered-compaction"
 ```
 
 ### TUI（终端界面）
 
 ```powershell
 dsh plugin --profile tui add dsh-tiered-compaction
-
-# 或从 GitHub 装
-dsh plugin --profile tui add "github:2849236173/tiered-compaction"
 ```
 
 ### 本地开发（改代码即生效）
@@ -149,8 +149,7 @@ dsh plugin --profile web update dsh-tiered-compaction
 # headless / TUI 同理，只换 --profile
 ```
 
-**从 npm 装的**：`update` 只升到 `latest`（稳定版），不会误吃 beta。
-**从 GitHub 装的**：`update` 升到 main 最新提交。
+`update` 只升到 `latest`（稳定版），不会装上 beta。要装 beta，指定版本：`dsh plugin --profile desktop add dsh-tiered-compaction@beta`。
 
 **升级后必须完全退出并重启 DSH**，否则跑的还是内存里的旧代码。
 
@@ -196,7 +195,7 @@ foreach ($name in @("dsh-tiered-compaction", "@local\dsh-tiered-compaction")) {
 }
 ```
 
-输出形如 `dsh-tiered-compaction → 0.3.1`，那就是当前生效的版本。
+输出形如 `dsh-tiered-compaction → 0.4.0`，那就是当前生效的版本。
 
 > **注意**：DSH 不会主动提示有新版本。想知道有没有更新，从 npm 装的可以跑 `npm view dsh-tiered-compaction version` 对比；也可以看仓库的 [CHANGELOG](CHANGELOG.md)。
 
@@ -210,7 +209,7 @@ tiered-compaction (@local/dsh-tiered-compaction): never started
 
 后面跟着该会话 resume 失败（`gateway/internal: resume failed for session ...`）。真因是模块解析不到，被 loader 吞成一句 `logger.error`。
 
-本插件自 0.2.0 起包名是 **`dsh-tiered-compaction`（无 scope）**：npm 装、tarball 装、`github:` 装、本地 `link:` 装，落地的都是同名的 `node_modules/dsh-tiered-compaction`。**不要写 `@local/...`** —— npm 上没有这个 scope，写了必然解析不到。
+本插件自 0.2.0 起包名是 **`dsh-tiered-compaction`（无 scope）**：npm 装、tarball 装、本地 `link:` 装，落地的都是同名的 `node_modules/dsh-tiered-compaction`。**不要写 `@local/...`** —— npm 上没有这个 scope，写了必然解析不到。
 
 生成器（`tools/gen-standard-tc.*`、`tools/gen-ptc-tc.*`）已改为从已装包推导包名，并在写回后自动跑一次自检。手工改过配置、或想确认现状时：
 

@@ -234,7 +234,7 @@ test("D28-1 设置页分区四层数字块：四个数字 + 省字节数，数�
     assert.match(text, /软压力驱逐\s*0/, "驱逐数=l3Evicted（0 也显示）");
     assert.match(text, /有损摘要\s*3/, "摘要数=l4Summaries");
     // beta4 口径修正：旧载荷只有 l12BytesSaved（L1+L2 合计**字符**数），不再冒充「落盘省字节」
-    assert.match(text, /L1\+L2 合计（字符）省 ~2\.2M/, "旧载荷回落合计字符，并明确标注口径");
+    assert.match(text, /折叠\+落盘合计（字符）省 ~2\.2M/, "旧载荷回落合计字符，并明确标注口径");
 
     // 换一组 payload：数字跟着变，证明来自 API 而非写死
     const treeB = (await mountSlot(SETTINGS_SLOT, { payload: PAYLOAD_B })).tree;
@@ -289,7 +289,7 @@ test("D28-4 overlay 不含四层数字（保持迷你，方案 §3.3 定案）",
     assert.equal(nodeWithTestId(tree, LAYERS_BLOCK_TESTID), null, "overlay 不渲染四层数字块");
     const text = collectTextOf(tree);
     assert.doesNotMatch(text, /无损折叠|落盘存档|软压力驱逐|有损摘要/, "overlay 连四层标签都不出现");
-    assert.doesNotMatch(text, /折叠\s*107|摘要\s*3/, "一行式也不属于 overlay");
+    // beta8：一行式由 HUD 芯片承担（用户要求悬浮窗显示各层），这里只约束不渲染设置页那块大面板
 });
 
 test("D28-5 idle/无会话 payload：l4Summaries=0 渲染零值，不可用判定不误伤", async () => {

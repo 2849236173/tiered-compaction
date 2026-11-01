@@ -226,7 +226,7 @@ test("D32-1 分层字节：折叠行=l1BytesSaved，落盘行=l2BytesSaved，不
     const legacy = beta4Payload();
     for (const key of ["l1Folded", "l1BytesSaved", "l2BytesSaved"]) delete legacy.layers[key];
     const legacyTree = (await mount(SETTINGS_SLOT, legacy)).tree;
-    assert.match(collectTextOf(layerRow(legacyTree, "spillCount")), /L1\+L2 合计（字符）/);
+    assert.match(collectTextOf(layerRow(legacyTree, "spillCount")), /折叠\+落盘合计（字符）/);
     assert.match(collectTextOf(layerRow(legacyTree, "l12Processed")), /40/, "缺 l1Folded 回落 l12Processed");
 });
 
@@ -371,10 +371,11 @@ test("D32-8 同会话压力降 ≥10 点 → 已压缩提示 + 条脉冲；计�
     let hud = env.react.render(Overlay, {});
     assert.equal(byTestId(hud, "overlay-toast"), null, "首个快照没有对比对象");
     const chipText = collectTextOf(byTestId(hud, "overlay-chips"));
-    assert.match(chipText, /L131/);
-    assert.match(chipText, /L26/);
-    assert.match(chipText, /L34/);
-    assert.match(chipText, /L41/);
+    // beta8：芯片用动作名（不再是 L1-L4），折叠与落盘合并为一项
+    assert.doesNotMatch(chipText, /L[1-4]\d/);
+    assert.match(chipText, /折叠\/落盘/);
+    assert.match(chipText, /驱逐4/);
+    assert.match(chipText, /摘要1/);
 
     current = beta4Payload({ pressure: 0.4, window: windowSize, layers: { l4Summaries: 2 } });
     env.tick();
@@ -385,8 +386,8 @@ test("D32-8 同会话压力降 ≥10 点 → 已压缩提示 + 条脉冲；计�
     assert.match(byTestId(hud, "pressure-fill").props.className, /bar-fill--pulse/);
     const l4 = nodeWith(hud, (node) => node.props?.["data-chip"] === "l4");
     assert.match(l4.props.className, /chip--bump/, "L4 计数上涨高亮");
-    const l1 = nodeWith(hud, (node) => node.props?.["data-chip"] === "l1");
-    assert.doesNotMatch(l1.props.className, /chip--bump/, "没涨的不高亮");
+    const l12 = nodeWith(hud, (node) => node.props?.["data-chip"] === "l12");
+    assert.doesNotMatch(l12.props.className, /chip--bump/, "没涨的不高亮");
 
     // 换会话的落差不是压缩
     const other = loadClient();
@@ -411,4 +412,23 @@ test("D32-8 同会话压力降 ≥10 点 → 已压缩提示 + 条脉冲；计�
     small.tick();
     await flush();
     assert.equal(byTestId(small.react.render(SmallOverlay, {}), "overlay-toast"), null);
+});
+
+test("D32-9 beta8 HUD：芯片带节省量，用量行带距摘要线余量，底行显示总节省与上次摘要", async () => {
+    const env = loadClient();
+    const current = beta4Payload({
+        window: 1000000, currentTokens: 500000,
+        lastCompaction: { at: Date.now() - 12 * 60000, trigger: "auto", shadowedNodes: 3, shadowedTokenCount: 1000, summaryTokenCount: 100 },
+    });
+    env.setResponder(() => current);
+    const Overlay = env.componentOf(OVERLAY_SLOT);
+    env.react.render(Overlay, {});
+    await flush();
+    const hud = env.react.render(Overlay, {});
+    const chips = collectTextOf(byTestId(hud, "overlay-chips"));
+    assert.match(chips, /驱逐4省 66\.1k/);
+    assert.match(chips, /摘要1省 120k/);
+    // 82% × 1M − 500k = 320k
+    assert.match(collectTextOf(byTestId(hud, "overlay-usage")), /tokens距摘要 ≈ 320k/);
+    assert.equal(collectTextOf(byTestId(hud, "overlay-footer")), "共省 ≈ 206k · 上次摘要 12 分钟前");
 });

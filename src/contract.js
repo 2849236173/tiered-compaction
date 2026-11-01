@@ -23,10 +23,11 @@ import {
     CompactionEngine,
     CompactionId,
     ManualCompactionError,
-    compactCheckpointSource,
-    toolPairingBalancedBefore,
-    toolPairingBalancedAfter,
 } from "@deepseek-ai/dsh-compaction";
+// beta7：检查点 source 改用自带实现（CLI 版 dsh-compaction 产出 kind:"plugin"，v4 拒写）
+import { compactCheckpointSource, sessionFormatVersion } from "./checkpoint-source.js";
+// beta6：配对检查改用插件自带实现（外部解析可能落到不兼容的 CLI 版 dsh-compaction）
+import { toolPairingBalancedBefore, toolPairingBalancedAfter } from "./tool-pairing.js";
 import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler, errorChain } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "./soft-pressure.js";
@@ -1417,6 +1418,12 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 } catch (error) {
                     // 钩子失败绝不阻断步进（basic 同款口径）
                     ctx.logger.warn(`tiered-compaction: pressure 钩子失败，继续步进：${error?.message ?? error}`);
+                    // 只给消息定位不了故障点（beta4 实测 "reading '1933'" 无从下手），堆栈落 debug
+                    // 宿主日志不收 debug 级，堆栈前几帧随 warn 一起落盘
+                    if (error?.stack) {
+                        const frames = String(error.stack).split("\n").slice(1, 7).map((l) => l.trim()).join(" | ");
+                        ctx.logger.warn(`tiered-compaction: pressure 钩子失败堆栈：${frames}`);
+                    }
                 }
             }
             return next();
@@ -1767,7 +1774,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
             });
             const checkpointMessage = createUserMessage({
                 content: frameSummaryText(summary),
-                source: compactCheckpointSource(compactionId, sourceCommandId),
+                source: compactCheckpointSource(compactionId, sourceCommandId, sessionFormatVersion(session)),
             });
             session.append("user/message", checkpointMessage, {
                 surfaceOp: { op: "replace", startSeq: start, endSeq: end },

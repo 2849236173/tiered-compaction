@@ -87,7 +87,7 @@ function entryFor(session) {
     const t = table();
     let entry = t.sessions.get(id);
     if (entry === undefined || entry.ref.deref() !== session) {
-        entry = { ref: new WeakRef(session), counts: zeroCounts() };
+        entry = { ref: new WeakRef(session), counts: seedCountsFromLog(session) };
     }
     // 重新插入 = 移到 Map 尾部；淘汰从头部删
     t.sessions.delete(id);
@@ -116,7 +116,9 @@ export function layerCountsFor(session) {
 export function layerStatsSnapshot(session) {
     const id = session?.id;
     const entry = typeof id === "string" ? table().sessions.get(id) : undefined;
-    return entry !== undefined && entry.ref.deref() === session ? { ...entry.counts } : zeroCounts();
+    if (entry !== undefined && entry.ref.deref() === session) return { ...entry.counts };
+    // beta8：本进程还没登记的会话（重启后首次查询）按日志回填，不留条目；否则健康检查会误报零驱逐
+    return session !== null && typeof session === "object" && typeof session.eventAt === "function" ? seedCountsFromLog(session) : zeroCounts();
 }
 
 /**
@@ -217,4 +219,53 @@ export function startedAt() {
 /** 仅测试用：清空共享表（每个用例从零开始）。 */
 export function __resetSharedStatsForTests() {
     globalThis[SHARED_KEY] = freshTable();
+}
+
+/**
+ * beta8：从会话日志回填累计计数，重启后不再从 0 开始。
+ *
+ * 每次第 1-3 层动作都会写一对 `compaction/prune` + 替换用 `tool/result`，
+ * 第 4 层写 `compaction/summary`；日志随会话持久化，所以按日志统计就是
+ * 「本会话至今」的累计值，不需要另存文件。替换内容的文字决定归哪一层：
+ *   - 「[已驱逐：」→ 第 3 层驱逐
+ *   - 其余本插件标记 → 第 1-2 层（折叠与落盘文本相同，只计合计）
+ * 只认本插件写的标记，官方 pruner 写的 prune 不计入。读失败时返回全零。
+ * @param {object} session
+ */
+export function seedCountsFromLog(session) {
+    const counts = zeroCounts();
+    try {
+        const end = typeof session?.seq === "number" ? session.seq : 0;
+        if (typeof session?.eventAt !== "function" || end <= 0) return counts;
+        for (let seq = 0; seq < end; seq++) {
+            const event = session.eventAt(seq);
+            if (event === undefined) continue;
+            if (event.type === "compaction/summary") {
+                counts.summaries += 1;
+                counts.summaryTokensSaved += Math.max(0, Number(event.data?.shadowedTokenCount) || 0);
+                continue;
+            }
+            if (event.type !== "compaction/prune") continue;
+            const replacement = session.eventAt(seq + 1);
+            if (replacement?.type !== "tool/result") continue;
+            const text = (replacement.data?.message?.content ?? [])
+                .map((block) => (typeof block?.text === "string" ? block.text : ""))
+                .join("");
+            if (!text.includes("[tiered-compaction") && !text.includes("[已驱逐：")) continue;
+            const before = Math.max(0, Number(event.data?.shadowedTokenCount) || 0);
+            const saved = Math.max(0, before - Math.ceil(text.length / 4));
+            if (text.includes("[已驱逐：")) {
+                counts.evicted += 1;
+                counts.evictTokensSaved += saved;
+            } else {
+                counts.processed += 1;
+                counts.l12TokensSaved += saved;
+                // 折叠与落盘的替换文本相同（都带存档路径），日志里分不出层，只记合计
+            }
+        }
+    } catch {
+        return zeroCounts();
+    }
+    counts.seededFromLog = true;
+    return counts;
 }

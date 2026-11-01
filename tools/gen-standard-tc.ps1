@@ -55,6 +55,9 @@
 #>
 param(
     [string]$Profile = "desktop",
+    # beta8：同一套逻辑覆盖官方 standard / ptc / minimal 的压缩引擎（各自一个标记区块）
+    [ValidateSet("standard", "ptc", "minimal")]
+    [string]$Preset = "standard",
     [switch]$Apply,
     [string]$ArchiveDir = "",
     [string]$PluginName = ""
@@ -66,7 +69,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $generator = Join-Path $PSScriptRoot "gen-standard-tc.mjs"
 $outDir = Join-Path $PSScriptRoot "out"
-$outFile = Join-Path $outDir "preset-standard-tc.yml"
+$outFile = Join-Path $outDir "preset-$Preset-tc.yml"
 $profileDir = Join-Path $env:USERPROFILE ".dsh\profiles\$Profile"
 if (-not $ArchiveDir) { $ArchiveDir = Join-Path $env:USERPROFILE ".dsh\tiered-archive" }
 
@@ -95,7 +98,7 @@ Write-Host "      已写入 $dumpFile（$((Get-Content $dumpFile).Count) 行）"
 
 # ── 2) 生成 + 自检（Node 侧，失败即退且不写产物）──────────────
 Write-Host "[2/3] 生成 standard 覆盖块并自检 ..." -ForegroundColor Cyan
-$genArgs = @($dumpFile, $outFile, $ArchiveDir, "--profile-dir", $profileDir)
+$genArgs = @($dumpFile, $outFile, $ArchiveDir, "--profile-dir", $profileDir, "--preset", $Preset)
 if ($PluginName) { $genArgs += @("--plugin-name", $PluginName) }
 Push-Location $repoRoot
 try {
@@ -115,14 +118,20 @@ if ($Apply) {
     if (-not (Test-Path $patchPath)) { Write-Error "找不到 profile 补丁：$patchPath" }
 
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backup = "$patchPath.standard-tc-bak-$stamp"
+    $backup = "$patchPath.$Preset-tc-bak-$stamp"
     Copy-Item $patchPath $backup -Force
     Write-Host "      已备份 $backup"
 
     # 用 .NET 直读，避免 PS 版本差异带来的编码问题
     $patchText = [System.IO.File]::ReadAllText($patchPath, [System.Text.Encoding]::UTF8)
-    $beginMarker = '# ══ D17：standard 原地换压缩引擎'
-    $endMarker = '# ══ D17 区块结束 ══'
+    # standard 沿用历史标记（已写入 profile 的区块要能被识别替换）；其它 preset 各用独立标记
+    if ($Preset -eq "standard") {
+        $beginMarker = '# ══ D17：standard 原地换压缩引擎'
+        $endMarker = '# ══ D17 区块结束 ══'
+    } else {
+        $beginMarker = "# ══ D17：$Preset 原地换压缩引擎"
+        $endMarker = "# ══ D17-$Preset 区块结束 ══"
+    }
 
     $newBlock = $beginMarker + " ══`n" + ((Get-Content $outFile -Encoding UTF8) -join "`n") + "`n" + $endMarker + "`n"
 
@@ -132,9 +141,22 @@ if ($Apply) {
         # 静默不命中、还误报「已替换」。
         # 注意：不能用 (?=^- id: )——^ 在未开启 Multiline 时只匹配字符串开头，
         # 该分支会永远失效，正则退回 \z 把块后面所有条目一并吞掉。
-        $pattern = [regex]::Escape($beginMarker) + '[\s\S]*?(\r?\n' + [regex]::Escape($endMarker) + '\r?\n|\r?\n(?=- id: )|\r?\n?\z)'
+        # beta5 修复：旧正则里的 `\r?\n(?=- id: )` 会先命中块内自身的
+        # `- id: preset-standard`，只替换块头注释、旧块体原样留下，每次 -Apply
+        # 多叠一份 standard（宿主按 id 取最后一份，所以此前没表现出故障）。
+        # 现在：有结束标记时一律吃到「最后一个」结束标记，把历史叠出的副本一并收拢；
+        # 只有完全没有结束标记的老格式才退回「下一个非 preset-standard 顶层条目 / 文件末尾」。
+        if ($patchText.Contains($endMarker)) {
+            $pattern = [regex]::Escape($beginMarker) + '[\s\S]*' + [regex]::Escape($endMarker) + '\r?\n?'
+        } else {
+            $pattern = [regex]::Escape($beginMarker) + ('[\s\S]*?(\r?\n(?=- id: (?!preset-' + $Preset + '\b))|\r?\n?\z)')
+        }
+        # 「是否命中」看正则本身，不看替换前后是否相同：内容已是最新时替换结果等于原文，属正常幂等
+        if (-not [System.Text.RegularExpressions.Regex]::IsMatch($patchText, $pattern)) {
+            Write-Error "替换未命中：D17 开始标记存在但边界匹配失败，中止写回（profile 未被改动）。"
+        }
         $replaced = [System.Text.RegularExpressions.Regex]::Replace($patchText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $newBlock }, 1)
-        if ($replaced -eq $patchText) {
+        if ($false) {
             Write-Error "替换未命中：D17 开始标记存在但边界匹配失败，中止写回（profile 未被改动）。"
         }
         $patchText = $replaced
