@@ -8,10 +8,10 @@
  *
  * 纯接线边界（PO 口径）：不新增业务逻辑、不改 M2-M5 任何既有代码。
  */
-import { CircuitBreaker, arbitrate } from "./circuit-breaker.js";
+import { CircuitBreaker, arbitrate } from "../guard/circuit-breaker.js";
 import { pressureAction, evictVolatile } from "./soft-pressure.js";
 import { lossyThreshold } from "./lossy-summarize.js";
-import { Lineage } from "./lineage.js";
+import { Lineage } from "../session/lineage.js";
 
 /**
  * 引擎依赖注入（全部由构造方提供，模块自身零环境依赖）：
@@ -131,7 +131,7 @@ export class TieredCompactionEngine {
      * @param {{oldGoalId: string, newGoalId: string, nodes: Array}} event
      */
     async purgeOnGoalSwitch(event) {
-        const { purgeOnGoalSwitch } = await import("./goal-switch.js");
+        const { purgeOnGoalSwitch } = await import("./session/goal-switch.js");
         return purgeOnGoalSwitch(event, { archiveDir: this.deps.archiveDir, lineage: this.lineage });
     }
 

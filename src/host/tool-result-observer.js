@@ -19,9 +19,9 @@
  * - `compaction/prune` 必须先于 replace 写入（宿主据此做影子定价）；
  * - 任何异常只记警告，绝不阻断会话（与 basic / pre-step 钩子同款口径）。
  */
-import { nodeLocation } from "./lineage.js";
+import { nodeLocation } from "../session/lineage.js";
 // beta3 多 realm：计数存进进程级共享表，状态路由持有者（可能是别的实例）也读得到。
-import { layerCountsFor, layerStatsSnapshot } from "./shared-stats.js";
+import { layerCountsFor, layerStatsSnapshot } from "../session/shared-stats.js";
 
 /** 替换内容的标记：一眼能看出这是被压缩过的，并给出存档路径。 */
 export const PRUNE_MARKER = "[tiered-compaction";
@@ -81,7 +81,7 @@ function isLiveSurfaceNode(session, event) {
 export class ToolResultObserver {
     /**
      * @param {{
-     *   engine: import('./engine.js').TieredCompactionEngine,
+     *   engine: import('./core/engine.js').TieredCompactionEngine,
      *   ctx: { logger: {info(msg: string): void, warn(msg: string): void}, on(name: string, fn: Function): void },
      *   enabled?: boolean,
      * }} options

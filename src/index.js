@@ -14,16 +14,16 @@ import { join } from "node:path";
 
 import { Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { TieredCompactionEngine } from "./engine.js";
+import { TieredCompactionEngine } from "./core/engine.js";
 // A12 契约层：宿主三入口 + 自动钩子的真实实现（enabled=true 的接管路径）。
 // 注意：本模块名与 TieredCompactionEngineService 同名导出会与下方 M4.5 服务类
 // 冲突，故以契约类名义导入并替换接管服务的实现。
-import { TieredCompactionEngineService as HostContractEngineService } from "./contract.js";
+import { TieredCompactionEngineService as HostContractEngineService } from "./host/contract.js";
 // P1/P2-1 修补：工具结果观察者——把第 1-3 层真正接到宿主会话事件流。
-import { ToolResultObserver } from "./tool-result-observer.js";
-import { setActiveObserver } from "./shared-stats.js";
+import { ToolResultObserver } from "./host/tool-result-observer.js";
+import { setActiveObserver } from "./session/shared-stats.js";
 // D22：把阈值夹取的告警接到宿主日志（见 reportCoexistingEngines 与 lossy-summarize）。
-import { setThresholdWarnSink } from "./lossy-summarize.js";
+import { setThresholdWarnSink } from "./core/lossy-summarize.js";
 // D24：单写者守卫——全进程内最多一个「会写归档 / 会产 prune」的活跃实例。
 // 背景：插件曾被多处装配（bundle 根平面 + preset realm），两个实例都把观察者
 // 接到同一条会话事件流上，各自对同一批工具结果发 compaction/prune，第二枚
@@ -33,7 +33,7 @@ import {
     compactionSeat,
     OBSERVER_SEAT,
     releaseSingleWriter,
-} from "./single-writer-guard.js";
+} from "./guard/single-writer-guard.js";
 
 /** 本插件在 Cordis 中的服务位名（不与宿主 `compaction` 冲突）。 */
 const SERVICE_NAME = "tieredCompaction";

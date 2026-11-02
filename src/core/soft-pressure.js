@@ -4,7 +4,7 @@
  * todo/goal/plan/用户消息/摘要节点永不清理。被驱逐项一律登记谱系表（A10），
  * 可重放项标记 replayable 供重跑恢复（保真原则 1）。
  */
-import { nodeLocation } from "./lineage.js";
+import { nodeLocation } from "../session/lineage.js";
 
 /** 驱逐优先级表（设计稿 §3）：数值越小越先驱逐；-1 表示永不清理。 */
 export const EVICTION_PRIORITY = {
@@ -47,7 +47,7 @@ export function pressureAction(pressure) {
  *   kind ∈ EVICTION_PRIORITY 键；tool ∈ bash/pwsh/edit/write/read/grep/glob
  *
  * @param {Array<{seq: number, kind: string, tool?: string, content: string}>} nodes
- * @param {{lineage: import('./lineage.js').Lineage}} deps 谱系表（必传，驱逐必须可审计）
+ * @param {{lineage: import('./session/lineage.js').Lineage}} deps 谱系表（必传，驱逐必须可审计）
  * @returns {{evicted: Array<{seq: number, reason: string, replayable: boolean}>, kept: Array<object>}}
  *   evicted：被驱逐节点及其恢复方式；kept：保留节点（含永不清理项）
  */

@@ -8,9 +8,9 @@
  * 仲裁器：一份内容只归一层处理，避免多层重复加工——按「先折叠、再落盘、
  * 软压力最后」的顺序短路：折叠后已 ≤ 阈值的内容不再落盘。
  */
-import { foldRepeatedLines } from "./lossless-fold.js";
-import { nodeLocation } from "./lineage.js";
-import { spillIfNeeded, headTailPreview, DEFAULT_SPILL_THRESHOLD, byteLength } from "./spill-to-disk.js";
+import { foldRepeatedLines } from "../core/lossless-fold.js";
+import { nodeLocation } from "../session/lineage.js";
+import { spillIfNeeded, headTailPreview, DEFAULT_SPILL_THRESHOLD, byteLength } from "../core/spill-to-disk.js";
 
 /**
  * 单层熔断器。
@@ -70,7 +70,7 @@ export class CircuitBreaker {
  *
  * @param {string} text 工具输出
  * @param {{seq: number|string, sessionId?: string}} at 内容在会话中的位置（sessionId 可选，用于文件名去重与谱系键）
- * @param {{archiveDir: string, lineage: import('./lineage.js').Lineage, spillBreaker?: CircuitBreaker}} deps
+ * @param {{archiveDir: string, lineage: import('./session/lineage.js').Lineage, spillBreaker?: CircuitBreaker}} deps
  * @returns {Promise<{text: string, layers: string[], archive: null | {path: string, sha256: string, size: number}}>}
  *   处理后文本、实际命中的层清单、本次产出的存档（无存档为 null）
  */

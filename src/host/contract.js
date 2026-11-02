@@ -25,23 +25,23 @@ import {
     ManualCompactionError,
 } from "@deepseek-ai/dsh-compaction";
 // beta7：检查点 source 改用自带实现（CLI 版 dsh-compaction 产出 kind:"plugin"，v4 拒写）
-import { compactCheckpointSource, sessionFormatVersion } from "./checkpoint-source.js";
+import { compactCheckpointSource, sessionFormatVersion } from "../session/checkpoint-source.js";
 // beta6：配对检查改用插件自带实现（外部解析可能落到不兼容的 CLI 版 dsh-compaction）
-import { toolPairingBalancedBefore, toolPairingBalancedAfter } from "./tool-pairing.js";
+import { toolPairingBalancedBefore, toolPairingBalancedAfter } from "../session/tool-pairing.js";
 import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler, errorChain } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
-import { pressureAction } from "./soft-pressure.js";
-import { HealthReporter, collectHealth } from "./health-check.js";
-import { lossyThreshold, RESERVE_TOKENS, HEADROOM_TOKENS } from "./lossy-summarize.js";
+import { pressureAction } from "../core/soft-pressure.js";
+import { HealthReporter, collectHealth } from "../guard/health-check.js";
+import { lossyThreshold, RESERVE_TOKENS, HEADROOM_TOKENS } from "../core/lossy-summarize.js";
 // 四层引擎与工具结果观察者：接管路径必须自己持有它们（D17 关键修复），
 // 不能再依赖 index.js 里那个未被实例化的类。
-import { TieredCompactionEngine } from "./engine.js";
+import { TieredCompactionEngine } from "../core/engine.js";
 import { ToolResultObserver } from "./tool-result-observer.js";
 // 摘要输入构造器（D18 新增模块）：把选区还原成结构化消息序列。
 // 这里只消费、不重复实现——旧实现在本文件里拍平成字符串，正是这次要拆掉的东西。
-import { buildSummaryInput } from "./summary-input.js";
+import { buildSummaryInput } from "../core/summary-input.js";
 // D22：把「校验读回」接成真实工具（此前 restoreSpilled 零调用点）
-import { restoreSpilled } from "./spill-to-disk.js";
+import { restoreSpilled } from "../core/spill-to-disk.js";
 // 任务 #1：只读状态路由。同样探针式取 webServer，不进 static inject——
 // 理由与 tiered_restore 相同（详见 status-route.js 头注）。
 import { mountStatusRoute } from "./status-route.js";
@@ -65,7 +65,7 @@ import {
     startedAt as sharedStartedAt,
     summaryCount as sharedSummaryCount,
     touchSession,
-} from "./shared-stats.js";
+} from "../session/shared-stats.js";
 
 /** cordis 追踪代理的原始对象键（cordis createTraceable：get(symbols.original) 返回 target）。 */
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");

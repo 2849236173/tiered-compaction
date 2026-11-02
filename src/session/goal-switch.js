@@ -9,8 +9,8 @@
  *   2. 过程性内容（大输出、中间产物）归档到会话目录（复用第 2 层落盘）；
  *   3. 全部取代关系登记谱系表。
  */
-import { Lineage, nodeLocation } from "./lineage.js";
-import { spillIfNeeded } from "./spill-to-disk.js";
+import { Lineage, nodeLocation } from "./session/lineage.js";
+import { spillIfNeeded } from "./core/spill-to-disk.js";
 
 /**
  * 执行一次目标切换清理。
