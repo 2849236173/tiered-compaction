@@ -80,7 +80,7 @@ if (failed > 0) {
 最常见原因：包名与已装包 package.json 的 name 不一致
   （例如写了 @local/<name>，而实际装的是无 scope 的 <name>）。
 修复：把上面 ✖ 行的 name 改成 ✔ 行的名字；或按当前安装来源重跑
-  tools/gen-standard-tc.ps1 -Apply / tools/gen-ptc-tc.ps1 -Apply。
+  tools/generators/gen-standard-tc.ps1 -Apply / tools/generators/gen-ptc-tc.ps1 -Apply。
 npm 装的还可以先升级到最新版：dsh plugin --profile desktop update dsh-tiered-compaction`);
     process.exit(1);
 }

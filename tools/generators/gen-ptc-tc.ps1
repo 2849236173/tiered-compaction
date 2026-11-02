@@ -145,7 +145,7 @@ if ($Apply) {
     Write-Host "      已写回 $patchPath（$($newPatch.Count) 行）"
     Write-Host "      生效方式：重启 DSH Desktop 或新建会话" -ForegroundColor Yellow
     Write-Host "[自检] 校验补丁里的插件名能否解析 ..." -ForegroundColor Cyan
-    & node (Join-Path $PSScriptRoot "check-install.mjs") --profile-dir $profileDir
+    & node (Join-Path $PSScriptRoot "..\check-install.mjs") --profile-dir $profileDir
     if ($LASTEXITCODE -ne 0) {
         Write-Error "自检失败：补丁里的插件名解析不到，宿主挂载 preset 会报 never started。请按上面提示修正后重跑。"
     }

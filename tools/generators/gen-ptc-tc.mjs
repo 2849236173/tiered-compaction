@@ -1,5 +1,5 @@
 /**
- * ptc → ptc-tc 生成与自检（供 tools/gen-ptc-tc.ps1 调用）。
+ * ptc → ptc-tc 生成与自检（供 tools/generators/gen-ptc-tc.ps1 调用）。
  *
  * 为什么用 Node 而不是 PowerShell 处理文本：
  *   preset 配置里含大段中文（plan-mode 提示词）与 !!js 自定义标量。
@@ -8,12 +8,12 @@
  *   Node 全程按 UTF-8 读写，且 dsh 的输出本来就是 UTF-8，不经过转换最稳。
  *
  * 用法：
- *   node tools/gen-ptc-tc.mjs <dumpFile> <outputFile> <order> <archiveDir> [--diff-only]
+ *   node tools/generators/gen-ptc-tc.mjs <dumpFile> <outputFile> <order> <archiveDir> [--diff-only]
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import yaml from "js-yaml";
-import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "./lib/plugin-name.mjs";
+import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "../lib/plugin-name.mjs";
 
 /** D2：本 preset 的 realm 标识，写进引擎 config.scopeId（单写者守卫按它分座）。 */
 const SCOPE_ID = "ptc-tc";
@@ -215,7 +215,7 @@ if (problems.length) {
 /* ---------------- 写产物 ---------------- */
 const header = [
     "# ══ D15 B 路线：自有 ptc-tc preset（只换压缩引擎为 tiered-compaction）══",
-    "# 本区块由 tools/gen-ptc-tc.ps1 生成，请勿手工编辑；DSH 升级后重跑脚本重同步。",
+    "# 本区块由 tools/generators/gen-ptc-tc.ps1 生成，请勿手工编辑；DSH 升级后重跑脚本重同步。",
     "# 回退：删掉本段 + 把 agent-preset-registry 的 selectedDefault 改回 ptc",
 ];
 const body = yaml.dump([{ insert: [tc] }], {

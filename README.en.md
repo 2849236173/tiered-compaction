@@ -91,9 +91,9 @@ Each DSH session binds to a preset when it is created and keeps that preset. Wit
 | Preset | How |
 |---|---|
 | `cordis` (desktop default) | Install the `tiered-cordis-preset` bundle |
-| `ptc-tc` | `tools/gen-ptc-tc.ps1 -Apply` |
-| `standard` (used by Bots and group chats) | `tools/gen-standard-tc.ps1 -Apply` |
-| Official `ptc`, `minimal` | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`, and the same for `minimal` |
+| `ptc-tc` | `tools/generators/gen-ptc-tc.ps1 -Apply` |
+| `standard` (used by Bots and group chats) | `tools/generators/gen-standard-tc.ps1 -Apply` |
+| Official `ptc`, `minimal` | `tools/generators/gen-standard-tc.ps1 -Preset ptc -Apply`, and the same for `minimal` |
 
 Only **new sessions** pick up the change; existing sessions keep their preset. Re-run the generators after upgrading DSH.
 

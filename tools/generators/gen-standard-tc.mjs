@@ -1,5 +1,5 @@
 /**
- * standard → standard-tc 生成与自检（供 tools/gen-standard-tc.ps1 调用）。
+ * standard → standard-tc 生成与自检（供 tools/generators/gen-standard-tc.ps1 调用）。
  *
  * 背景（D17 实测结论，比 D15 的 B 路线更深一层）：
  *   ds-bot 创建所有 Bot / 群会话时硬编码 `agentPreset: 'standard'`
@@ -19,12 +19,12 @@
  *   所以这里把 preset-standard 的完整 config 原样吐出来，只改引擎一项。
  *
  * 用法：
- *   node tools/gen-standard-tc.mjs <dumpFile> <outputFile> <archiveDir> [--diff-only]
+ *   node tools/generators/gen-standard-tc.mjs <dumpFile> <outputFile> <archiveDir> [--diff-only]
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import yaml from "js-yaml";
-import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "./lib/plugin-name.mjs";
+import { assertNoStaleScopeNames, optionValue, PLUGIN_BASENAME, resolvePluginName } from "../lib/plugin-name.mjs";
 
 /** D2：本 preset 的 realm 标识，写进引擎 config.scopeId（单写者守卫按它分座）。 */
 // beta8：--preset standard|ptc|minimal（默认 standard），同一套逻辑覆盖任一官方 preset
@@ -270,7 +270,7 @@ if (problems.length) {
 /* ---------------- 写产物 ---------------- */
 // 首个标记行由 ps1 写入，这里不再重复输出版权/说明头
 const header = [
-    "# 本区块由 tools/gen-standard-tc.ps1 生成，请勿手工编辑；DSH 升级后重跑脚本重同步。",
+    "# 本区块由 tools/generators/gen-standard-tc.ps1 生成，请勿手工编辑；DSH 升级后重跑脚本重同步。",
     "# 为什么不用 selectedDefault: ds-bot 创建 Bot/群会话时硬编码 agentPreset: 'standard'",
     "#   （src/host/roster.js:36-41），改 default 对 Bot 会话无效，只能直接改 standard 本身。",
     "# 为什么整块重写 config: patch 的 - id 只在顶层按 id 定位，preset 内的嵌套条目改不到；",

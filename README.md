@@ -91,9 +91,9 @@ DSH 的每个会话在创建时绑定一个预设，之后不能更换。只安�
 | 预设 | 开启方式 |
 |---|---|
 | `cordis`（桌面端默认） | 安装 `tiered-cordis-preset` bundle |
-| `ptc-tc` | `tools/gen-ptc-tc.ps1 -Apply` |
-| `standard`（Bot 和群聊使用） | `tools/gen-standard-tc.ps1 -Apply` |
-| 官方 `ptc`、`minimal` | `tools/gen-standard-tc.ps1 -Preset ptc -Apply`，`minimal` 同理 |
+| `ptc-tc` | `tools/generators/gen-ptc-tc.ps1 -Apply` |
+| `standard`（Bot 和群聊使用） | `tools/generators/gen-standard-tc.ps1 -Apply` |
+| 官方 `ptc`、`minimal` | `tools/generators/gen-standard-tc.ps1 -Preset ptc -Apply`，`minimal` 同理 |
 
 修改后只有**新开的会话**会生效，已有会话保持原样。DSH 升级后需要重新运行一次生成器。
 
