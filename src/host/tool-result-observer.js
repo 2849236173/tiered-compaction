@@ -81,7 +81,7 @@ function isLiveSurfaceNode(session, event) {
 export class ToolResultObserver {
     /**
      * @param {{
-     *   engine: import('./core/engine.js').TieredCompactionEngine,
+     *   engine: import('../core/engine.js').TieredCompactionEngine,
      *   ctx: { logger: {info(msg: string): void, warn(msg: string): void}, on(name: string, fn: Function): void },
      *   enabled?: boolean,
      * }} options

@@ -131,7 +131,7 @@ export class TieredCompactionEngine {
      * @param {{oldGoalId: string, newGoalId: string, nodes: Array}} event
      */
     async purgeOnGoalSwitch(event) {
-        const { purgeOnGoalSwitch } = await import("./session/goal-switch.js");
+        const { purgeOnGoalSwitch } = await import("../session/goal-switch.js");
         return purgeOnGoalSwitch(event, { archiveDir: this.deps.archiveDir, lineage: this.lineage });
     }
 

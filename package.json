@@ -53,7 +53,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test test/**/*.test.js test/*.test.js",
     "check:install": "node -e \"const fs=require('fs');if(!fs.existsSync('tools/check-install.mjs')){console.log('check:install is repo-only: run it from a git checkout (tools/ is not shipped in the npm package)');process.exit(0)}require('child_process').execFileSync(process.execPath,['tools/check-install.mjs',...process.argv.slice(1)],{stdio:'inherit'})\" --",
     "postinstall": "node -e \"const fs=require('fs');console.log(fs.existsSync('src/single-writer-guard.js')?'dsh-tiered-compaction: single-writer guard present':'WARN: src/single-writer-guard.js missing - double-mount protection incomplete')\"",
     "check": "node --check src/index.js && node -e \"import('./src/index.js').then(()=>console.log('入口可加载 OK')).catch(e=>{console.error(e);process.exit(1)})\"",

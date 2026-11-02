@@ -47,7 +47,7 @@ export function pressureAction(pressure) {
  *   kind ∈ EVICTION_PRIORITY 键；tool ∈ bash/pwsh/edit/write/read/grep/glob
  *
  * @param {Array<{seq: number, kind: string, tool?: string, content: string}>} nodes
- * @param {{lineage: import('./session/lineage.js').Lineage}} deps 谱系表（必传，驱逐必须可审计）
+ * @param {{lineage: import('../session/lineage.js').Lineage}} deps 谱系表（必传，驱逐必须可审计）
  * @returns {{evicted: Array<{seq: number, reason: string, replayable: boolean}>, kept: Array<object>}}
  *   evicted：被驱逐节点及其恢复方式；kept：保留节点（含永不清理项）
  */
