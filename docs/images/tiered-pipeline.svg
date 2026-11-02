@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 620" role="img" aria-labelledby="title desc">
+  <title id="title">Tiered compaction pipeline</title>
+  <desc id="desc">Four context compaction stages ordered from low cost to high cost: fold, spill, evict, and summarize.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#151d35"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#38d9c5"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#020617" flood-opacity=".45"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#66749d"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="620" rx="36" fill="url(#bg)"/>
+  <circle cx="1450" cy="-30" r="260" fill="#7c5cff" opacity=".10"/>
+  <circle cx="80" cy="650" r="260" fill="#38d9c5" opacity=".08"/>
+
+  <text x="96" y="92" fill="#f8fafc" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="42" font-weight="750" letter-spacing="2">TIERED COMPACTION</text>
+  <text x="96" y="138" fill="#aab6d4" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="23">Keep the important context. Spend LLM only when needed.</text>
+  <rect x="96" y="166" width="1408" height="4" rx="2" fill="url(#accent)" opacity=".8"/>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" filter="url(#shadow)">
+    <rect x="96" y="230" width="306" height="238" rx="22" fill="#18223d" stroke="#314268"/>
+    <rect x="430" y="230" width="306" height="238" rx="22" fill="#18223d" stroke="#314268"/>
+    <rect x="764" y="230" width="306" height="238" rx="22" fill="#18223d" stroke="#314268"/>
+    <rect x="1098" y="230" width="406" height="238" rx="22" fill="#1e2448" stroke="#6d5dcc"/>
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <g fill="#9b8cff" font-size="17" font-weight="700" letter-spacing="2">
+      <text x="128" y="276">01 · LOSSLESS</text>
+      <text x="462" y="276">02 · RECOVERABLE</text>
+      <text x="796" y="276">03 · RE-RUNNABLE</text>
+      <text x="1130" y="276">04 · LLM ONLY AT THE EDGE</text>
+    </g>
+    <g fill="#f8fafc" font-size="34" font-weight="750">
+      <text x="128" y="326">FOLD</text>
+      <text x="462" y="326">SPILL</text>
+      <text x="796" y="326">EVICT</text>
+      <text x="1130" y="326">SUMMARIZE</text>
+    </g>
+    <g fill="#aab6d4" font-size="19">
+      <text x="128" y="370">Repeated lines become</text>
+      <text x="128" y="398">one compact line.</text>
+      <text x="462" y="370">Large tool output moves</text>
+      <text x="462" y="398">to the local archive.</text>
+      <text x="796" y="370">Old re-runnable results</text>
+      <text x="796" y="398">leave the active context.</text>
+      <text x="1130" y="370">Older history is summarized</text>
+      <text x="1130" y="398">only after real pressure.</text>
+    </g>
+    <g font-size="17" font-weight="700">
+      <text x="128" y="442" fill="#38d9c5">0 LLM CALLS</text>
+      <text x="462" y="442" fill="#38d9c5">0 LLM CALLS</text>
+      <text x="796" y="442" fill="#38d9c5">0 LLM CALLS</text>
+      <text x="1130" y="442" fill="#ffcf70">1 LLM CALL · THRESHOLD</text>
+    </g>
+  </g>
+
+  <g stroke="#66749d" stroke-width="3" marker-end="url(#arrow)" fill="none">
+    <path d="M 402 349 H 422"/>
+    <path d="M 736 349 H 756"/>
+    <path d="M 1070 349 H 1090"/>
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <rect x="96" y="526" width="1408" height="42" rx="21" fill="#10182d" stroke="#2b385c"/>
+    <text x="126" y="553" fill="#8e9bbb" font-size="17" letter-spacing="1">LOW COST</text>
+    <path d="M 270 547 H 1325" stroke="url(#accent)" stroke-width="3" stroke-linecap="round"/>
+    <text x="1370" y="553" fill="#ffcf70" font-size="17" letter-spacing="1">HIGH COST</text>
+    <text x="720" y="553" text-anchor="middle" fill="#dce5ff" font-size="17">ARCHIVE · RESTORE · HOST CONTROL</text>
+  </g>
+</svg>
