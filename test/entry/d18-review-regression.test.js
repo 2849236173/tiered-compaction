@@ -155,7 +155,8 @@ test("缺口1 只有空格的摘要被拒，正常摘要仍放行（不能误伤
         const input = buildSummaryInput(agent.session, [1, 2]);
 
         const result = await service.summarize(input, agent, undefined);
-        assert.equal(result.summary, "这是一段正常摘要", "正常摘要不能被误拒");
+        assert.deepEqual(result.summary, [{ type: "text", text: "这是一段正常摘要" }]);
+        assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
     } finally {
         await rm(dir, { recursive: true, force: true });
     }

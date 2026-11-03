@@ -129,11 +129,32 @@ test("摘要正常（finish.kind=stop）必须返回文本，不得误报失败"
         yield { type: "finish", reason: "stop" };
     });
 
-    assert.match(result.summary, /检查点/, "正常流必须返回真实摘要文本");
+    assert.ok(Array.isArray(result.summary), "规范 summary 必须为 text block[]");
+    assert.deepEqual(result.summary, [{ type: "text", text: "## 检查点\n- 已完成 A\n- 下一步 B" }]);
+    assert.deepEqual(result.rawOutput, result.summary, "rawOutput 必须保留 assembler 原始块");
+    assert.equal(result.llmStreamCall, true);
+    assert.equal(Object.hasOwn(result, "summaryBlocks"), false, "不得返回第二个摘要字段");
     assert.equal(result.provider, "test-provider");
     assert.equal(result.maxTokens, 20000, "预算必须固定为 RESERVE_TOKENS");
 });
 
+test("D21 内置摘要保留多个 text blocks 的顺序、边界与 rawOutput", async () => {
+    const first = { type: "text", text: "第一块：事实 A" };
+    const second = { type: "text", text: "第二块：约束 B" };
+    const result = await summarizeWith(async function* () {
+        yield { type: "block-start", index: 0, blockType: "text" };
+        yield { type: "text-delta", index: 0, text: first.text };
+        yield { type: "block-end", index: 0, block: first };
+        yield { type: "block-start", index: 1, blockType: "text" };
+        yield { type: "text-delta", index: 1, text: second.text };
+        yield { type: "block-end", index: 1, block: second };
+        yield { type: "finish", reason: "stop" };
+    });
+
+    assert.deepEqual(result.summary, [first, second]);
+    assert.deepEqual(result.rawOutput, [first, second]);
+    assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
+});
 test("finish 缺失（流正常结束但没发 finish 块）按 stop 处理，返回已收文本", async () => {
     const result = await summarizeWith(async function* () {
         yield { type: "block-start", index: 0, blockType: "text" };
@@ -141,7 +162,7 @@ test("finish 缺失（流正常结束但没发 finish 块）按 stop 处理，�
         yield { type: "block-end", index: 0, block: { type: "text", text: "只有文本没有 finish 块" } };
     });
 
-    assert.match(result.summary, /只有文本/, "BlockAssembler.finish 缺省为 stop，不该判失败");
+    assert.ok(result.summary.some((block) => block.text.includes("只有文本")), "BlockAssembler.finish 缺省为 stop，不该判失败");
 });
 
 test("aborted（用户取消）必须抛错，不得返回空摘要", async () => {
@@ -172,7 +193,7 @@ test("配置里没写 summaryTarget 时必须回落到会话路由（schemastery
         yield { type: "finish", reason: { kind: "stop" } };
     });
 
-    assert.match(result.summary, /回落到会话路由/, "必须拿到摘要");
+    assert.ok(result.summary.some((block) => block.text.includes("回落到会话路由")), "必须拿到结构化摘要");
     assert.equal(result.provider, "test-provider", `路由必须来自会话，实得 ${result.provider}`);
     assert.equal(result.model, "test-model", `模型必须来自会话，实得 ${result.model}`);
 });

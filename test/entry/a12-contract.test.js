@@ -168,7 +168,8 @@ test("A12① /compact 路径：compactNow 走真实事务，事件序列与返�
     const { svc } = await setup(t, { window: 128000, perNode: 2000 });
     const nodes = [
         { type: "user/message", data: { content: "任务一" } },
-        { type: "tool/output", data: { content: "很长的工具输出".repeat(50) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair0", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair0", content: [{ type: "text", text: "很长的工具输出".repeat(50) }] } } },
         { type: "user/message", data: { content: "保留的近端消息" } },
     ];
     const session = stubSession(nodes);
@@ -179,6 +180,8 @@ test("A12① /compact 路径：compactNow 走真实事务，事件序列与返�
     for (const k of ["compactionId", "startSeq", "summarySeq", "summary", "shadowedRange", "shadowedSeqs", "shadowedTokenCount", "endSeq"]) {
         assert.ok(k in result, `返回缺 ${k}`);
     }
+    assert.ok(Array.isArray(result.summary), "事务返回的规范 summary 必须为 text block[]");
+    assert.equal(Object.hasOwn(result, "summaryBlocks"), false, "事务结果不得暴露 summaryBlocks 别名");
     // 事务事件序列：start → summary → user/message(replace) → end
     const types = session.events.map((e) => e.type);
     assert.deepEqual(types, ["compaction/start", "compaction/summary", "user/message", "compaction/end"]);
@@ -186,6 +189,9 @@ test("A12① /compact 路径：compactNow 走真实事务，事件序列与返�
     assert.ok(session.surface.nodes.length < nodes.length, "表面必须被替换缩短");
     // summary 事件载荷含宿主渲染依赖字段
     const summaryEv = session.events.find((e) => e.type === "compaction/summary");
+    assert.ok(Array.isArray(summaryEv.data.summary), "summary event.data.summary 必须为 block[]，UI 才能识别 marker");
+    assert.deepEqual(result.summary, summaryEv.data.summary, "事务返回与 summary event 必须共享同一逻辑摘要值");
+    assert.equal(Object.hasOwn(result, "summaryBlocks"), false, "事务返回不得有第二摘要字段");
     for (const k of ["compactionId", "summary", "shadowedRange", "shadowedSeqs", "shadowedTokenCount", "provider", "model", "maxTokens"]) {
         assert.ok(k in summaryEv.data, `summary 事件缺 ${k}`);
     }
@@ -201,6 +207,25 @@ test("A12① /compact 路径：compactNow 走真实事务，事件序列与返�
     assert.equal(replaceEv.data.source.sourceCommandId, "cmd-1");
 });
 
+test("D21 F/G legacy string summarizeFn 进入事务后 event/checkpoint/result 全为 block[]", async (t) => {
+    const legacySummary = "仅边界兼容的旧字符串摘要";
+    const { svc } = await setup(t, { window: 128000, perNode: 2000, summary: legacySummary });
+    const session = stubSession([
+        { type: "user/message", data: { content: "旧宿主长任务记录。".repeat(300) } },
+        { type: "user/message", data: { content: "旧宿主后续约束与完成状态。".repeat(300) } },
+        { type: "user/message", data: { content: "保留在 tail 的当前指令。".repeat(10) } },
+    ]);
+    const result = await svc.compactRegion(session.surface.nodes[0], session.surface.nodes[1], stubAgent(session), undefined);
+    const expected = [{ type: "text", text: legacySummary }];
+    const summaryEvent = session.events.find((event) => event.type === "compaction/summary");
+    const replacement = session.events.find((event) => event.type === "user/message" && event.opts?.surfaceOp?.op === "replace");
+
+    assert.deepEqual(result.summary, expected);
+    assert.deepEqual(summaryEvent.data.summary, expected);
+    assert.deepEqual(replacement.data.content.slice(1, -1), expected);
+    assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
+    assert.equal(typeof summaryEvent.data.summary, "object");
+});
 test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80% 驱逐事件 / 阈值摘要", async (t) => {
     const { ctx, svc, meter } = await setup(t, { window: 100000, perNode: 1000 });
     // 钩子必须已注册
@@ -209,7 +234,8 @@ test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80
     const nodes = [
         // fixture 内容必须足够大：摘要 guard 要求摘要小于被取代内容（basic 同款规则）
         { type: "user/message", data: { content: "历史消息一 " + "很长的上下文内容。".repeat(200) } },
-        { type: "tool/output", data: { content: "工具输出 " + "更多的工具输出内容。".repeat(200) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair1", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair1", content: [{ type: "text", text: "工具输出 " + "更多的工具输出内容。".repeat(200) }] } } },
         { type: "user/message", data: { content: "近端消息" } },
     ];
     const session = stubSession(nodes);
@@ -271,7 +297,8 @@ test("A12③ 失败路径：摘要为空抛 ManualCompactionError 且补配对 e
     const svc = ctx.compaction;
     const session = stubSession([
         { type: "user/message", data: { content: "历史请求 " + "旧上下文。".repeat(500) } },
-        { type: "tool/output", data: { content: "历史工具输出 " + "旧结果。".repeat(500) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair2", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair2", content: [{ type: "text", text: "历史工具输出 " + "旧结果。".repeat(500) }] } } },
         { type: "user/message", data: { content: "当前指令：继续修复" } },
     ]);
     const agent = stubAgent(session);
@@ -378,7 +405,8 @@ test("C9(c) compaction/end append 失败时不重试写第二枚 end", async (t)
     const { svc } = await setup(t, { window: 128000, perNode: 2000 });
     const session = stubSession([
         { type: "user/message", data: { content: "历史请求 " + "旧上下文。".repeat(500) } },
-        { type: "tool/output", data: { content: "历史工具输出 " + "旧结果。".repeat(500) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair3", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair3", content: [{ type: "text", text: "历史工具输出 " + "旧结果。".repeat(500) }] } } },
         { type: "user/message", data: { content: "当前指令" } },
     ]);
     const append = session.append;
@@ -424,7 +452,8 @@ test("C5 摘要连续失败退避，压力增长后重试，成功后清零", as
     });
     const session = stubSession([
         { type: "user/message", data: { content: "历史任务 " + "旧上下文内容。".repeat(500) } },
-        { type: "tool/output", data: { content: "历史输出 " + "旧工具结果。".repeat(500) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair4", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair4", content: [{ type: "text", text: "历史输出 " + "旧工具结果。".repeat(500) }] } } },
         { type: "user/message", data: { content: "当前指令" } },
     ]);
     setWindowOnSession(session, 100000);
@@ -463,7 +492,8 @@ test("C4 摘要等待期间 agentSignal 取消时返回 cancelled 且不提交�
     });
     const session = stubSession([
         { type: "user/message", data: { content: "历史请求 " + "旧上下文。".repeat(500) } },
-        { type: "tool/output", data: { content: "历史输出 " + "旧结果。".repeat(500) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair5", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair5", content: [{ type: "text", text: "历史输出 " + "旧结果。".repeat(500) }] } } },
         { type: "user/message", data: { content: "当前指令" } },
     ]);
     const controller = new AbortController();
@@ -489,7 +519,8 @@ test("A12④ context-overflow 触发：直接调用会走摘要事务，重试�
     const { svc, meter } = await setup(t, { window: 128000, perNode: 30000 });
     const session = stubSession([
         { type: "user/message", data: { content: "旧请求 " + "溢出前的大段历史。".repeat(300) } },
-        { type: "tool/output", data: { content: "旧工具 " + "溢出前的工具输出。".repeat(300) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair6", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair6", content: [{ type: "text", text: "旧工具 " + "溢出前的工具输出。".repeat(300) }] } } },
         { type: "user/message", data: { content: "当前溢出恢复指令" } },
     ]);
     const agent = stubAgent(session);

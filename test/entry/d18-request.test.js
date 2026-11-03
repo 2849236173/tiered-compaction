@@ -26,6 +26,7 @@ import { join } from "node:path";
 
 import { Context } from "@deepseek-ai/cordis";
 import { apply } from "../../src/index.js";
+import { __test as contractTest } from "../../src/host/contract.js";
 
 const quietLogger = {
     info() {},
@@ -143,6 +144,78 @@ test("B1 options.messages 是数组，末项为压缩指令", async () => {
     );
 });
 
+test("D21 检查点 token 估算逐块累计，不先合并摘要块", () => {
+    assert.equal(
+        contractTest.estimateSummaryBlocksTokens([
+            { type: "text", text: "a" },
+            { type: "text", text: "b" },
+            { type: "text", text: "c" },
+        ]),
+        3,
+        "每个单字符块分别 ceil 到 1 后相加；join 后估算会错误得到 1",
+    );
+});
+test("D21 A/B LLM request 保留多角色 blocks、工具上下文并追加独立指令", async () => {
+    const sourceMessages = [
+        { role: "user", id: "u-1", content: [{ type: "text", text: "用户块一" }, { type: "text", text: "用户块二" }] },
+        { role: "assistant", content: [{ type: "tool-call", id: "call-1", name: "read", arguments: "{}" }] },
+        { role: "tool", toolCallId: "call-1", content: [{ type: "text", text: "工具结果块" }] },
+    ];
+    const tools = [{ name: "read", description: "读取文件" }];
+    const toolHistory = [{ tool: "read", callCount: 1 }];
+    const sessionId = "session-d21-request";
+    const { capturedOptions } = await runSummarizeWithCapture({
+        input: { messages: sourceMessages, tools },
+        sessionExtra: { id: sessionId, toolHistory: () => toolHistory },
+    });
+
+    assert.deepEqual(capturedOptions.messages.slice(0, -1), sourceMessages, "历史消息的 role、块顺序、值和边界必须原样保留");
+    assert.equal(capturedOptions.messages.at(-1).role, "user");
+    assert.ok(Array.isArray(capturedOptions.messages.at(-1).content));
+    assert.match(capturedOptions.messages.at(-1).content[0].text, /compaction engine/i);
+    assert.deepEqual(capturedOptions.tools, tools);
+    assert.deepEqual(capturedOptions.toolHistory, toolHistory);
+    assert.equal(capturedOptions.sessionId, sessionId);
+    assert.ok(!Object.entries(capturedOptions).some(([, value]) => value === undefined), "request 不得发送 undefined 字段");
+});
+
+test("D21 自定义 summarizeFn 收到相同 canonical request，旧 string 返回只在边界包装", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "d21-custom-"));
+    try {
+        let capturedRequest;
+        let capturedInput;
+        const ctx = makeCordisCtx(async function* () {});
+        await apply(ctx, {
+            enabled: true,
+            archiveDir: dir,
+            auto: false,
+            summarizeFn: async (request, input) => {
+                capturedRequest = request;
+                capturedInput = input;
+                return "旧接口摘要";
+            },
+        });
+        const service = ctx.get("compaction");
+        const session = {
+            id: "session-d21-custom",
+            toolHistory: () => undefined,
+            requestHeader: () => ({ config: { provider: "test-p", model: "test-m" } }),
+        };
+        const input = {
+            messages: [{ role: "assistant", content: [{ type: "text", text: "消息块一" }, { type: "text", text: "消息块二" }] }],
+            tools: [{ name: "read" }],
+        };
+        const result = await service.summarize(input, { session }, undefined);
+
+        assert.deepEqual(capturedRequest.messages.slice(0, -1), input.messages);
+        assert.deepEqual(capturedInput.messages, input.messages);
+        assert.equal("toolHistory" in capturedRequest, false, "toolHistory() 返回 undefined 时键必须省略");
+        assert.deepEqual(result.summary, [{ type: "text", text: "旧接口摘要" }]);
+        assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+});
 test("B2 输入含 tools → options.tools 等值透传", async () => {
     const customTools = [
         { name: "grep_search", description: "代码搜索工具" },
@@ -163,6 +236,76 @@ test("B2 输入含 tools → options.tools 等值透传", async () => {
     assert.deepEqual(capturedOptions.tools, customTools, "options.tools 必须与输入 tools 等值");
 });
 
+test("D21 E basic 同形 SummaryResult 注入后保留 blocks 和元数据", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "d21-envelope-"));
+    try {
+        const summary = [
+            { type: "text", text: "摘要事实块" },
+            { type: "text", text: "摘要约束块" },
+        ];
+        const rawOutput = [...summary, { type: "tool-call", id: "unused-call", name: "read", arguments: "{}" }];
+        const usage = { inputTokens: 123, outputTokens: 45 };
+        const ctx = makeCordisCtx(async function* () {});
+        await apply(ctx, {
+            enabled: true,
+            archiveDir: dir,
+            auto: false,
+            summarizeFn: async () => ({
+                summary,
+                rawOutput,
+                llmStreamCall: true,
+                provider: "injected-provider",
+                model: "injected-model",
+                maxTokens: 20000,
+                usage,
+            }),
+        });
+        const service = ctx.get("compaction");
+        const result = await service.summarize(
+            { messages: [{ role: "user", content: [{ type: "text", text: "large source" }] }] },
+            { session: { requestHeader: () => ({ config: { provider: "test-p", model: "test-m" } }) } },
+            undefined,
+        );
+        assert.deepEqual(result.summary, summary);
+        assert.deepEqual(result.rawOutput, rawOutput, "非 text 块仍保留在 rawOutput");
+        assert.equal(result.llmStreamCall, true);
+        assert.equal(result.provider, "injected-provider");
+        assert.equal(result.model, "injected-model");
+        assert.equal(result.maxTokens, 20000);
+        assert.deepEqual(result.usage, usage);
+        assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+});
+
+
+test("D21 K 双字段 summary + summaryBlocks envelope 必须被抓出", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "d21-dual-field-"));
+    try {
+        const ctx = makeCordisCtx(async function* () {});
+        await apply(ctx, {
+            enabled: true,
+            archiveDir: dir,
+            auto: false,
+            summarizeFn: async () => ({
+                summary: "违规字符串视图",
+                summaryBlocks: [{ type: "text", text: "违规并列字段" }],
+            }),
+        });
+        const service = ctx.get("compaction");
+        await assert.rejects(
+            () => service.summarize(
+                { messages: [{ role: "user", content: [{ type: "text", text: "source" }] }] },
+                { session: { requestHeader: () => ({ config: { provider: "test-p", model: "test-m" } }) } },
+                undefined,
+            ),
+            /不得同时包含 summary 与 summaryBlocks/,
+        );
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+});
 test("B2b 摘要路由的 provider / model 必须真的转交给 llm.stream", async () => {
     const { capturedOptions } = await runSummarizeWithCapture({
         input: {
@@ -294,11 +437,16 @@ test("C1 SUMMARY_OPEN_TAG 与 SUMMARY_CLOSE_TAG 常量值与原版一致", async
 test("C2/C3/C4 走真实事务路径，断言替换消息 content 具备三段结构与正文", async () => {
     const dir = await mkdtemp(join(tmpdir(), "d18-txn-"));
     try {
-        const streamText = "这是本次事务压缩产出的核心摘要正文内容。";
+        const summaryBlocks = [
+            { type: "text", text: "第一块摘要：已完成事实 A。" },
+            { type: "text", text: "第二块摘要：必须保留约束 B。" },
+        ];
         const ctx = makeCordisCtx(async function* () {
-            yield { type: "block-start", index: 0, blockType: "text" };
-            yield { type: "text-delta", index: 0, text: streamText };
-            yield { type: "block-end", index: 0, block: { type: "text", text: streamText } };
+            for (const [index, block] of summaryBlocks.entries()) {
+                yield { type: "block-start", index, blockType: "text" };
+                yield { type: "text-delta", index, text: block.text };
+                yield { type: "block-end", index, block };
+            }
             yield { type: "finish", reason: { kind: "stop" } };
         });
 
@@ -393,20 +541,16 @@ test("C2/C3/C4 走真实事务路径，断言替换消息 content 具备三段�
 
         const content = replaceEvent.data.content;
         assert.ok(Array.isArray(content), "检查点消息 content 必须是数组");
-
-        // C2 断言：content 长度必须为 3，首段含 PREAMBLE 与 OPEN_TAG，末段为 CLOSE_TAG
-        assert.equal(content.length, 3, "C2 必须产出 3 段结构");
-        assert.equal(content[0].type, "text", "首段类型必须是 text");
+        assert.equal(content.length, summaryBlocks.length + 2, "检查点必须为 head + 原样 blocks + tail");
         assert.match(content[0].text, /automatically generated checkpoint/i, "首段必须包含 CHECKPOINT_PREAMBLE");
         assert.ok(content[0].text.includes("<compacted-summary>"), "首段必须包含 <compacted-summary>");
+        assert.deepEqual(content.slice(1, -1), summaryBlocks, "中段必须逐块保持顺序、文本和边界");
+        assert.equal(content.at(-1).text, "</compacted-summary>", "末段必须为 CLOSE_TAG");
 
-        // C3 断言：中间段为正文且等于摘要内容
-        assert.equal(content[1].type, "text", "中段类型必须是 text");
-        assert.equal(content[1].text, streamText, "C3 中间段 text 必须完全等于模型产出的摘要正文");
-
-        // C2 末段断言：末段完全等于 </compacted-summary>
-        assert.equal(content[2].type, "text", "末段类型必须是 text");
-        assert.equal(content[2].text, "</compacted-summary>", "末段 text 必须完全等于 </compacted-summary>");
+        const summaryEvent = eventsLog.find((event) => event.type === "compaction/summary");
+        assert.deepEqual(summaryEvent.data.summary, summaryBlocks, "summary event 必须保持同一 block[]");
+        assert.deepEqual(txnResult.summary, summaryBlocks, "事务结果必须是唯一 canonical block[] 摘要");
+        assert.equal(Object.hasOwn(txnResult, "summaryBlocks"), false, "不得同时暴露 summaryBlocks");
     } finally {
         await rm(dir, { recursive: true, force: true });
     }

@@ -204,26 +204,28 @@ test("D1 + A7/A8 旧宿主无 deriveEventMessage 走 compactRegion 全程不崩�
             throw new Error("D1 失败：compactRegion 在旧宿主下返回了空结果");
         }
 
-        assert.equal(result1.summary, summaryText, "compactRegion 产出的 summary 必须等于模型返回的内容");
+        assert.deepEqual(result1.summary, [{ type: "text", text: summaryText }], "旧字符串摘要必须只在边界包装成一个 text block");
+        assert.equal(Object.hasOwn(result1, "summaryBlocks"), false);
         assert.equal(streamCalledCount, 1, "LLM stream 必须被成功调用 1 次");
 
         // 校验 A7：降级警告必须被记录，且由于去重机制恰好为 1 次
         const deriveWarnsAfterFirst = warnRecords.filter((msg) => msg.includes("deriveEventMessage"));
         assert.equal(deriveWarnsAfterFirst.length, 1, "A7 首次降级时必须恰好记录 1 次警告");
 
-        // 校验 A8：兜底时所有事件内容都能在发送给模型的文本中找到
         if (capturedStreamOptions === null || !Array.isArray(capturedStreamOptions.messages)) {
             throw new Error("A8 失败：未截获合法的 messages 列表");
         }
-
-        const promptText = capturedStreamOptions.messages[0].content[0].text;
-        assert.ok(promptText.includes("架构设计原理"), "A8 降级文本中必须包含第 1 条事件的关键内容");
-        assert.ok(promptText.includes("分层分级归约架构"), "A8 降级文本中必须包含第 2 条事件的关键内容");
-        assert.ok(promptText.includes("旧宿主兼容性绝不报错"), "A8 降级文本中必须包含第 3 条事件的关键内容");
+        assert.deepEqual(capturedStreamOptions.messages.slice(0, 3).map(({ role, content }) => ({ role, content })), [
+            { role: "user", content: [{ type: "text", text: "旧宿主用户提问：请说明系统的整体架构设计原理。".repeat(10) }] },
+            { role: "assistant", content: [{ type: "text", text: "旧宿主助手回答：系统采用分层分级归约架构。".repeat(15) }] },
+            { role: "user", content: [{ type: "text", text: "旧宿主补充要求：请务必保证旧宿主兼容性绝不报错。".repeat(10) }] },
+        ], "fallback 必须保留三条消息、角色、块边界和顺序");
+        assert.equal(capturedStreamOptions.messages.at(-1).role, "user", "压缩指令必须是独立末尾 user 消息");
+        assert.ok(capturedStreamOptions.messages.at(-1).content[0].text.includes("checkpoint"), "末尾消息必须包含压缩指令");
 
         // 追加更多事件，进行第二次 compactRegion 调用，验证多次调用下 warn 依然去重
-        session.append("user/message", { content: "新追加的长篇用户消息内容".repeat(15) });
-        session.append("assistant/message", { message: { content: [{ type: "text", text: "新追加的长篇助手回复内容".repeat(15) }] } });
+        session.append("user/message", { content: "新追加的长篇用户消息内容".repeat(20) });
+        session.append("assistant/message", { message: { content: [{ type: "text", text: "新追加的长篇助手回复内容".repeat(20) }] } });
 
         // 当前表面末两位对应的 seq 为最新加入的事件
         const surface = session.surface.nodes;
@@ -250,6 +252,40 @@ test("D1 + A7/A8 旧宿主无 deriveEventMessage 走 compactRegion 全程不崩�
     }
 });
 
+test("D21 C fallback 消息无法保真重建时 fail-closed，不调用 LLM、不写成功 summary/replace", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "d21-fail-closed-"));
+    try {
+        let streamCalls = 0;
+        const ctx = makeFallbackCtx({
+            streamImpl: async function* () {
+                streamCalls += 1;
+                yield { type: "finish", reason: { kind: "stop" } };
+            },
+        });
+        await apply(ctx, { enabled: true, archiveDir: dir, auto: false });
+        const service = ctx.get("compaction");
+        const { session, eventsLog } = makeLegacySession({
+            initialEvents: [
+                { type: "user/message", data: { content: [{ type: "text", text: "有效且足够长的历史内容。".repeat(40) }] } },
+                { type: "assistant/message", data: { message: { role: "assistant" } } },
+            ],
+        });
+        const agent = { options: { provider: "legacy-provider", model: "legacy-model" }, session };
+
+        await assert.rejects(
+            () => service.compactRegion(0, 1, agent, undefined),
+            (error) => error.code === "summary"
+                && /seq=1/.test(error.message)
+                && /assistant\/message/.test(error.message)
+                && /content/.test(error.message),
+        );
+        assert.equal(streamCalls, 0, "输入构造失败前不得调用 LLM");
+        assert.equal(eventsLog.some((event) => event.type === "compaction/summary"), false);
+        assert.equal(eventsLog.some((event) => event.type === "user/message" && event.options?.surfaceOp?.op === "replace"), false);
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+});
 test("D1 旧宿主无 deriveEventMessage 走 compactIfNeeded 全程不崩且能完成压缩", async () => {
     // 重置警告状态，隔离用例
     __test.resetWarnedState();
@@ -319,7 +355,8 @@ test("D1 旧宿主无 deriveEventMessage 走 compactIfNeeded 全程不崩且能�
         }
 
         assert.equal(streamCalled, true, "compactIfNeeded 必须成功调起摘要流");
-        assert.equal(result.summary, summaryText, "返回结果中的 summary 必须匹配");
+        assert.deepEqual(result.summary, [{ type: "text", text: summaryText }]);
+        assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
         assert.ok(result.shadowedSeqs.length > 0, "被压缩的序列长度必须大于 0");
     } finally {
         await rm(dir, { recursive: true, force: true });

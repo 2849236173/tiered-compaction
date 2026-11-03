@@ -1,19 +1,13 @@
 /**
- * 为摘要调用构造结构化输入，并在宿主投影不可用时回退到文本输入。
- *
- * 对齐原版 basic:695-704。
+ * 为摘要调用构造宿主契约形状的结构化消息输入。
  * @param {object} session 会话对象
  * @param {number[]} shadowedSeqs 要纳入摘要的事件序号
  * @param {object} logger 可选日志器
- * @returns {{messages: object[], tools?: unknown}} 摘要输入；任何异常都降级为空或文本消息
+ * @returns {{messages: object[], tools?: unknown}} 摘要输入
+ * @throws {Error} 选区消息无法按宿主契约保真投影或重建时
  */
 export function buildSummaryInput(session, shadowedSeqs, logger) {
-    // 无会话或无有效选区时不尝试访问宿主 API，保证失败输入也有稳定形状
-    if (session === undefined || session === null) {
-        return { messages: [] };
-    }
-
-    if (!Array.isArray(shadowedSeqs)) {
+    if (session === undefined || session === null || !Array.isArray(shadowedSeqs)) {
         return { messages: [] };
     }
 
@@ -21,19 +15,13 @@ export function buildSummaryInput(session, shadowedSeqs, logger) {
         return { messages: [] };
     }
 
-    // 老宿主没有结构化投影时明确降级，避免摘要静默丢失角色结构
+    // 旧宿主缺少投影 API 时只允许按已知事件 schema 无损重建。
     if (typeof session.deriveEventMessage !== "function") {
-        warnOnce("宿主不支持 session.deriveEventMessage，摘要输入退回文本模式。", "missing", logger);
-        return buildTextInput(session, shadowedSeqs);
+        warnOnce("宿主不支持 session.deriveEventMessage，摘要输入按事件 schema 重建。", "missing", logger);
+        return buildEventInput(session, shadowedSeqs, logger);
     }
 
-    // 投影过程失败时回退文本，让单条异常事件不阻断整次摘要
-    try {
-        return buildStructuredInput(session, shadowedSeqs);
-    } catch (error) {
-        warnOnce("session.deriveEventMessage 调用失败，摘要输入退回文本模式。", "failed", logger);
-        return buildTextInput(session, shadowedSeqs);
-    }
+    return buildStructuredInput(session, shadowedSeqs);
 }
 
 let missingWarned = false;
@@ -47,22 +35,16 @@ let failedWarned = false;
  * @returns {void}
  */
 function warnOnce(message, kind, logger) {
-    // 独立类别状态让缺 API 和投影失败各自最多报告一次
     if (kind === "missing") {
-        if (missingWarned) {
-            return;
-        }
+        if (missingWarned) return;
         missingWarned = true;
     } else if (kind === "failed") {
-        if (failedWarned) {
-            return;
-        }
+        if (failedWarned) return;
         failedWarned = true;
     } else {
         return;
     }
 
-    // logger 可能由旧宿主省略或本身异常，记录失败不能破坏绝不抛错契约
     try {
         if (logger !== undefined && logger !== null && typeof logger.warn === "function") {
             logger.warn(message);
@@ -70,153 +52,110 @@ function warnOnce(message, kind, logger) {
         }
         console.warn(message);
     } catch {
-        // 日志后端不可用时保留摘要路径
+        // 日志后端不可用时不掩盖原始输入错误。
     }
 }
 
-/**
- * 清空模块级警告状态，供测试隔离用。
- * @returns {void}
- */
+/** 清空模块级警告状态，供测试隔离用。 */
 function resetWarnedState() {
     missingWarned = false;
     failedWarned = false;
 }
 
+const MESSAGE_EVENT_TYPES = new Set([
+    "system/message",
+    "developer/message",
+    "user/message",
+    "assistant/message",
+    "tool/result",
+]);
+
 /**
- * 只在表面首节点解析出 system/message 时返回 system 头事件。
+ * 从表面首节点读取 system 头；节点存在但宿主无法回读时失败关闭。
  * @param {object} session 会话对象
- * @returns {object|undefined} system 头事件；不存在或读取失败时为 undefined
+ * @returns {object|undefined} system 头事件
  */
 function systemHeadEventOf(session) {
-    // system 头只由表面位置决定，避免隐藏或替换事件被误当前言
-    try {
-        const nodes = session?.surface?.nodes;
-        if (!Array.isArray(nodes) || nodes.length === 0) {
-            return undefined;
-        }
+    const nodes = session?.surface?.nodes;
+    if (!Array.isArray(nodes) || nodes.length === 0) return undefined;
 
-        const first = nodes[0];
-        if (first === undefined || first === null) {
-            return undefined;
-        }
-
-        // 数字序号和带 seq 的节点都必须通过宿主回读，才能得到真实事件
-        let event;
-        if (typeof first === "number") {
-            if (typeof session.eventAt !== "function") {
-                return undefined;
-            }
-            event = session.eventAt(first);
-        } else if (typeof first === "object") {
-            if (first.seq !== undefined && first.seq !== null) {
-                if (typeof session.eventAt !== "function") {
-                    return undefined;
-                }
-                event = session.eventAt(first.seq);
-            } else if (first.type !== undefined) {
-                event = first;
-            } else {
-                return undefined;
-            }
-        } else {
-            return undefined;
-        }
-
-        // 只允许真正的 system/message 事件作为摘要前言
-        if (event === undefined || event === null || event.type !== "system/message") {
-            return undefined;
-        }
-
-        return event;
-    } catch {
-        return undefined;
-    }
+    const first = nodes[0];
+    const event = typeof first === "number"
+        ? eventAt(session, first)
+        : first !== null && typeof first === "object" && first.seq !== undefined && first.seq !== null
+            ? eventAt(session, first.seq)
+            : first !== null && typeof first === "object" && typeof first.type === "string"
+                ? first
+                : undefined;
+    return event?.type === "system/message" ? event : undefined;
 }
 
-/**
- * 将消息内容以兼容文本形式提取，兼容 user 与 assistant/tool 的两种 data 形状。
- * @param {object} event 会话事件
- * @returns {string} 文本和工具调用描述；不可提取时为空字符串
- */
-function eventText(event) {
-    // 两种宿主形状都尝试读取，防止 user 或 assistant/tool 一侧内容全丢
-    try {
-        const data = event?.data ?? {};
-        const content = data.content ?? data.message?.content;
-        if (typeof content === "string") {
-            return content;
-        }
-        if (!Array.isArray(content)) {
-            return "";
-        }
-
-        const pieces = [];
-        for (const block of content) {
-            if (block === null || typeof block !== "object") {
-                continue;
-            }
-            // text 块：非字符串即无效块，卫语句跳过，不靠三元兜底
-            if (block.type === "text") {
-                if (typeof block.text !== "string") {
-                    continue;
-                }
-                if (block.text.length > 0) {
-                    pieces.push(block.text);
-                }
-                continue;
-            }
-            if (block.type !== "tool-call") {
-                continue;
-            }
-
-            // tool-call 块：工具名与参数是「做过什么」的唯一线索，必须保留。
-            // 字段缺失时用卫语句收敛默认值，不写成三元
-            let name = block.name;
-            if (typeof name !== "string" || name.length === 0) {
-                name = "unknown";
-            }
-
-            let args = block.arguments;
-            if (typeof args !== "string") {
-                args = "";
-            }
-
-            pieces.push(`[调用工具 ${name}] ${args}`);
-        }
-
-        return pieces.join("\n");
-    } catch {
-        return "";
+/** 从宿主事件日志读取一个应参与摘要的 seq。 */
+function eventAt(session, seq) {
+    if (typeof session.eventAt !== "function") {
+        throw new Error(`tiered-compaction: 摘要输入无法读取 seq=${seq}：session.eventAt 不可用`);
     }
+    let event;
+    try {
+        event = session.eventAt(seq);
+    } catch (error) {
+        throw inputError(seq, undefined, "session.eventAt 抛错", error);
+    }
+    if (event === undefined || event === null) {
+        throw inputError(seq, undefined, "事件不存在");
+    }
+    return event;
 }
 
-/**
- * 从事件优先读取 data.role，再依据事件类型推断消息角色。
- * @param {object} event 会话事件
- * @returns {string} 角色名称
- */
-function roleOf(event) {
-    // data.message.role 与事件类型共同覆盖不同宿主消息布局
-    try {
-        const data = event?.data ?? {};
-        if (typeof data.role === "string") {
-            return data.role;
-        }
-        if (typeof data.message?.role === "string") {
-            return data.message.role;
-        }
-        if (typeof event?.type === "string") {
-            const role = event.type.split("/")[0];
-            if (role.length > 0) {
-                return role;
-            }
-        }
-    } catch {
-        return "user";
+/** 当前宿主投影会把空 system/developer/assistant 消息映射为 null。 */
+function isKnownEmptyMessage(event) {
+    if (!["system/message", "developer/message", "assistant/message"].includes(event?.type)) return false;
+    return Array.isArray(event?.data?.message?.content) && event.data.message.content.length === 0;
+}
+
+/** basic 仅投影已知消息事件；类型以 /message 结尾的未知事件不得静默丢失。 */
+function isNonMessageEvent(event) {
+    if (MESSAGE_EVENT_TYPES.has(event?.type)) return false;
+    if (typeof event?.type === "string" && event.type.endsWith("/message")) return false;
+    return event?.surfaceOp === undefined;
+}
+
+/** 在错误文本中保留原始事件定位，供失败事务与日志诊断。 */
+function inputError(seq, type, reason, cause) {
+    const eventType = typeof type === "string" ? type : "unknown";
+    const error = new Error(`tiered-compaction: 摘要输入无法保真重建 seq=${seq} type=${eventType}：${reason}`, cause === undefined ? undefined : { cause });
+    error.code = "SUMMARY_INPUT_INVALID";
+    return error;
+}
+
+/** 规范化宿主投影，但不改写消息字段或 content block 的顺序和值。 */
+function normalizeMessage(message, event) {
+    const seq = event?.seq ?? "unknown";
+    const type = event?.type;
+    if (message === null || typeof message !== "object" || Array.isArray(message)) {
+        throw inputError(seq, type, "投影结果不是消息对象");
     }
 
-    return "user";
+    const inferredRole = type === "tool/result" ? "tool" : type?.split("/")[0];
+    const role = message.role ?? inferredRole;
+    if (typeof role !== "string" || role.length === 0) {
+        throw inputError(seq, type, "role 缺失或无效");
+    }
+
+    let content = message.content;
+    if (typeof content === "string") {
+        content = [{ type: "text", text: content }];
+    } else if (Array.isArray(content)) {
+        for (const [index, block] of content.entries()) {
+            if (block === null || typeof block !== "object" || Array.isArray(block) || typeof block.type !== "string") {
+                throw inputError(seq, type, `content[${index}] 不是有效内容块`);
+            }
+        }
+    } else {
+        throw inputError(seq, type, "content 缺失或不是字符串/内容块数组");
+    }
+
+    return { ...message, role, content };
 }
 
 /**
@@ -226,119 +165,92 @@ function roleOf(event) {
  * @returns {{messages: object[], tools?: unknown}} 结构化摘要输入
  */
 function buildStructuredInput(session, shadowedSeqs) {
-    // 工具定义不是消息投影的前提，header 异常时只省略 tools
-    let tools;
-    try {
-        if (typeof session.requestHeader === "function") {
-            const header = session.requestHeader();
-            if (header !== undefined && header !== null) {
-                tools = header.tools;
-            }
-        }
-    } catch {
-        tools = undefined;
-    }
-
+    const header = typeof session.requestHeader === "function" ? session.requestHeader() : undefined;
     const messages = [];
 
-    // system 头按表面首节点识别，并固定排在选区消息之前
+    // system 头按宿主/basic 顺序置前，且选区包含它时只出现一次。
     const headEvent = systemHeadEventOf(session);
-    if (headEvent !== undefined && headEvent !== null) {
-        const system = session.deriveEventMessage(headEvent);
-        if (system !== null) {
-            messages.push(system);
-        }
+    if (headEvent !== undefined && headEvent.type === "system/message") {
+        const system = projectMessage(session, headEvent);
+        if (system !== null) messages.push(system);
     }
 
-    // 按选区顺序逐条投影；宿主以 null 明确表示该事件不产生消息
     for (const seq of shadowedSeqs) {
-        let event;
-        try {
-            if (typeof session.eventAt !== "function") {
-                continue;
-            }
-            event = session.eventAt(seq);
-        } catch {
-            continue;
-        }
-        if (event === undefined || event === null) {
-            continue;
-        }
-
-        // system 头已在上面单独投影过一次；选区若恰好包含 0 号节点，
-        // 这里再投影一次就会让 system 消息出现两次，破坏前缀顺序（KV 缓存就此失效）。
-        // 用 seq 比对而不是对象比对，因为 eventAt 每次返回的可能是不同包装对象。
-        if (headEvent !== undefined && headEvent !== null && event.seq === headEvent.seq) {
-            continue;
-        }
-
-        const message = session.deriveEventMessage(event);
-        if (message === null) {
-            continue;
-        }
-        messages.push(message);
+        const event = eventAt(session, seq);
+        if (headEvent !== undefined && event.seq === headEvent.seq) continue;
+        const message = projectMessage(session, event);
+        if (message !== null) messages.push(message);
     }
 
-    // tools 缺失时不创建该键，以保持宿主请求对象的键语义
     const input = { messages };
-    if (tools !== undefined) {
-        input.tools = tools;
-    }
+    if (header?.tools !== undefined) input.tools = header.tools;
     return input;
 }
 
+/** 按真实宿主 deriveEventMessage 语义投影一条消息，并 fail-closed 校验。 */
+function projectMessage(session, event) {
+    if (isNonMessageEvent(event)) return null;
+    if (!MESSAGE_EVENT_TYPES.has(event?.type)) {
+        throw inputError(event?.seq ?? "unknown", event?.type, "未知事件带有 surfaceOp，不能安全排除");
+    }
+
+    let projected;
+    try {
+        projected = session.deriveEventMessage(event);
+    } catch (error) {
+        throw inputError(event?.seq ?? "unknown", event?.type, "session.deriveEventMessage 抛错", error);
+    }
+    if (projected === null && isKnownEmptyMessage(event)) return null;
+    if (projected === null || projected === undefined) {
+        throw inputError(event?.seq ?? "unknown", event?.type, "宿主投影未产生应有消息");
+    }
+    return normalizeMessage(projected, event);
+}
+
+
 /**
- * 将事件内容拼成单条 user 文本消息，作为结构化投影不可用时的兜底。
- * @param {object} session 会话对象
- * @param {number[]} shadowedSeqs 要纳入摘要的事件序号
- * @returns {{messages: object[]}} 文本摘要输入
+ * 老宿主缺投影 API 时按当前 Session 事件 schema 重建结构化消息。
+ * 不支持的应纳入事件必须抛错，不得跳过后继续摘要。
  */
-function buildTextInput(session, shadowedSeqs) {
-    const parts = [];
-
-    // system 头单独置前，避免与选区内容混淆
+function buildEventInput(session, shadowedSeqs, logger) {
+    const header = typeof session.requestHeader === "function" ? session.requestHeader() : undefined;
+    const messages = [];
     const headEvent = systemHeadEventOf(session);
-    if (headEvent !== undefined && headEvent !== null) {
-        const text = eventText(headEvent);
-        if (text.length > 0) {
-            parts.push(`${roleOf(headEvent)}: ${text}`);
-        }
+
+    if (headEvent !== undefined && headEvent.type === "system/message") {
+        const system = fallbackMessageOf(headEvent, logger);
+        if (system !== null) messages.push(system);
     }
 
-    // 逐条提取选区文本；eventAt 单条异常只跳过该项
     for (const seq of shadowedSeqs) {
-        let event;
-        try {
-            if (typeof session.eventAt !== "function") {
-                continue;
-            }
-            event = session.eventAt(seq);
-        } catch {
-            continue;
-        }
-        if (event === undefined || event === null) {
-            continue;
-        }
-        if (headEvent !== undefined && event.seq === headEvent.seq) {
-            continue;
-        }
-
-        const text = eventText(event);
-        if (text.length === 0) {
-            continue;
-        }
-        parts.push(`${roleOf(event)}: ${text}`);
+        const event = eventAt(session, seq);
+        if (headEvent !== undefined && event.seq === headEvent.seq) continue;
+        const message = fallbackMessageOf(event, logger);
+        if (message !== null) messages.push(message);
     }
 
-    // 没有任何可提取内容时不制造空消息
-    if (parts.length === 0) {
-        return { messages: [] };
+    const input = { messages };
+    if (header?.tools !== undefined) input.tools = header.tools;
+    return input;
+}
+
+/** 从已知事件布局无损构造消息，其他内容留在原始块中。 */
+function fallbackMessageOf(event, logger) {
+    if (isNonMessageEvent(event)) return null;
+    if (!MESSAGE_EVENT_TYPES.has(event?.type)) {
+        throw inputError(event?.seq ?? "unknown", event?.type, "未知事件类型，无法判定其是否应进入消息历史");
     }
 
-    return {
-        messages: [{ role: "user", content: [{ type: "text", text: parts.join("\n\n") }] }],
-    };
+    const data = event.data;
+    const source = event.type === "user/message" ? data : data?.message;
+    if (source === null || typeof source !== "object" || Array.isArray(source)) {
+        throw inputError(event.seq, event.type, "消息对象缺失或布局未知");
+    }
+
+    const message = normalizeMessage(source, event);
+    if (message.content.length === 0 && isKnownEmptyMessage(event)) return null;
+    return message;
 }
 
 /** 测试专用工具；不属于运行时公开入口。 */
-export const __test = { warnOnce, resetWarnedState, roleOf, eventText };
+export const __test = { resetWarnedState, inputError };

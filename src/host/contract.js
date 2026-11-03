@@ -28,7 +28,7 @@ import {
 import { compactCheckpointSource, sessionFormatVersion } from "../session/checkpoint-source.js";
 // beta6：配对检查改用插件自带实现（外部解析可能落到不兼容的 CLI 版 dsh-compaction）
 import { toolPairingBalancedBefore, toolPairingBalancedAfter } from "../session/tool-pairing.js";
-import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler, errorChain } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, BlockAssembler, errorChain, LlmError, contentHasImage } from "@deepseek-ai/dsh-llm";
 import z from "@deepseek-ai/schemastery";
 import { pressureAction } from "../core/soft-pressure.js";
 import { HealthReporter, collectHealth } from "../guard/health-check.js";
@@ -410,37 +410,35 @@ const CHECKPOINT_PREAMBLE =
     "This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.";
 
 /**
- * 把摘要文本包进与 basic 相同的 checkpoint 框架（basic `frameSummary` 的文本版）。
+ * 把摘要块数组包进与 basic 相同的 checkpoint 框架（对齐 basic:344-356 `frameSummary`）。
  *
- * 为什么必须是三段而不是一段：投影层靠首段的 `SUMMARY_OPEN_TAG` 与末段的
- * `SUMMARY_CLOSE_TAG` 识别「这条 user 消息是检查点」。旧实现只拼了前缀文本、
+ * 为什么必须是「head + 原样展开 + tail」三段式：投影层靠首段的 `SUMMARY_OPEN_TAG`
+ * 与末段的 `SUMMARY_CLOSE_TAG` 识别「这条 user 消息是检查点」。旧实现只拼了前缀文本、
  * 从不写闭标签，检查点在续做时不会被当成已确立背景——等于每次续做都重新读
- * 一遍原文的摘要，压缩效果打折。basic:344-356 的 `frameSummary` 就是三段。
+ * 一遍原文的摘要，压缩效果打折。
  *
- * @param {string} summary 纯文本摘要正文
- * @returns {Array<{type: "text", text: string}>} 三段检查点内容
- * @throws {Error} 正文为空时抛错——空检查点会覆盖原文，宁可失败
+ * 结构化铁律（2026-11-02）：中段**原样展开**摘要块数组——每个 text block 的
+ * 顺序与边界分毫不动，不合并、不拼串。单块 string 时代「拆块会改变模型看到的
+ * 文本形态」的顾虑不再成立：块本来就是模型输出的原生形态。
+ *
+ * @param {Array<{type: "text", text: string}>} summaryBlocks 摘要 text 块数组
+ * @returns {Array<{type: "text", text: string}>} 检查点内容（head + blocks + tail）
+ * @throws {Error} 块数组为空时抛错——空检查点会覆盖原文，宁可失败
  */
-function frameSummaryText(summary) {
-    // 卫语句：没有正文就不构造检查点，交给上层按失败处理（绝不能提交空检查点）
-    if (typeof summary !== "string") {
-        throw new Error("tiered-compaction: 摘要正文不是字符串，拒绝构造检查点");
-    }
-
-    if (summary.length === 0) {
-        throw new Error("tiered-compaction: 摘要正文为空，拒绝构造检查点");
+function frameSummaryText(summaryBlocks) {
+    // 卫语句：没有正文块就不构造检查点，交给上层按失败处理（绝不能提交空检查点）
+    if (!Array.isArray(summaryBlocks) || summaryBlocks.length === 0) {
+        throw new Error("tiered-compaction: 摘要块数组为空，拒绝构造检查点");
     }
 
     // 首段固定前言 + 开标签：投影层据此认定检查点开始
     const head = { type: "text", text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` };
 
-    // 中段原样承载摘要正文，不拆块、不加工——拆块会改变模型看到的文本形态
-    const body = { type: "text", text: summary };
-
     // 末段闭标签：缺了它，检查点没有结束边界，投影层无法闭合识别
     const tail = { type: "text", text: SUMMARY_CLOSE_TAG };
 
-    return [head, body, tail];
+    // 中段原样展开：块顺序与边界就是模型输出的原生形态，零加工
+    return [head, ...summaryBlocks, tail];
 }
 
 /**
@@ -449,6 +447,11 @@ function frameSummaryText(summary) {
  * @returns {number} 估算 token 数
  */
 const estimateTextTokens = (text) => Math.ceil(text.length / 4);
+
+/** D21：检查点 head、每个 summary block 与 tail 分别估算后累加。 */
+function estimateSummaryBlocksTokens(blocks) {
+    return blocks.reduce((total, block) => total + estimateTextTokens(block.text ?? ""), 0);
+}
 
 /**
  * 估算一条消息的 token（与 `estimateTextTokens` 同口径，字符数/4）。
@@ -528,27 +531,113 @@ function estimateMessageTokens(message) {
  */
 function estimateInputTokens(input) {
     const messages = input?.messages;
-
-    if (!Array.isArray(messages)) {
-        return 0;
-    }
+    if (!Array.isArray(messages)) return 0;
 
     let total = 0;
     let skippedHead = false;
-
     for (const message of messages) {
-        // 只跳过消息列表最前面那一条 system 头（选外内容）；
-        // 选区内部若出现 system，它确实会被压缩掉，必须计入分母
-        if (skippedHead === false && message !== null && typeof message === "object" && message.role === "system") {
+        if (!skippedHead && message !== null && typeof message === "object" && message.role === "system") {
             skippedHead = true;
             continue;
         }
-
         total += estimateMessageTokens(message);
     }
-
     return total;
 }
+function normalizeRequestMessage(message, index) {
+    if (message === null || typeof message !== "object" || Array.isArray(message)) {
+        throw new ManualCompactionError("summary", `tiered-compaction: 摘要输入 messages[${index}] 不是消息对象`);
+    }
+    if (typeof message.role !== "string" || message.role.length === 0) {
+        throw new ManualCompactionError("summary", `tiered-compaction: 摘要输入 messages[${index}].role 无效`);
+    }
+    if (!Array.isArray(message.content)) {
+        throw new ManualCompactionError("summary", `tiered-compaction: 摘要输入 messages[${index}].content 必须为 block[]`);
+    }
+    for (const [blockIndex, block] of message.content.entries()) {
+        if (block === null || typeof block !== "object" || Array.isArray(block) || typeof block.type !== "string") {
+            throw new ManualCompactionError("summary", `tiered-compaction: 摘要输入 messages[${index}].content[${blockIndex}] 无效`);
+        }
+    }
+    return { ...message, content: message.content };
+}
+
+/**
+ * 将唯一兼容输入（旧 string、裸 text block[]）或 basic 同形 envelope
+ * 归一为 canonical SummaryResult，禁止静默过滤、拼接或 stringify。
+ */
+function normalizeSummaryResult(value, target) {
+    let summary;
+    let rawOutput;
+    let envelope;
+
+    if (typeof value === "string") {
+        summary = [{ type: "text", text: value }];
+    } else if (Array.isArray(value)) {
+        summary = value;
+    } else if (value !== null && typeof value === "object") {
+        envelope = value;
+        if (Object.hasOwn(value, "summaryBlocks")) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果不得同时包含 summary 与 summaryBlocks");
+        }
+        summary = value.summary;
+        rawOutput = value.rawOutput;
+    } else {
+        throw new ManualCompactionError("summary", "tiered-compaction: 摘要实现返回了不支持的形状");
+    }
+
+    if (!Array.isArray(summary) || summary.length === 0) {
+        throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果缺少非空 summary block[]");
+    }
+    if (rawOutput !== undefined) {
+        if (!Array.isArray(rawOutput)) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果 rawOutput 必须为 block[]");
+        }
+        validateOutputBlocks(rawOutput, "rawOutput", false);
+        if (contentHasImage(rawOutput)) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要含 image 输出，拒绝提交");
+        }
+    }
+    validateOutputBlocks(summary, "summary", true);
+    if (contentHasImage(summary)) {
+        throw new ManualCompactionError("summary", "tiered-compaction: 摘要含 image 输出，拒绝提交");
+    }
+    if (!summary.some((block) => block.text.trim().length > 0)) {
+        throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果为空，拒绝提交");
+    }
+
+    const result = {
+        summary,
+        provider: envelope?.provider ?? target.provider,
+        model: envelope?.model ?? target.model,
+        maxTokens: envelope?.maxTokens ?? RESERVE_TOKENS,
+    };
+    if (rawOutput !== undefined) result.rawOutput = rawOutput;
+    if (envelope?.llmStreamCall !== undefined) {
+        if (typeof envelope.llmStreamCall !== "boolean") {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果 llmStreamCall 必须为 boolean");
+        }
+        result.llmStreamCall = envelope.llmStreamCall;
+    }
+    if (envelope?.usage !== undefined) result.usage = envelope.usage;
+    return result;
+}
+
+/** 校验摘要块，不丢弃任何块。 */
+function validateOutputBlocks(blocks, field, textOnly) {
+    for (const [index, block] of blocks.entries()) {
+        if (block === null || typeof block !== "object" || Array.isArray(block) || typeof block.type !== "string") {
+            throw new ManualCompactionError("summary", `tiered-compaction: ${field}[${index}] 不是有效内容块`);
+        }
+        if (block.type === "text" && typeof block.text !== "string") {
+            throw new ManualCompactionError("summary", `tiered-compaction: ${field}[${index}].text 无效`);
+        }
+        if (textOnly && (block.type !== "text" || typeof block.text !== "string")) {
+            throw new ManualCompactionError("summary", `tiered-compaction: ${field}[${index}] 必须是 text block`);
+        }
+    }
+}
+
 
 /**
  * 配置加载期校验（P4-1）。
@@ -1247,7 +1336,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
      * @param {{messages: object[], tools?: unknown}|string} input 结构化摘要输入（旧调用方可继续传字符串）
      * @param {object} agent 宿主 agent（提供会话路由与 session）
      * @param {AbortSignal|undefined} signal 可选取消信号
-     * @returns {Promise<{summary: string, provider: string, model: string, maxTokens: number}>}
+     * @returns {Promise<{summary: Array<{type: "text", text: string}>, provider: string, model: string, maxTokens: number, rawOutput?: object[], usage?: object}>}
+     *   summary 是唯一规范摘要字段；旧自定义 summarizeFn 返回的 string 只在此边界包装为单个 text block。
      * @throws {ManualCompactionError} 路由缺失、实现缺失、输入不合法或摘要为空时
      */
     async summarize(input, agent, signal) {
@@ -1268,22 +1358,25 @@ export class TieredCompactionEngineService extends CompactionEngine {
             throw new ManualCompactionError("summary", "tiered-compaction: 摘要输入缺失");
         }
 
-        // 入参形态归一：历史调用方（含 d17 回归用例）按旧签名传字符串进来。
-        // 这里把字符串包成一条 user 消息，让新旧两种形态共用同一条组装逻辑——
-        // 兼容层只做形状转换，不复制组装逻辑，避免两套路径日后各自跑偏。
+        // 旧调用方传入字符串时只在入口包装为一条 user text block。
         let normalized = input;
         if (typeof input === "string") {
             normalized = { messages: [{ role: "user", content: [{ type: "text", text: input }] }] };
         }
 
-        // 卫语句④：没有消息就没有可摘要的对象。空数组也拦——
-        // 真正发出去会得到一段凭空编造的摘要，然后覆盖掉真实原文
         if (!Array.isArray(normalized.messages) || normalized.messages.length === 0) {
             throw new ManualCompactionError("summary", "tiered-compaction: 摘要输入不含任何消息");
         }
 
-        // 重放会话前缀，末尾追加一条压缩指令：顺序与原版一致，
-        // 前缀越靠前越可能命中 provider 的 KV 缓存
+        normalized = {
+            messages: normalized.messages.map((message, index) => normalizeRequestMessage(message, index)),
+            ...(normalized.tools === undefined ? {} : { tools: normalized.tools }),
+        };
+        if (normalized.tools !== undefined && !Array.isArray(normalized.tools)) {
+            throw new ManualCompactionError("summary", "tiered-compaction: 摘要输入 tools 必须为数组");
+        }
+
+        // 末尾追加独立压缩指令消息；不与历史块拍平合并。
         const messages = [
             ...normalized.messages,
             { role: "user", content: [{ type: "text", text: COMPACTION_INSTRUCTION }] },
@@ -1310,7 +1403,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
 
         // 工具历史是复用 KV 缓存的关键：请求头里会重放这次会话用过的工具签名
         if (session !== undefined && session !== null && typeof session.toolHistory === "function") {
-            request.toolHistory = session.toolHistory();
+            const toolHistory = session.toolHistory();
+            if (toolHistory !== undefined) request.toolHistory = toolHistory;
         }
 
         // 会话标识同样参与缓存键：同一会话的连续请求才可能命中同一段缓存
@@ -1335,20 +1429,8 @@ export class TieredCompactionEngineService extends CompactionEngine {
         this.ctx?.logger?.info(
             `tiered-compaction: 第 4 层摘要请求 → ${target.provider}/${target.model}（purpose=compaction，可能被路由插件改道）`
         );
-        const summary = await summarizeFn(request, normalized, signal);
-
-        // 空摘要拒绝提交：写一条空检查点会覆盖掉真实原文，比不压更糟。
-        //
-        // 口径用 trim()（对齐原版 basic:331-333 的 `block.text.trim().length > 0`）：
-        // 只判 length === 0 会放过纯空白（"   " / "\n\n"），
-        // 而空白检查点提交后，续做的模型看到的是「有检查点但什么也没说」——
-        // 比没有检查点更坏：它以为上下文已确立，实际信息全丢了。
-        // 实测：旧口径下 "   "、" \t \n " 三种纯空白摘要全部放行。
-        if (summary === undefined || summary === null || summary.trim().length === 0) {
-            throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果为空，拒绝提交");
-        }
-
-        return { summary, provider: target.provider, model: target.model, maxTokens: RESERVE_TOKENS };
+        const rawResult = await summarizeFn(request, normalized, signal);
+        return normalizeSummaryResult(rawResult, target);
     }
 
     /* ---------------- 自动钩子（照 basic 写法） ---------------- */
@@ -1754,7 +1836,7 @@ export class TieredCompactionEngineService extends CompactionEngine {
 
             // 摘要是一次 LLM 往返，期间会话可能已经变了。记下提交前需要校验的快照。
             const prepared = { start, end, shadowedSeqs: [...shadowedSeqs] };
-            const { summary, provider, model, maxTokens } = await this.summarize(summaryInput, agent, signal);
+            const { summary, rawOutput, llmStreamCall, provider, model, maxTokens, usage } = await this.summarize(summaryInput, agent, signal);
 
             // 取消检查（交叉审计修复，2026-10-27，gpt-6-astra 报、我实跑确认）。
             //
@@ -1775,8 +1857,10 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // 期间仍可能被取消。
             signal?.throwIfAborted();
 
-            // C9(a)（beta3 审计）：按**加框后**的检查点文本估算，框架约 80 token 也要算进去
-            const framedEstimate = estimateTextTokens(frameSummaryText(summary).map((block) => block.text ?? "").join(""));
+            // C9(a)（beta3 审计）：按**加框后**的检查点内容估算，框架约 80 token 也要算进去。
+            // 结构化口径：直接按块数组逐块累计，不再先 join 成串再算（去拍平）。
+            const framedContent = frameSummaryText(summary);
+            const framedEstimate = estimateSummaryBlocksTokens(framedContent);
             if (framedEstimate >= estimate) {
                 throw new Error(`summary is not smaller than the shadowed content (${framedEstimate} estimated framed tokens >= ${estimate})`);
             }
@@ -1786,15 +1870,18 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 // 漏掉会让 /compact 后的会话重开时报 "has no matching compaction/start"（对齐 basic）
                 ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
                 summary,
+                ...(rawOutput === undefined ? {} : { rawOutput }),
+                ...(llmStreamCall === undefined ? {} : { llmStreamCall }),
                 shadowedRange: { start, end },
                 shadowedSeqs: [...shadowedSeqs],
                 shadowedTokenCount: estimate,
                 provider,
                 model,
-                maxTokens,
+                ...(maxTokens === undefined ? {} : { maxTokens }),
+                ...(usage === undefined ? {} : { usage }),
             });
             const checkpointMessage = createUserMessage({
-                content: frameSummaryText(summary),
+                content: framedContent,
                 source: compactCheckpointSource(compactionId, sourceCommandId, sessionFormatVersion(session)),
             });
             session.append("user/message", checkpointMessage, {
@@ -1846,6 +1933,9 @@ export class TieredCompactionEngineService extends CompactionEngine {
                 throw new ManualCompactionError("cancelled", "compaction was cancelled", { cause: error });
             }
             if (error instanceof ManualCompactionError) throw error;
+            if (error?.code === "SUMMARY_INPUT_INVALID") {
+                throw new ManualCompactionError("summary", error.message, { cause: error });
+            }
             throw new ManualCompactionError("summary", "tiered-compaction 事务失败", { cause: error });
         }
     }
@@ -1999,13 +2089,29 @@ export class TieredCompactionEngineService extends CompactionEngine {
             // 这里照抄同一判定口径。
             const failure = finishErrorOf(assembler.finish);
             if (failure !== undefined) throw failure;
-            const blocks = assembler.blocks?.() ?? [];
-            return blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+            const rawOutput = assembler.blocks?.() ?? [];
+            if (!Array.isArray(rawOutput)) {
+                throw new LlmError("compaction summary produced invalid raw output", "INVALID_OUTPUT");
+            }
+            validateOutputBlocks(rawOutput, "rawOutput", false);
+            if (contentHasImage(rawOutput)) {
+                throw new LlmError("compaction summary cannot contain image output", "UNSUPPORTED_CONTENT");
+            }
+            const summary = rawOutput.filter((block) => block.type === "text");
+            return {
+                summary,
+                rawOutput,
+                llmStreamCall: true,
+                provider: options.provider,
+                model: options.model,
+                maxTokens: options.maxTokens,
+                ...(assembler.usage === undefined ? {} : { usage: assembler.usage }),
+            };
         };
     }
 }
 
 /** 测试用探测面：暴露内部纯函数（生产代码不消费）。 */
-export const __test = { contextWindowOf, textOfEventForSummary, estimateInputTokens };
+export const __test = { contextWindowOf, textOfEventForSummary, estimateInputTokens, estimateSummaryBlocksTokens };
 
 

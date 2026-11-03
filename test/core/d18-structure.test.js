@@ -343,7 +343,7 @@ test("A7 宿主无 deriveEventMessage 时降级并记录 warn 恰好一次", () 
     assert.equal(warnRecords.length, 1, "多次降级调用期间 warn 必须去重，仍然保持恰好 1 次");
 });
 
-test("A8 兜底文本模式包含所有事件内容", () => {
+test("A8 兜底零损重建：按原角色与原样 content 块输出，不拍平为拼接串", () => {
     __test.resetWarnedState();
 
     const events = [
@@ -355,12 +355,12 @@ test("A8 兜底文本模式包含所有事件内容", () => {
         {
             seq: 1,
             type: "assistant/message",
-            data: { message: { content: [{ type: "text", text: "模型核心解答-BETA-888" }] } },
+            data: { message: { role: "assistant", content: [{ type: "text", text: "模型核心解答-BETA-888" }] } },
         },
         {
             seq: 2,
             type: "tool/result",
-            data: { message: { content: [{ type: "text", text: "工具输出摘要-GAMMA-777" }] } },
+            data: { message: { role: "tool", content: [{ type: "text", text: "工具输出摘要-GAMMA-777" }] } },
         },
     ];
 
@@ -377,20 +377,69 @@ test("A8 兜底文本模式包含所有事件内容", () => {
         throw new Error("A8 失败：降级模式未产出消息");
     }
 
-    const aggregatedText = result.messages[0].content[0].text;
-    if (typeof aggregatedText !== "string") {
-        throw new Error("A8 失败：降级拼接文本不是字符串");
-    }
+    // 结构化铁律（2026-11-02）：兜底也是结构化——三条事件重建为三条消息，
+    // 各带原 role 与原样 content 块，绝不再是「一条拼接字符串」
+    assert.equal(result.messages.length, 3, "三条事件必须重建为三条独立消息（不合并拍平）");
 
-    // 断言三条事件的正文字符串均被保留
-    assert.ok(aggregatedText.includes("用户核心问题-ALPHA-999"), "文本兜底必须保留第 1 条事件的内容");
-    assert.ok(aggregatedText.includes("模型核心解答-BETA-888"), "文本兜底必须保留第 2 条事件的内容");
-    assert.ok(aggregatedText.includes("工具输出摘要-GAMMA-777"), "文本兜底必须保留第 3 条事件的内容");
+    const [m0, m1, m2] = result.messages;
+    assert.equal(m0.role, "user");
+    assert.deepEqual(m0.content, [{ type: "text", text: "用户核心问题-ALPHA-999" }], "legacy user string 只在事件边界包装为单个 text block");
+
+    assert.equal(m1.role, "assistant");
+    assert.deepEqual(m1.content, [{ type: "text", text: "模型核心解答-BETA-888" }], "assistant 块数组原样保留");
+
+    assert.equal(m2.role, "tool");
+    assert.deepEqual(m2.content, [{ type: "text", text: "工具输出摘要-GAMMA-777" }], "tool 块数组原样保留");
+
+    // 拍平反断言：任何一条消息的 content 都不得是「多条事件拼成的长串」
+    for (const message of result.messages) {
+        const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+        assert.ok(!text.includes("BETA-888") || message.role === "assistant", "user/tool 消息里不得混入其他事件的正文（拼接即失败）");
+    }
 });
 
+test("A8b fallback 对未知或缺 content 的消息 fail-closed，并保留非消息事件过滤", () => {
+    const missingContent = makeStubSession({
+        events: [
+            { seq: 0, type: "user/message", data: { content: "保留的历史" } },
+            { seq: 1, type: "assistant/message", data: { message: { role: "assistant" } } },
+        ],
+        surfaceNodes: [0, 1],
+        withoutDerive: true,
+    });
+    assert.throws(
+        () => buildSummaryInput(missingContent, [0, 1], quietLogger),
+        (error) => error.code === "SUMMARY_INPUT_INVALID"
+            && /seq=1/.test(error.message)
+            && /assistant\/message/.test(error.message)
+            && /content/.test(error.message),
+    );
+
+    const unknownMessage = makeStubSession({
+        events: [{ seq: 2, type: "future/message", data: { content: "不能猜测布局" }, surfaceOp: "append" }],
+        surfaceNodes: [2],
+        withoutDerive: true,
+    });
+    assert.throws(
+        () => buildSummaryInput(unknownMessage, [2], quietLogger),
+        (error) => error.code === "SUMMARY_INPUT_INVALID"
+            && /seq=2/.test(error.message)
+            && /future\/message/.test(error.message),
+    );
+
+    const lifecycle = makeStubSession({
+        events: [
+            { seq: 3, type: "turn/start", data: { turn: 1 } },
+            { seq: 4, type: "user/message", data: { content: "有效消息" } },
+        ],
+        surfaceNodes: [3, 4],
+        withoutDerive: true,
+    });
+    const result = buildSummaryInput(lifecycle, [3, 4], quietLogger);
+    assert.deepEqual(result.messages, [{ role: "user", content: [{ type: "text", text: "有效消息" }] }]);
+});
 test("A9 空选区与非数组入参返回空 messages 且不抛错", () => {
     const session = makeStubSession({
-        events: [{ seq: 0, type: "user/message", data: { content: "无关消息" } }],
         surfaceNodes: [0],
     });
 
