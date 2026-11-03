@@ -6,6 +6,22 @@ English | [![简体中文](https://img.shields.io/badge/changelog-%E7%AE%80%E4%B
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.2-beta.1] - 2026-11-03
+
+**Release tier: beta (not fully tested)** — aligns the D21 structured-summary contract and adds the raw-output validation required by summary-event migration. Full automation in the target DSH environment and real-host acceptance are not complete.
+
+### Fixed
+
+- **D21 structured-summary contract**: keeps `summary: textBlock[]` across summary input, result, summary events, and replace checkpoints; wraps legacy custom strings into a single block only at the boundary; fails closed when an included message cannot be reconstructed losslessly.
+- **Summary migration validation**: requires `rawOutput: block[]` when `llmStreamCall === true`; rejects missing or non-block-array raw output before committing, so future format migrations can consume persisted events.
+- **Transaction fixtures**: replaces obsolete `tool/output` fixtures with paired assistant tool-call and matching `tool/result` events for the current structured-message contract.
+
+### Verification limits
+
+- The latest trusted full green run was at 2026-11-03 09:15: 377 tests, 375 passed, 0 failed, and 2 skipped. It predates commits `95bb773c` and `aefc9510`; those two commits have only received static review and have not been run through automated tests.
+- Since 09:27:15, the repository's `node_modules` junction has pointed to `G:\DSH Desktop\resources\app\node_modules`, where the shared target is missing the `@deepseek-ai` scope. The repository and host paths therefore reflect one missing scope in the same target, not two independent deletions, and the complete suite cannot currently run. No usable lockfile or `.pnpm` store was found under the host app. Confirm the DSH installation source before restoring dependencies and rerunning tests; no substitute link was created. The previously observed persistence export mismatch may also stem from this environment incident; its root cause is not yet established.
+- This beta is not fully tested and is intended for real-host verification. The actual UI renderer and ds-bot host end-to-end flow have not been verified.
+
 ## [0.4.1] - 2026-11-01
 
 **Release tier: stable** — includes the idle false-alarm fix from 0.4.1-beta.1 and adds summary progress. All automated tests pass (364 tests, 363 pass, 1 real-session check skipped by design).

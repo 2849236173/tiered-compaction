@@ -6,6 +6,22 @@
 本项目的重要变更都记录在此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.2-beta.1] - 2026-11-03
+
+**档位：beta / 尝新版（未完全测试通过）** —— 对齐 D21 结构化摘要契约，并补充摘要事件迁移所需的原始输出校验。本版本尚未完成目标 DSH 环境的完整自动化复验或实机验收。
+
+### 修复
+
+- **D21 结构化摘要契约**：统一摘要输入、结果、summary 事件与 replace checkpoint 的 `summary: textBlock[]` 结构；旧自定义 string 仅在边界包装为单块；对应纳入摘要但无法保真重建的消息失败关闭。
+- **摘要迁移校验**：`llmStreamCall === true` 时必须提供 `rawOutput: block[]`；缺失或不符合 block[] 契约时拒绝提交，避免未来格式迁移无法接受已写事件。
+- **事务测试夹具**：将过时 `tool/output` 替换为 assistant tool-call 与匹配 `tool/result` 事件配对，覆盖当前结构化消息事务。
+
+### 验证边界
+
+- 最近可信的全量绿测发生于 2026-11-03 09:15：377 项，375 通过、0 失败、2 跳过；该结果早于 `95bb773c` 与 `aefc9510`。这两个提交目前只有静态审查，尚未运行自动测试。
+- 09:27:15 后，仓库 `node_modules` junction 指向 `G:\DSH Desktop\resources\app\node_modules`，该共享目标中缺少 `@deepseek-ai` scope，因此仓库与宿主路径的缺失来自同一目标，完整测试套件当前无法运行。宿主 app 未发现可用 lockfile 或 `.pnpm` store；须先确认 DSH 安装源并恢复依赖后再复验，未创建替代链接。此前观察到的 persistence export mismatch 也可能由此环境问题造成，根因尚未定性。
+- 本版本为未完全测试通过的 beta，供实机验证；实际 UI renderer 与 ds-bot 宿主端到端 E2E 尚未验证。
+
 ## [0.4.1] - 2026-11-01
 
 **档位：正式版 / 稳定版** —— 包含 0.4.1-beta.1 的空闲误报修复，并新增摘要进度显示。自动化测试全部通过（364 项，363 通过，1 项需真实会话的校验按设计跳过）。
