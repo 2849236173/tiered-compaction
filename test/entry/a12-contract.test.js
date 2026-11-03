@@ -226,6 +226,31 @@ test("D21 F/G legacy string summarizeFn 进入事务后 event/checkpoint/result 
     assert.equal(Object.hasOwn(result, "summaryBlocks"), false);
     assert.equal(typeof summaryEvent.data.summary, "object");
 });
+test("D21 H 不支持摘要块形状失败关闭，不提交成功 summary 或 replace", async (t) => {
+    const invalidResults = [
+        [{ type: "image", attachment: { id: "image-1" } }],
+        [{ type: "text", text: 42 }],
+        { summary: "违规字符串 envelope", rawOutput: [] },
+    ];
+
+    let invalidIndex = 0;
+    const { svc } = await setup(t, {
+        window: 128000,
+        perNode: 2000,
+        summary: async () => invalidResults[invalidIndex++],
+    });
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史内容与必须保留的任务要求。".repeat(100) } },
+        { type: "user/message", data: { content: "历史进度和未完成事项。".repeat(100) } },
+        { type: "user/message", data: { content: "近端用户指令" } },
+    ]);
+
+    for (const invalidSummary of invalidResults) {
+        await assert.rejects(() => svc.compactRegion(session.surface.nodes[0], session.surface.nodes[1], stubAgent(session), undefined));
+        assert.equal(session.events.some((event) => event.type === "compaction/summary"), false);
+        assert.equal(session.events.some((event) => event.type === "user/message" && event.opts?.surfaceOp?.op === "replace"), false);
+    }
+});
 test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80% 驱逐事件 / 阈值摘要", async (t) => {
     const { ctx, svc, meter } = await setup(t, { window: 100000, perNode: 1000 });
     // 钩子必须已注册
