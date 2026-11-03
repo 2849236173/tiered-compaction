@@ -251,6 +251,43 @@ test("D21 H 不支持摘要块形状失败关闭，不提交成功 summary 或 r
         assert.equal(session.events.some((event) => event.type === "user/message" && event.opts?.surfaceOp?.op === "replace"), false);
     }
 });
+test("P2-1 llmStreamCall=true 必须提供 rawOutput block[]，否则事务失败关闭", async (t) => {
+    const validSummary = [{ type: "text", text: "有效摘要" }];
+    const invalidResults = [
+        {
+            value: { summary: validSummary, llmStreamCall: true },
+            error: /必须提供 rawOutput block\[\]/,
+        },
+        {
+            value: { summary: validSummary, rawOutput: "违规 rawOutput", llmStreamCall: true },
+            error: /rawOutput 必须为 block\[\]/,
+        },
+    ];
+    let invalidIndex = 0;
+    const { svc } = await setup(t, {
+        window: 128000,
+        perNode: 2000,
+        summary: async () => invalidResults[invalidIndex++].value,
+    });
+    const session = stubSession([
+        { type: "user/message", data: { content: "历史内容与必须保留的任务要求。".repeat(100) } },
+        { type: "user/message", data: { content: "历史进度和未完成事项。".repeat(100) } },
+        { type: "user/message", data: { content: "近端用户指令" } },
+    ]);
+
+    for (const { error } of invalidResults) {
+        await assert.rejects(
+            () => svc.compactRegion(session.surface.nodes[0], session.surface.nodes[1], stubAgent(session), undefined),
+            error,
+        );
+        assert.equal(session.events.some((event) => event.type === "compaction/summary"), false);
+        assert.equal(session.events.some((event) => event.type === "user/message" && event.opts?.surfaceOp?.op === "replace"), false);
+    }
+});
+
+/**
+ * A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80% 驱逐事件 / 阈值摘要
+ */
 test("A12② pressure 钩子路径：agent/pre-step 真实触发 70% 提醒 / 80% 驱逐事件 / 阈值摘要", async (t) => {
     const { ctx, svc, meter } = await setup(t, { window: 100000, perNode: 1000 });
     // 钩子必须已注册

@@ -589,6 +589,9 @@ function normalizeSummaryResult(value, target) {
     if (!Array.isArray(summary) || summary.length === 0) {
         throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果缺少非空 summary block[]");
     }
+    if (envelope?.llmStreamCall === true && rawOutput === undefined) {
+        throw new ManualCompactionError("summary", "tiered-compaction: llmStreamCall=true 时摘要结果必须提供 rawOutput block[]");
+    }
     if (rawOutput !== undefined) {
         if (!Array.isArray(rawOutput)) {
             throw new ManualCompactionError("summary", "tiered-compaction: 摘要结果 rawOutput 必须为 block[]");
