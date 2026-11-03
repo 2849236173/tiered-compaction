@@ -421,7 +421,8 @@ test("D28-6 host：真实事务提交后 l4Summaries 计 1 且进状态载荷；
     // 真实事务路径：compactNow 提交一次摘要事务 → summaryCount 从 0 变 1
     const session = stubSession([
         { type: "user/message", data: { content: "任务一" } },
-        { type: "tool/output", data: { content: "很长的工具输出".repeat(50) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair-1", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair-1", content: [{ type: "text", text: "很长的工具输出".repeat(50) }] } } },
         { type: "user/message", data: { content: "保留的近端消息" } },
     ]);
     const agent = stubAgent(session);

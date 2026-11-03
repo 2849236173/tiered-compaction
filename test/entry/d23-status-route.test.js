@@ -166,7 +166,8 @@ test("#1 真实事务提交后 lastCompaction 被单点记账", async (t) => {
     const { svc, ctx } = await setup(t, { window: 128000, perNode: 2000 });
     const session = stubSession([
         { type: "user/message", data: { content: "任务一" } },
-        { type: "tool/output", data: { content: "很长的工具输出".repeat(50) } },
+        { type: "assistant/message", data: { message: { role: "assistant", content: [{ type: "tool-call", id: "call-pair-1", name: "pwsh", arguments: "{}" }] } } },
+        { type: "tool/result", data: { message: { role: "tool", toolCallId: "call-pair-1", content: [{ type: "text", text: "很长的工具输出".repeat(50) }] } } },
         { type: "user/message", data: { content: "保留的近端消息" } },
     ]);
     const agent = stubAgent(session);
